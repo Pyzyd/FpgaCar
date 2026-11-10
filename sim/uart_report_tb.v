@@ -1,18 +1,20 @@
 // =============================================================================
-// uart_report_tb.v —— uart_report 自测（整行 ASCII 解码比对）
+// uart_report_tb.v —— uart_report 自测（整行 30 字节 ASCII 比对）
 // iverilog -g2012 -Wall -s uart_report_tb -o uart_report_tb.vvp \
 //          src/uart_tx.v src/uart_report.v sim/uart_report_tb.v && vvp uart_report_tb.vvp
 // -----------------------------------------------------------------------------
-// 验收：1) dist=123 -> "D=123cm\r\n"
-//       2) dist=7   -> "D=007cm\r\n"
-//       3) dist=16'hFFFF -> "D=---cm\r\n"
-//       4) dist=1234（超 999）-> "D=---cm\r\n"（钳位判无效前的近似，实际路径同一分支）
+// 行格式：D=xxxcm T=00011000 P=+02 O=0\r\n   （28 字符 + CRLF = 30 字节）
+// 验收：
+//   1) 123cm / 中间两路 / pos=+2 / 无障碍
+//   2) 无效距离 --- / 两端各一路 / pos=-7 / 有障碍
+//   3) 7cm / 全丢线 / pos=0 / 无障碍
 // =============================================================================
 `timescale 1ns/1ps
 
 module uart_report_tb;
 
     localparam real BIT_NS = 1.0e9 / 115200.0;
+    localparam integer MSG_LEN = 30;
 
     reg         clk = 1'b0;
     reg         rst_n = 1'b0;
@@ -20,11 +22,16 @@ module uart_report_tb;
 
     reg  [15:0] dist_cm = 16'd0;
     reg         dist_valid = 1'b0;
+    reg  [7:0]  line = 8'h00;
+    reg  signed [4:0] pos = 5'sd0;
+    reg         obstacle = 1'b0;
     wire        tx;
 
     uart_report #(.CLK_FREQ(24_000_000), .BAUD(115_200), .REPORT_EN(1)) u_dut (
         .clk(clk), .rst_n(rst_n),
-        .dist_cm(dist_cm), .dist_valid(dist_valid), .tx(tx)
+        .dist_cm(dist_cm), .dist_valid(dist_valid),
+        .line(line), .pos(pos), .obstacle(obstacle),
+        .tx(tx)
     );
 
     task rx_byte (output [7:0] b);
@@ -36,38 +43,45 @@ module uart_report_tb;
                 b[k] = tx;
                 if (k < 7) #(BIT_NS);
             end
-            #(BIT_NS * 0.5);
+            #(BIT_NS * 0.5);          // 停在停止位中点
         end
     endtask
 
-    // 收一整行（9 字节）并与期望比较
-    task check_line (input [15:0] d, input [8*9-1:0] exp_str);
+    // 送一帧并比对整行
+    task check_frame (
+        input [15:0] d,
+        input [7:0]  l,
+        input signed [4:0] p,
+        input        o,
+        input [8*MSG_LEN-1:0] exp_str
+    );
         reg [7:0] b;
+        reg [8*MSG_LEN-1:0] got;
         integer k;
-        reg [8*9-1:0] got;
         begin
             @(posedge clk); #1;
-            dist_cm = d;
+            dist_cm = d; line = l; pos = p; obstacle = o;
             dist_valid = 1'b1;
             @(posedge clk); #1;
             dist_valid = 1'b0;
 
             got = 0;
-            for (k = 0; k < 9; k = k + 1) begin
+            for (k = 0; k < MSG_LEN; k = k + 1) begin
                 rx_byte(b);
-                got = {got[8*8-1:0], b};
+                got = {got[8*(MSG_LEN-1)-1:0], b};
             end
 
             if (got !== exp_str)
-                $display("FAIL: dist=%0d line=\"%s\" (expect \"%s\")", d, got, exp_str);
+                $display("FAIL: dist=%0d line=%b pos=%0d o=%b\n      got \"%s\"\n      exp \"%s\"",
+                         d, l, p, o, got, exp_str);
             else
-                $display("PASS: dist=%0d -> \"%s\"", d, got);
+                $display("PASS: \"%s\"", got);
         end
     endtask
 
-    // 看门狗：任何握手错误都不至于让仿真无限挂住
+    // 看门狗
     initial begin
-        #20_000_000;
+        #60_000_000;
         $display("TIMEOUT: uart_report_tb hung");
         $finish;
     end
@@ -76,14 +90,14 @@ module uart_report_tb;
         #200 rst_n = 1'b1;
         #500;
 
-        // "D=123cm\r\n"
-        check_line(16'd123, {"D=123cm", 8'h0D, 8'h0A});
-        // "D=007cm\r\n"
-        check_line(16'd7,   {"D=007cm", 8'h0D, 8'h0A});
-        // "D=---cm\r\n"（无效）
-        check_line(16'hFFFF, {"D=---cm", 8'h0D, 8'h0A});
-        // "D=400cm\r\n"
-        check_line(16'd400, {"D=400cm", 8'h0D, 8'h0A});
+        check_frame(16'd123, 8'b0001_1000, 5'sd2, 1'b0,
+                    {"D=123cm T=00011000 P=+02 O=0", 8'h0D, 8'h0A});
+
+        check_frame(16'hFFFF, 8'b1000_0001, -5'sd7, 1'b1,
+                    {"D=---cm T=10000001 P=-07 O=1", 8'h0D, 8'h0A});
+
+        check_frame(16'd7, 8'b0000_0000, 5'sd0, 1'b0,
+                    {"D=007cm T=00000000 P=+00 O=0", 8'h0D, 8'h0A});
 
         $display("INFO: uart_report_tb done");
         $finish;

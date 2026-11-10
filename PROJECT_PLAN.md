@@ -41,8 +41,8 @@ FpgaCar/
   车载显示（0.96" OLED）、运动执行（TB6612FNG）、里程反馈（光电编码器 ×2）。
 - 做复位同步化（异步有效、同步释放）。
 - **所有输出给安全默认值**：电机待机、PWM=0、I2C 总线释放（SCL=1、SDA `_OE=0`）、UART 空闲、
-  LED[6:0] 实时显示 7 路循迹探头电平。
-- **一个 24 MHz 心跳计数器**：`heartbeat[23]` 驱动 LED[7] 约 0.7 s 慢闪。这不是演示代码，
+  LED[3:0] 显示消抖+极性统一后的循迹探头（见 §3.9）。
+- **一个 24 MHz 心跳计数器**：`heartbeat[23]` 驱动 **LED[5]**（板上只有 LED0~LED5 可用）约 0.7 s 慢闪。这不是演示代码，
   而是最终整车保留的诊断逻辑；同时它避免了 Efinity 对"全常量输出"顶层的报错
   `ERROR : Post-synthesis netlist has only vcc and gnd nets because all logic is eliminated.
   Legal, but will cause router to crash. [VDB-9009]`（纯常量骨架进不了布局布线）。
@@ -72,7 +72,8 @@ FpgaCar/
 | clk | GPIOL_11 | TL corner / 3.3V | 24MHz 晶振，conn_type=pll_clkin（加 PLL 后告警消失） |
 | rst_n | GPIOT_P_11 (User_IO35) | 2B / 1.8V | 上拉 |
 | track[0..7] | GPIOL_N_06/P_06/N_08/P_08/N_05/P_05/N_04/P_04 (User_IO2–9) | 1A / 1.8V | YB-MUX04 八路 |
-| hc_trig / hc_echo | GPIOL_N_12 / P_12 (User_IO10/11) | 1B / 1.8V | HC-SR04 |
+| hc_trig / hc_echo | GPIOL_N_12 / P_12 (User_IO10/11) | 1B / 1.8V | HC-SR04。**Echo 5V 必须两个电阻分压**：TXS0108E 的 B 侧绝对最大仅 4.6V，直连超规格 |
+| ir_l / ir_r | GPIOL_N_15 / P_15 (User_IO26/27) | 1B / 1.8V | E18-D80NK 红外光电开关 ×2（避障冗余，与 hc 近距取"或"；NPN 低有效=检测到）。**引脚已锁定并开 weak pullup**，传感器待买 |
 | i2c_scl / i2c_sda | GPIOL_N_13 / P_13 (User_IO12/13) | 1B / 1.8V | scl=output、sda=inout |
 | enc_la/lb/ra/rb | GPIOL_N_10/P_10/N_11/P_11 (User_IO14–17) | 1B / 1.8V | 光电编码器 |
 | ml_in1/in2/pwm | GPIOL_N_03/P_03/N_07 (User_IO18–20) | 1A / 1.8V | TB6612 左 |
@@ -81,7 +82,7 @@ FpgaCar/
 | led[0..5] | GPIOR_25/22/28/21/24/27 | BR corner / 3.3V | 板上 LED，低电平点亮（LED6/7 球让给 CMOS_D0/D1） |
 | uart_rx / uart_tx | GPIOT_N_16 / P_16 | 2B / 1.8V | CH340N 调试串口 |
 
-其余 User_IO25–33（GPIOL_N/P_15–18）预留；**User_IO0/1（GPIOL_N/P_02）不用**（与核心板 KEY 复用）。
+其余 User_IO25、28–33（GPIOL_N/P_14–18）预留；**User_IO0/1（GPIOL_N/P_02）不用**（与核心板 KEY 复用）。
 OV5640 走核心板专用 DVP 排针（`cmos_*` 网络，1.8V pclk），骨架未例化相机逻辑，暂未在 peri.xml 声明。
 
 **编译验证全链路已通过（2026-11-10）**：interface flow EXIT=0（生成 `outflow/FpgaCar.lpf` /
@@ -157,7 +158,51 @@ efx_run.bat --flow pgm FpgaCar.xml
 （I2C 主机 `start` 恒 0、相机流水线未接、UART 只做发送），等 `sccb_cfg` / `car_fsm` 接入后自然消失。
 `uart_report.v` 的 `div10u.q/i` 报 `EFX-0200 redundant signal` 是函数内临时变量被优化，正常。
 
-## 3. 编译状态：已全部跑通，无需再手工做第 1–5 步
+
+## 3.9 进度记录：2026-11-10 第三轮（A1 循迹采样 + A2 红外冗余）
+
+### A1 `src/track_line.v` —— 八路循迹采样（跑通，可上板）
+
+- 1 kHz 采样 + 连续 4 次一致才认账（消抖），异步输入两级同步。
+- 极性用参数 `ACTIVE_HIGH` 统一（默认 0 = 低电平压线，TCRT5000+LM393 模块常见）。
+- 位置用**加权质心**：权重 -7,-5,-3,-1,+1,+3,+5,+7，按压线探头个数归一化，
+  倒数查表（1024/n 再右移 10 位，含 +512 四舍五入）**不推断除法器**，只多 1 个乘法。
+- 输出 `line[7:0]` / `cnt[3:0]` / `on_line` / `lost` / `pos`（signed，-16..+16，正=线在右）。
+- tb 覆盖 6 项全 PASS：中间两路(cnt=2,pos=0)、最左(pos=-7)、最右(pos=+7)、
+  偏左三路(pos=-3，验证归一化+四舍五入)、全白(lost=1)、0.8 ms 毛刺被滤掉。
+
+### A1+ 调试串口升级为固定 30 字节行
+
+```
+D=123cm T=00011000 P=+02 O=0
+
+```
+
+`T=` 是 8 路压线位图（bit7..bit0 = track[7]..track[0]），`P=` 是归一化位置，
+`O=` 是障碍标志（超声波 ≤25 cm 或任一路红外触发）。一行约 2.6 ms，一帧 60 ms，发得完。
+
+**上板用法**：接上 YB-MUX04（8 根线到 User_IO2~9 + 5V/GND），把黑线在探头下从左往右推，
+看 `T=` 的 1 从哪个方向移动；若"压黑线显示 0"，把 `track_line` 的 `ACTIVE_HIGH` 改成 1 再重编。
+
+### A2 `ir_l` / `ir_r` —— 红外冗余（引脚已锁定，传感器待买）
+
+- `FpgaCar.peri.xml` 新增两个 GPIO 块：`ir_l`=GPIOL_N_15(User_IO26)、`ir_r`=GPIOL_P_15(User_IO27)，
+  均为 `input` + **weak pullup**（悬空时读 1 = 无障碍，避免误报）。
+- 顶层已例化融合逻辑：`obstacle = (dist_cm ≤ 25 cm) | ~ir_l | ~ir_r`。
+- 已用 `--flow interface` 重新生成 lpf，`pinout.csv` 确认 E2/E1 两个球分配成功。
+- 接线要求：E18-D80NK 的 OUT（黑线）接排针，**外部 4.7kΩ 上拉到 3.3V**（NPN 开集输出）。
+
+### 本轮踩的坑
+
+`FpgaCar.xml` 的 `<efx:design_file>` 列表**必须手工加新文件**，否则综合直接报
+`instantiating unknown module 'track_line' (VERI-1063)`。加 `src/*.v` 时别忘同步这里。
+
+### 编译实测（本轮）
+
+`interface` 数秒 → `map` 1.5 min（ADD 166 / LUT4 486 / FF 296 / DSP48 2）→
+`pnr` 2.5 min（setup slack **36.36 ns**）→ `pgm` 20 s。位流 19:50 生成。
+
+## 3.8 编译状态：已全部跑通，无需再手工做第 1–5 步
 
 以下步骤历史上走过的 GUI 路径保留作参考；当前工程已配置完成，直接打开即可编译下载：
 
@@ -225,9 +270,9 @@ HC-SR04 的 5 V→3.3 V 分压、电池与 DC-DC、底盘电机。55 分运动�
 
 ## 5. 子模块开发顺序（按依赖与风险排）
 
-**已完成（2026-11-10）**：`pwm_gen.v` + `encoder_dec.v` 及各自 tb —— 全 PASS；
-顶层已例化 2×pwm_gen + 2×encoder_dec（en=0/duty=0 安全待命，编码器计数接入 LED[0] 诊断位），
-Efinity 综合验证 EFX_ADD 69 / LUT4 55 / FF 55，EXIT=0。
+**已完成（2026-11-10，以 §3.9 为准）**：`pwm_gen.v`、`encoder_dec.v`、`i2c_master.v`、`hc_sr04.v`、
+`uart_tx.v`、`uart_report.v`、`track_line.v` 共 7 个模块全部例化进顶层并跑通仿真；
+最新综合：**EFX_ADD 166 / EFX_LUT4 486 / EFX_FF 296 / DSP48 2**，P&R setup slack 36.36 ns，位流已生成。
 
 | 阶段 | 加进 `src/` 的模块 | 说明 | 对应分值 |
 | ① 接口控制器（收益最大、风险最低） | ✅ `pwm_gen.v`、✅ `encoder_dec.v`、✅ `i2c_master.v`、✅ `hc_sr04.v`、✅ `uart_tx.v` + ✅ `uart_report.v`；仍缺 `sccb_cfg.v`、`clk_div.v`（后者其实不需要，PLL 走 Interface Designer） | 全部片内 RTL，只需 IO + 无源上拉，不买任何芯片。已完成部分见 §3.7 | 全部 |
@@ -244,14 +289,19 @@ H 桥 MOSFET / 电机 / 电池 DC-DC、5 V→3.3 V 分压（HC-SR04 Echo、E18-D
 （3.2.3④ 直接取消资格）；超声波是 3.2.2 明确开的例外，HC-SR04 合规；赛前须主动告知裁判
 本车的观测与处理方法（4.3.3）。
 
-## 5. 硬件清单落点（详见根目录 `赛题二_Ti60F225适配性分析.md` §4.7）
+## 6. 硬件清单（与 `docs/硬件接口表.xlsx` 的「待买清单」sheet 同步，2026-11-10 更新）
 
-- 已具备：OV5640、TB6612FNG、YB-MUX04 八路循迹、HC-SR04、0.96" OLED。
-- 必配：车载电源模块（电池 + DC-DC，电源不得脱离车体 3.2.3②）、直流减速电机 ×2 带轮。
-- 强烈建议：光电编码器 ×2。
-- 可选：第二路避障（VL53L1X 复用 I2C / E18-D80NK）、广角镜头（一个摄像头兼顾前方标识牌与侧方 25 cm 色块）、电平适配。
+- **已具备（形态已照片确认）**：OV5640（接口匹配、用过）、TB6612FNG 红色突破板（标准 12 脚）、
+  YB-MUX04-1.0（X1~X8 = 8 路数字直读 → track[7:0]，TX/RX/SCL/SDA 悬空不接）、HC-SR04、
+  0.96" OLED（SSD1306 I2C 4 脚版，接 User_IO12/13 + D3V3）。
+- **待买·必配**：直流减速电机 ×2 带轮、2S 锂电池组 7.4V、DC-DC 5V/≥3A（3.2.3② 电源不得脱离车体；与电机功率地单点共地）。
+- **待买·强烈建议**：光电编码器 ×2（**光电式**，3.2.2 禁磁/霍尔）。
+- **待买·已确认**：**E18-D80NK ×2**（左/右前端，User_IO26/27，与 HC-SR04 取"或"融合避障冗余，
+  3.3V 直连免分压；用户反馈 HC-SR04 曾不靠谱，故加红外冗余）。
+- 可选：广角镜头（一个摄像头兼顾前方标识牌与侧方 25cm 色块）、VL53L1X（复用 I2C）。
+- 接口 Excel 中的两张示意图（框图/引脚图）按用户要求已删除，引脚信息以 §3.5 表格与 xlsx 总表为准。
 
-## 6. 参考
+## 7. 参考
 
 - GUI 点击流程：根目录 `赛题二_Ti60F225适配性分析.md` 之外，官方录屏 `05_FPGA视频教程/2-易灵思官方/`
   第 2 个（建立和编译工程）、第 3 个（Interface Designer 管脚锁定）、第 4 个（Programmer 下载）。

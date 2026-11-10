@@ -24,6 +24,7 @@ module FpgaCar_tb;
     reg  [7:0]  track;
     wire        hc_trig;
     reg         hc_echo;
+    reg         ir_l, ir_r;         // E18-D80NK：NPN 低有效，空闲=1
     wire        i2c_scl;
     wire        i2c_sda;            // 物理 SDA（外部 4.7k 上拉）
     wire        i2c_sda_IN;
@@ -55,7 +56,7 @@ module FpgaCar_tb;
 
     // 输入空闲值
     initial begin
-        track      = 8'h00;
+        track      = 8'hFF;                 // 全白（不压线），ACTIVE_HIGH=0 时 line=0
         hc_echo    = 1'b0;
         cmos_pclk  = 1'b0;
         cmos_href  = 1'b0;
@@ -64,6 +65,7 @@ module FpgaCar_tb;
         enc_la     = 1'b0;  enc_lb = 1'b0;
         enc_ra     = 1'b0;  enc_rb = 1'b0;
         uart_rx    = 1'b1;                  // UART 空闲
+        ir_l       = 1'b1;  ir_r = 1'b1;     // 红外无遮挡
     end
 
     // ---- 模拟 Interface Designer 的 inout GPIO 块 + 外部上拉 ----
@@ -77,6 +79,8 @@ module FpgaCar_tb;
         .track        (track),
         .hc_trig      (hc_trig),
         .hc_echo      (hc_echo),
+        .ir_l         (ir_l),
+        .ir_r         (ir_r),
         .i2c_scl      (i2c_scl),
         .i2c_sda_IN   (i2c_sda_IN),
         .i2c_sda_OUT  (i2c_sda_OUT),
@@ -117,10 +121,16 @@ module FpgaCar_tb;
         else                      $display("PASS: bench mode motor_stby=1");
         if (ml_in1 !== 1'b1 || ml_in2 !== 1'b0) $display("FAIL: left motor direction not set");
         else                                    $display("PASS: left motor forward direction set");
-        if (led[4:1] !== 4'hF)    $display("FAIL: LEDs[4:1] should be off (active low, track=0)");
         if (i2c_sda_OE !== 1'b0)  $display("FAIL: I2C SDA should be released (OE=0)");
         if (i2c_scl !== 1'b1)     $display("FAIL: I2C SCL should idle high");
         if (u_dut.heartbeat === 24'd0) $display("FAIL: heartbeat counter not running");
+
+        // 循迹通道要等消抖稳定（1 kHz x 4 次 = 4 ms）之后再看 LED
+        #6_000_000;
+        if (led[4:1] !== 4'hF)    $display("FAIL: LEDs[4:1] should be off (no line under sensors)");
+        else                      $display("PASS: track channels settled, LEDs[4:1] off");
+        if (u_dut.line_lost !== 1'b1) $display("FAIL: line_lost should be 1 when all white");
+        else                          $display("PASS: line_lost=1 on all-white");
 
         // 量一个 PWM 周期（1200 clk）内的高电平拍数，期望 300 (25%)
         high_cnt = 0;
@@ -139,7 +149,7 @@ module FpgaCar_tb;
 
     // 看门狗
     initial begin
-        #5_000_000;
+        #30_000_000;
         $display("TIMEOUT: FpgaCar_tb hung");
         $finish;
     end
