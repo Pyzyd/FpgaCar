@@ -1,0 +1,29 @@
+# ---------------------------------------------------------------------------
+# Efinity 工程产物与中间文件：全部可由 src/ + .xml + .sdc 重新生成，不入库
+# ---------------------------------------------------------------------------
+outflow/
+work_syn/
+work_pnr/
+ooc/
+.dide/
+_sim/
+
+*.bit
+*.hex
+*.rpt
+*.log
+*.out
+*.vvp
+*.vdb
+*.rdb
+*.bin
+*.pickle
+*.qdb
+
+# IP Manager 生成的中间件（若将来有真 IP，只提交 ip/<name>/settings.json 之类的配置）
+# ip/
+
+# 操作系统垃圾文件
+Thumbs.db
+desktop.ini
+.DS_Store

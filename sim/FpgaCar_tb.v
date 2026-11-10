@@ -1,0 +1,147 @@
+// =============================================================================
+// FpgaCar_tb.v —— 顶层骨架的最小 testbench
+// -----------------------------------------------------------------------------
+// 【重要】这个文件只用于仿真，不要通过 Efinity 的
+//   Edit Project -> Design -> Import Design & Constraint Files
+// 导入工程（否则会被当成设计文件一起综合，tutorial 第 5 页第 16 步明确要求删掉 tb）。
+// 跑 RTL 仿真用命令：efx_run.bat --flow rtlsim FpgaCar.xml
+// 或用 ModelSim / iVerilog 手动编译 src/FpgaCar.v + 本文件。
+//
+// 【I2C 双向口怎么仿真】顶层把 SDA 拆成了 _IN/_OUT/_OE 三个端口（Efinix 标准写法），
+// 物理 inout 由 Interface Designer 的 mode="inout" GPIO 块生成。testbench 里用
+// 一个带 pullup 的 wire + 条件驱动把这个物理块的行为补出来：
+//   assign i2c_sda    = i2c_sda_OE ? i2c_sda_OUT : 1'bz;
+//   assign i2c_sda_IN = i2c_sda;
+// 三态只出现在 tb 里（tb 不参与综合），所以不会触发 EFX-0410。
+// -----------------------------------------------------------------------------
+`timescale 1ns/1ps
+
+module FpgaCar_tb;
+
+    reg         clk   = 1'b0;
+    reg         rst_n = 1'b0;
+
+    reg  [7:0]  track;
+    wire        hc_trig;
+    reg         hc_echo;
+    wire        i2c_scl;
+    wire        i2c_sda;            // 物理 SDA（外部 4.7k 上拉）
+    wire        i2c_sda_IN;
+    wire        i2c_sda_OUT;
+    wire        i2c_sda_OE;
+    reg         cmos_pclk;
+    reg         cmos_href;
+    reg         cmos_vsync;
+    reg  [7:0]  cmos_data;
+    wire        cmos_xclk;
+    wire        cmos_rst_n;
+    wire        cmos_pwdn;
+    wire        ml_in1, ml_in2, ml_pwm;
+    wire        mr_in1, mr_in2, mr_pwm;
+    wire        motor_stby;
+    reg         enc_la, enc_lb, enc_ra, enc_rb;
+    wire [5:0]  led;                // LED0~LED5（LED6/7 球让给 CMOS_D0/D1）
+    reg         uart_rx;
+    wire        uart_tx;
+
+    // 24 MHz -> 周期 41.667 ns
+    always #20.833 clk = ~clk;
+
+    // 上电复位保持 1 us 后释放
+    initial begin
+        rst_n = 1'b0;
+        #1000 rst_n = 1'b1;
+    end
+
+    // 输入空闲值
+    initial begin
+        track      = 8'h00;
+        hc_echo    = 1'b0;
+        cmos_pclk  = 1'b0;
+        cmos_href  = 1'b0;
+        cmos_vsync = 1'b0;
+        cmos_data  = 8'h00;
+        enc_la     = 1'b0;  enc_lb = 1'b0;
+        enc_ra     = 1'b0;  enc_rb = 1'b0;
+        uart_rx    = 1'b1;                  // UART 空闲
+    end
+
+    // ---- 模拟 Interface Designer 的 inout GPIO 块 + 外部上拉 ----
+    pullup(i2c_sda);
+    assign i2c_sda    = i2c_sda_OE ? i2c_sda_OUT : 1'bz;
+    assign i2c_sda_IN = i2c_sda;
+
+    FpgaCar u_dut (
+        .clk          (clk),
+        .rst_n        (rst_n),
+        .track        (track),
+        .hc_trig      (hc_trig),
+        .hc_echo      (hc_echo),
+        .i2c_scl      (i2c_scl),
+        .i2c_sda_IN   (i2c_sda_IN),
+        .i2c_sda_OUT  (i2c_sda_OUT),
+        .i2c_sda_OE   (i2c_sda_OE),
+        .cmos_pclk    (cmos_pclk),
+        .cmos_href    (cmos_href),
+        .cmos_vsync   (cmos_vsync),
+        .cmos_data    (cmos_data),
+        .cmos_xclk    (cmos_xclk),
+        .cmos_rst_n   (cmos_rst_n),
+        .cmos_pwdn    (cmos_pwdn),
+        .ml_in1       (ml_in1),
+        .ml_in2       (ml_in2),
+        .ml_pwm       (ml_pwm),
+        .mr_in1       (mr_in1),
+        .mr_in2       (mr_in2),
+        .mr_pwm       (mr_pwm),
+        .motor_stby   (motor_stby),
+        .enc_la       (enc_la),
+        .enc_lb       (enc_lb),
+        .enc_ra       (enc_ra),
+        .enc_rb       (enc_rb),
+        .led          (led),
+        .uart_rx      (uart_rx),
+        .uart_tx      (uart_tx)
+    );
+
+    // ------------------------------------------------------------------
+    // 自检：静态安全信号 + PWM 占空比 + 心跳/编码器计数在跑
+    // 注意 PWM_BENCH_TEST=1 时 motor_stby=1、左轮 IN1=1，这是刻意的台架试车态；
+    // 跑车前把 FpgaCar.v 里 PWM_BENCH_TEST 改回 0 后，本 tb 的期望值也要跟着改。
+    // ------------------------------------------------------------------
+    integer high_cnt, n;
+
+    initial begin
+        #2000;
+        if (motor_stby !== 1'b1)  $display("FAIL: bench mode expects motor_stby=1, got %b", motor_stby);
+        else                      $display("PASS: bench mode motor_stby=1");
+        if (ml_in1 !== 1'b1 || ml_in2 !== 1'b0) $display("FAIL: left motor direction not set");
+        else                                    $display("PASS: left motor forward direction set");
+        if (led[4:1] !== 4'hF)    $display("FAIL: LEDs[4:1] should be off (active low, track=0)");
+        if (i2c_sda_OE !== 1'b0)  $display("FAIL: I2C SDA should be released (OE=0)");
+        if (i2c_scl !== 1'b1)     $display("FAIL: I2C SCL should idle high");
+        if (u_dut.heartbeat === 24'd0) $display("FAIL: heartbeat counter not running");
+
+        // 量一个 PWM 周期（1200 clk）内的高电平拍数，期望 300 (25%)
+        high_cnt = 0;
+        for (n = 0; n < 1200; n = n + 1) begin
+            @(posedge clk);
+            if (ml_pwm) high_cnt = high_cnt + 1;
+        end
+        if (high_cnt < 295 || high_cnt > 305)
+            $display("FAIL: ml_pwm duty = %0d/1200 (expect ~300)", high_cnt);
+        else
+            $display("PASS: ml_pwm duty = %0d/1200 (25%%)", high_cnt);
+
+        $display("INFO: FpgaCar smoke test done, heartbeat=%0d", u_dut.heartbeat);
+        $finish;
+    end
+
+    // 看门狗
+    initial begin
+        #5_000_000;
+        $display("TIMEOUT: FpgaCar_tb hung");
+        $finish;
+    end
+
+endmodule
