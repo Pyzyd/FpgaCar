@@ -82,7 +82,12 @@ module FpgaCar (
     input  wire         cmos_href,
     input  wire         cmos_vsync,
     input  wire [7:0]   cmos_data,
-    output wire         cmos_xclk,      // FPGA 给传感器的主时钟
+    // 【为什么这里没有 cmos_xclk 端口】Efinix 的时钟输出不走 RTL：
+    //   时钟树直接连到 interface block，clkout 型 GPIO 由 Interface Designer
+    //   按 clock_name 取时钟网输出，RTL 里既没有这个端口也不能 assign。
+    //   本工程在 FpgaCar.peri.xml 里建了 comp_gpio name="cmos_xclk"
+    //   gpio_def="GPIOR_16" mode="clkout"，clock_name 指向系统 24 MHz 时钟。
+    //   对照：官方 02-1_Ti60_OV5640 的 example_top.v 同样没有 cmos_xclk 端口。
     output wire         cmos_rst_n,     // CMOS_CTL0/1
     output wire         cmos_pwdn,      // CMOS_CTL2/3
 
@@ -145,8 +150,7 @@ module FpgaCar (
     assign mr_in2     = 1'b0;
     assign motor_stby = PWM_BENCH_TEST;   // 1=TB6612 工作，0=待机
 
-    assign cmos_xclk  = 1'b0;
-    assign cmos_rst_n = 1'b1;
+    assign cmos_rst_n = 1'b1;       // 上电时序还没做（A3.1 再做 1ms/20ms）
     assign cmos_pwdn  = 1'b0;
 
     // ------------------------------------------------------------------

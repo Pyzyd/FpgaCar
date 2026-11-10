@@ -57,6 +57,9 @@ FpgaCar/
 
 > **2026-11-10 第二轮的进展**：`src/` 现有 7 个文件、5 个子模块已例化进顶层，
 > 全部通过 iVerilog 自测并重新生成位流（详见 §3.7）。
+>
+> **当前状态（2026-11-10 第三轮后，以 §3.9 / §4 为准）**：`src/` 已 8 个模块（新增 `track_line.v`）、
+> `sim/` 8 个 tb 全 PASS，位流最新版 `outflow/FpgaCar.bit` = **19:50**，顶层处于 `PWM_BENCH_TEST=1` 台架态。
 
 ## 3.5 管脚与电平分配（已在 FpgaCar.peri.xml 落实，2026-11-10）
 
@@ -73,7 +76,7 @@ FpgaCar/
 | rst_n | GPIOT_P_11 (User_IO35) | 2B / 1.8V | 上拉 |
 | track[0..7] | GPIOL_N_06/P_06/N_08/P_08/N_05/P_05/N_04/P_04 (User_IO2–9) | 1A / 1.8V | YB-MUX04 八路 |
 | hc_trig / hc_echo | GPIOL_N_12 / P_12 (User_IO10/11) | 1B / 1.8V | HC-SR04。**Echo 5V 必须两个电阻分压**：TXS0108E 的 B 侧绝对最大仅 4.6V，直连超规格 |
-| ir_l / ir_r | GPIOL_N_15 / P_15 (User_IO26/27) | 1B / 1.8V | E18-D80NK 红外光电开关 ×2（避障冗余，与 hc 近距取"或"；NPN 低有效=检测到）。**引脚已锁定并开 weak pullup**，传感器待买 |
+| ir_l / ir_r | GPIOL_N_15 / P_15 (User_IO26/27) | 1B / 1.8V | E18-D80NK 红外光电开关 ×2（避障冗余，与 hc 近距取"或"；NPN 低有效=检测到）。**接法修正（联网查证）**：开集输出空闲时内部 10K 上拉为 **5V 高电平，不可直连 1.8V bank**——弃内部上拉，外部 10K 上拉到 D3V3 + 1K/1.2K 分压至约 1.8V。传感器待买 |
 | i2c_scl / i2c_sda | GPIOL_N_13 / P_13 (User_IO12/13) | 1B / 1.8V | scl=output、sda=inout |
 | enc_la/lb/ra/rb | GPIOL_N_10/P_10/N_11/P_11 (User_IO14–17) | 1B / 1.8V | 光电编码器 |
 | ml_in1/in2/pwm | GPIOL_N_03/P_03/N_07 (User_IO18–20) | 1A / 1.8V | TB6612 左 |
@@ -83,7 +86,26 @@ FpgaCar/
 | uart_rx / uart_tx | GPIOT_N_16 / P_16 | 2B / 1.8V | CH340N 调试串口 |
 
 其余 User_IO25、28–33（GPIOL_N/P_14–18）预留；**User_IO0/1（GPIOL_N/P_02）不用**（与核心板 KEY 复用）。
-OV5640 走核心板专用 DVP 排针（`cmos_*` 网络，1.8V pclk），骨架未例化相机逻辑，暂未在 peri.xml 声明。
+OV5640 走核心板专用 DVP 排针（`cmos_*` 网络，1.8V pclk）。**`cmos_xclk` 已在 peri.xml 声明**（clkout，见下）；其余 13 个 `cmos_*` 引脚（pclk/href/vsync/data/sclk/sdat/rst_n/pwdn）待 A3.1 补。
+
+**OV5640 的 XCLK 由 Interface Designer 的 clkout 块输出，不是 RTL 端口（2026-11-10 实验确认）**：
+`FpgaCar.peri.xml` 里定义了 `comp_gpio name="cmos_xclk" gpio_def="GPIOR_16" mode="clkout"`，
+其 `output_config` 的 **`clock_name` 直接指向系统 24 MHz 时钟 `clk`**；因此 `src/FpgaCar.v` 的端口表里
+**没有** `cmos_xclk`（写 `assign cmos_xclk = clk;` 会与 interface 层冲突）。
+
+- 依据 1（Efinix 文档）：时钟树直接连 interface block，"core 到 interface 的时钟输出不出现在 RTL 里，
+  只存在于 interface 配置" → 时钟输出必须走 clkout。
+- 依据 2（厂商用法）：资料包 **29 个工程全部**是 `mode="clkout"`，没有普通 output 的先例。
+- 依据 3（引脚）：官方引脚定义表 `BANK 3.3` 页 `C12 | GPIOR_16 | CMOS_XCLK`。
+- **实验结论**：`clock_name="clk"` 被工具完全接受，`outflow/FpgaCar.interface.csv` 生成
+  `clkout, 209, 323, -1, clk`（坐标 209,323 = GPIOR_16），interface/map/pnr/pgm 全 PASS，
+  **零 PLL**，XCLK = 24 MHz —— 正好是 `I2C_OV5640_1280720_Config.v` 注明的设计点
+  `// input clock 24Mhz, PCLK 42Mhz`。
+- 官方工程用的 `clk_27m` 是 `lvds_pll`(PLL_TR0) 的 number=2 输出、`out_divider=84`，
+  **实际只有 16 MHz**（`Ti60_Demo.pt.sdc` 写 `-period 62.5000`；`clk_54m` 同理实为 32 MHz），
+  "27m/54m" 是 AR0135 方案的命名遗留。**别照抄官方的 16 MHz**：那会把 PCLK 压到 ~28 MHz、帧率下降。
+- OV5640 手册：XVCLK 典型 24 MHz（范围 6–27 MHz），**可容忍输入抖动 1 ns**；
+  这也是"fabric 普通输出也能驱动"的电气依据（仅作 fallback，首选仍是 clkout）。
 
 **编译验证全链路已通过（2026-11-10）**：interface flow EXIT=0（生成 `outflow/FpgaCar.lpf` /
 `FpgaCar.interface.csv` / `FpgaCar_or.ini`）→ efx_map（EFX_ADD 23 / EFX_LUT4 29 / EFX_FF 26）→
@@ -190,7 +212,10 @@ D=123cm T=00011000 P=+02 O=0
   均为 `input` + **weak pullup**（悬空时读 1 = 无障碍，避免误报）。
 - 顶层已例化融合逻辑：`obstacle = (dist_cm ≤ 25 cm) | ~ir_l | ~ir_r`。
 - 已用 `--flow interface` 重新生成 lpf，`pinout.csv` 确认 E2/E1 两个球分配成功。
-- 接线要求：E18-D80NK 的 OUT（黑线）接排针，**外部 4.7kΩ 上拉到 3.3V**（NPN 开集输出）。
+- 接线要求（**查证后修正**）：E18-D80NK 的 OUT（黑线）为 NPN 开集 + 内部 10K 上拉到 5V，
+  **空闲时是 5V 高电平，绝不能直连 1.8V bank 引脚**。弃用内部上拉：
+  **外部 10kΩ 上拉到 D3V3，再经 1kΩ/1.2kΩ 分压到约 1.8V** 后接排针
+  （10K∥(1K+1.2K) 分压：3.3V × 1.2/(1+1.2) ≈ 1.8V）。检测到障碍时 OUT=0V，ir_raw=0，RTL 取 `~ir` 判障碍。
 
 ### 本轮踩的坑
 
@@ -201,6 +226,25 @@ D=123cm T=00011000 P=+02 O=0
 
 `interface` 数秒 → `map` 1.5 min（ADD 166 / LUT4 486 / FF 296 / DSP48 2）→
 `pnr` 2.5 min（setup slack **36.36 ns**）→ `pgm` 20 s。位流 19:50 生成。
+
+### 教训：资料包里的频率数字不可信（2026-11-10 记）
+
+对 OV5640 官方工程（`02-1_Ti60_OV5640_LCD-HDMI_1080P60`）逐字核对后发现，**信号名、源码注释、
+工程目录名里的频率数字都不能直接引用**：
+
+1. **同一 PLL 内各输出共用基准**，换算关系是 `f_i = f_base × D0 / D_i`，其中 `D0` 是该 PLL
+   **第一个输出**的 `out_divider`。只读某一行的 `out_divider`、或只看名字，都会算错。
+   - 例：`lvds_pll`(PLL_TR0) 的 `clk_lvds_1x` 是首路（div=28，=48 MHz），则
+     `clk_27m`(div=84) = 48×28/84 = **16 MHz**、`clk_54m`(div=42) = **32 MHz**。
+   - 名字里的 "27m / 54m" 来自 AR0135 方案，与 OV5640 无关。
+2. **最终以 Interface Designer 生成的 `.pt.sdc` 里的 `create_clock -period` 为准**——那是工具
+   算出来的绝对值，可直接换算成频率（`f = 1000 / period_ns` MHz）。本次核对中
+   `Ti60_Demo.pt.sdc:28` 写 `-period 62.5000 clk_27m`（=16 MHz），与上面手算一致。
+3. **未被例化的 `.v` 文件里的注释无效**：`CMOS_Capture_RAW_Gray.v` 满篇 24 MHz 注释，但它
+   根本没进 `example_top.v` 的实例树，只是 `Ti60_Demo.xml` 文件列表里躺着的死文件。
+4. 推论：OV5640 的 PCLK 由传感器内部 PLL 按 `XCLK × 1.75` 倍频（`I2C_OV5640_1280720_Config.v:257`
+   的 "input 24Mhz, PCLK 42Mhz" 即 1.75 倍）。XCLK=16 MHz → **PCLK ≈ 28 MHz**；若真测到
+   ≈47.25 MHz，则说明 XCLK 实际是 27 MHz，也就是当前 peri.xml 与实际位流不一致，必须重编核对。
 
 ## 3.8 编译状态：已全部跑通，无需再手工做第 1–5 步
 
@@ -216,7 +260,7 @@ D=123cm T=00011000 P=+02 O=0
    - 确认 `sim/FpgaCar_tb.v` **没有**出现在文件列表里。
    - 点 **OK**。
 3. 工具栏 **Interface Designer** → 这是 Titanium 必做的一步（管脚不写在 HDL 里）：
-   - **Device Settings**：BL / BR / TL / TR 设 **3.3 V LVCMOS**，其余 1.8 V（1A=1.2 V）。
+   - **Device Settings**：BL / BR / TL / TR 设 **3.3 V LVCMOS**，其余全部 **1.8 V**（1A/1B/2A/2B 经 0Ω 电阻接 VDD1V8；3A 默认也是 1.8 V，只有走 MIPI 时才需要改 1.2 V——本工程没用到）。
    - 按顶层端口逐个 **Add Block / Create a GPIO bus** 建 GPIO 实例，IO Standard 选 3.3 V LVCMOS。
      **I2C 的两个块要按 Efinix 约定建**：`i2c_scl` → `mode="output"`；`i2c_sda` → `mode="inout"`
      （自动生成 `i2c_sda_IN` / `i2c_sda_OUT` / `i2c_sda_OE` 三个端口，正好对上顶层）。
@@ -241,32 +285,41 @@ D=123cm T=00011000 P=+02 O=0
 > 把顶层端口改成该块输出名（参考 `06-FPGA_HDL_Basic-2023.2/01_LED_8bit_Test/src/LED_8bit_Test.v`
 > 用的是 `pll_inst1_CLKOUT0` / `pll_inst1_LOCKED`）。
 
-## 4. 下一步
+## 4. 下一步（2026-11-10 按实际到货情况重排）
 
-**先上板验证本轮成果**：Programmer → Select Image File → `outflow/FpgaCar.bit`（2026-11-10 12:59 生成，
-含全部 5 个子模块）→ JTAG → Start Program。**把小车轮子架空**，预期现象：
+### 第 1 步：现在就能做的上板验证（不需要任何待买硬件）
+
+Programmer → Select Image File → `outflow/FpgaCar.bit`（**2026-11-10 19:50 生成**，含
+track_line + ir 融合的最新版）→ JTAG → Start Program。5 项预期里先做这 3 项：
 
 1. `LED[5]` 约 0.35 s 慢闪 → 位流已加载、24 MHz 时钟在跑。
-2. **左轮以 25% 占空比持续转动**、右轮不动 → PWM 通路（pwm_gen → TB6612）打通。
-3. 用手转左轮/右轮 → `LED[0]` 闪 → 编码器 AB 相解码正确（这一步能提前发现 A/B 接反、缺上拉）。
-4. 串口助手（115200-8-N-1）每 60 ms 一行 `D=xxxcm`；不接 HC-SR04 时是 `D=---cm`；
-   接上后用手在探头前晃，数字应跟着变 → 超声波通道打通。
-5. `i2c_scl` 恒高、SDA 被上拉恒高（示波器/万用表都可）→ I2C 总线释放正常。
+2. YB-MUX04 接上（8 根线到 User_IO2~9 + 5V/GND，板子已有）→ 黑线在探头下从左往右推，
+   串口看 `T=` 位图的 1 往哪边移动；**若"压黑线显示 0"，把 `track_line` 的 `ACTIVE_HIGH`
+   改成 1 重编**——循迹极性现在就能定死，不用等车架。
+3. 串口助手（115200-8-N-1）每 60 ms 一行 `D=xxxcm T=xxxxxxxx P=+xx O=x`；不接 HC-SR04
+   时是 `D=---cm`；接上后用手在探头前晃，数字跟着变 → 超声波通道打通。
+   顺带万用表测 `i2c_scl`/`i2c_sda` 恒高 → I2C 总线释放正常（是第 2 步 sccb_cfg 的前置）。
 
-**验证完务必把 `FpgaCar.v` 的 `PWM_BENCH_TEST` 改回 `0` 再上地。**
+暂做不了、等电机/编码器到货再验的：**左轮 25% 转动**（PWM→TB6612 通路）、
+**手转轮看 `LED[0]` 闪**（编码器 AB 相，能提前发现接反/缺上拉）。
 
-**下一段 RTL 工作（按依赖排）**：
+当前顶层是台架态：`FpgaCar.v:139` `PWM_BENCH_TEST = 1'b1`（`ml_in1`/`motor_stby` 直接绑它，
+=1 时 TB6612 一上电就工作）。**电机到货、车架上地之前必须改回 `0`。**
+
+### 第 2 步：下一段 RTL = `sccb_cfg.v`（理由：零新硬件依赖 + 卡 45 分）
 
 | 序 | 模块 | 为什么是它 | 依赖 |
 |---|---|---|---|
-| 1 | `sccb_cfg.v` | 用 `i2c_master` 把资料包 `I2C_OV5640_1280720_Config.v` 的寄存器表灌进 OV5640。**不解锁它，45 分识别类无法开工**；同时解锁 OLED（同一条 I2C） | 仅 `i2c_master`（已完成） |
-| 2 | `track_pid.v` + `car_fsm.v` | 用 `track[7:0]` + `enc_*_step` 做循迹 PID，把 `PWM_BENCH_TEST` 换成闭环输出（循迹 20 + 入库 15） | `pwm_gen`/`encoder_dec`（已完成） |
-| 3 | `dvp_capture.v` | 移植 `06-.../02-1_.../src/cmos_i2c/CMOS_Capture_RAW_Gray.v`，先做"采到帧、能数到 HREF/VSYNC 边沿"，再谈识别 | OV5640 配置成功 + 摄像头硬件 |
+| 1 | `sccb_cfg.v` | 用 `i2c_master` 把资料包 `I2C_OV5640_1280720_Config.v` 的寄存器表灌进 OV5640。**不配通 SCCB，`dvp_capture` 一帧都采不到，标识 25 + 颜色 20 = 45 分全部停摆**；同一条 I2C 顺带解锁 OLED。寄存器表直接用官方 14 KB 那份，别手写 | 仅 `i2c_master`（已完成）+ 手上已有的 OV5640 |
+| 2 | `track_pid.v` + `car_fsm.v` | 用 `track[7:0]` + `enc_*_step` 做循迹 PID，把 `PWM_BENCH_TEST` 换成闭环输出（循迹 20 + 入库 15）。纯片内 RTL，可先在仿真里写验，但**参数整定必须等电机到货** | `pwm_gen`/`encoder_dec`（已完成） |
+| 3 | `dvp_capture.v` | 移植 `06-.../02-1_.../src/cmos_i2c/CMOS_Capture_RAW_Gray.v`，先做"采到帧、能数到 HREF/VSYNC 边沿"，再谈识别 | OV5640 配置成功 |
 | 4 | `color_detect.v` / `sign_detect.v` | 颜色顺序 20 + 标识 25；需要先确认镜头视野能同时覆盖前方标识牌与侧方 25 cm 色块（结构件问题） | `dvp_capture` |
 | 5 | `oled_driver.v` | 颜色顺序必须在车载屏持续显示到裁判拍照 | `i2c_master` |
 
-**硬件侧并行推进**（长周期项，别等 RTL）：扩展底板打样 —— TB6612 两路、编码器接口、
-HC-SR04 的 5 V→3.3 V 分压、电池与 DC-DC、底盘电机。55 分运动类全靠它。
+### 第 3 步：硬件侧立刻并行启动（交期不可压缩，别等 RTL）
+
+扩展底板打样 —— TB6612 两路、编码器接口、HC-SR04 的 5 V→3.3 V 分压、E18-D80NK 的
+上拉+分压、电池与 DC-DC、底盘电机。55 分运动类全靠这条线。待买件见 §6 与 xlsx「待买清单」。
 
 ## 5. 子模块开发顺序（按依赖与风险排）
 
@@ -297,7 +350,7 @@ H 桥 MOSFET / 电机 / 电池 DC-DC、5 V→3.3 V 分压（HC-SR04 Echo、E18-D
 - **待买·必配**：直流减速电机 ×2 带轮、2S 锂电池组 7.4V、DC-DC 5V/≥3A（3.2.3② 电源不得脱离车体；与电机功率地单点共地）。
 - **待买·强烈建议**：光电编码器 ×2（**光电式**，3.2.2 禁磁/霍尔）。
 - **待买·已确认**：**E18-D80NK ×2**（左/右前端，User_IO26/27，与 HC-SR04 取"或"融合避障冗余，
-  3.3V 直连免分压；用户反馈 HC-SR04 曾不靠谱，故加红外冗余）。
+  上拉+分压接法（开集空闲=5V 不可直连 1.8V bank）；用户反馈 HC-SR04 曾不靠谱，故加红外冗余）。
 - 可选：广角镜头（一个摄像头兼顾前方标识牌与侧方 25cm 色块）、VL53L1X（复用 I2C）。
 - 接口 Excel 中的两张示意图（框图/引脚图）按用户要求已删除，引脚信息以 §3.5 表格与 xlsx 总表为准。
 

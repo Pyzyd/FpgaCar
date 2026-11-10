@@ -34,7 +34,6 @@ module FpgaCar_tb;
     reg         cmos_href;
     reg         cmos_vsync;
     reg  [7:0]  cmos_data;
-    wire        cmos_xclk;
     wire        cmos_rst_n;
     wire        cmos_pwdn;
     wire        ml_in1, ml_in2, ml_pwm;
@@ -89,7 +88,6 @@ module FpgaCar_tb;
         .cmos_href    (cmos_href),
         .cmos_vsync   (cmos_vsync),
         .cmos_data    (cmos_data),
-        .cmos_xclk    (cmos_xclk),
         .cmos_rst_n   (cmos_rst_n),
         .cmos_pwdn    (cmos_pwdn),
         .ml_in1       (ml_in1),
