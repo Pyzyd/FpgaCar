@@ -15,6 +15,9 @@
         <efx:design_file name="src/i2c_master.v" version="default" library="default" />
         <efx:design_file name="src/track_line.v" version="default" library="default" />
         <efx:design_file name="src/cam_probe.v" version="default" library="default" />
+        <efx:design_file name="src/i2c_timing_ctrl_16bit.v" version="default" library="default" />
+        <efx:design_file name="src/I2C_OV5640_1280720_Config.v" version="default" library="default" />
+        <efx:design_file name="src/cam_sccb_cfg.v" version="default" library="default" />
         <efx:top_vhdl_arch name="" />
         <efx:msg_config name="" />
         <efx:partition_definitions name="" />

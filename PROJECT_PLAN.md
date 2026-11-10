@@ -304,6 +304,55 @@ D=123cm T=00011000 P=+02 O=0 V=03\r\n
 `cmos_pclk` / `cmos_href` / `cmos_data[7:0]` / `cmos_sdat_IN` 仍报 `VDB-8003 unconnected`
 —— 采集逻辑（A3.3）和 SCCB（A3.2）还没接，等它们接入自然消失。
 
+## 3.11 进度记录：2026-11-10 第五轮（A3.2 SCCB 配置）
+
+### 新增文件
+
+| 文件 | 来源 | 说明 |
+|---|---|---|
+| `src/I2C_OV5640_1280720_Config.v` | 官方 02-1 工程原样复制 | 252 条 `{reg[15:0], data[7:0]}` 寄存器表 |
+| `src/i2c_timing_ctrl_16bit.v` | 官方 02-1 工程复制 + **改 1 处** | SCCB 4 字节写引擎；`DELAY_TOP` 由 `CLK_FREQ`(=1 s) 改为 `CLK_FREQ/1000`(真正的 1 ms) |
+| `src/cam_sccb_cfg.v` | 新写（包装层） | LUT 的 24 位数据补上 8 位设备地址 `0x78` 送引擎；引擎复位用 `rst_n & start` 门控，保证 1 ms 延时从 `cam_probe.ready` 之后才起算 |
+
+**为什么不复用我们自己的 `i2c_master`**：OV5640 寄存器写是**一次 START-STOP 内 4 字节**
+（dev_id / reg_hi / reg_lo / data），`i2c_master` 只支持单次事务 1 字节，拆开会写错。
+
+### 调试行扩到 39 字节
+
+```
+D=123cm T=00011000 P=+02 O=0 V=03 C=1
+```
+
+`C=1` 表示 252 条寄存器已发完（SCCB 写完成）。
+
+### 本轮一个真实 bug（在官方代码里）
+
+`i2c_timing_ctrl_16bit.v` 原文：
+
+```verilog
+//localparam DELAY_TOP = SIMU_EN ? 20'hff : CLK_FREQ/1000;  //1ms
+localparam  DELAY_TOP = CLK_FREQ;  //1ms Setting time ...
+```
+
+注释写 1 ms，代码却是 `CLK_FREQ`（24 MHz 下 = **1 秒**）。仿真表现：400 ms 看门狗超时、
+`done` 永远不来。已改为 `CLK_FREQ/1000`。
+
+### 编译实测
+
+`map` 1.5 min（**ADD 233 / LUT4 1111 / FF 415 / DSP48 2**；LUT 从 598 涨到 1111 是 252 条
+寄存器表吃掉的）→ `pnr` 28 s（setup slack **36.846 ns**）→ `pgm` 20 s，位流 **23:05:13**。
+
+### 仿真
+
+`cam_sccb_cfg_tb` 4 项 PASS（start 前引擎在复位 / start 后 9325 个 SCLK 沿 / done=1 /
+写完 sclk 回空闲高）、`uart_report_tb` 3 项 PASS（39 字节整行）、`cam_probe_tb` 9 项 PASS、
+`FpgaCar_tb` 5 项 PASS。
+
+### 上板判据
+
+`V>0` 且 `C=1` → 摄像头已按 1280x720 配置完成。
+`C=0` → SCCB 没通（查 SDAT 的 4.7k 上拉、上电 20 ms 够不够、XCLK 是否在跑）。
+
 ## 3.8 编译状态：已全部跑通，无需再手工做第 1–5 步
 
 以下步骤历史上走过的 GUI 路径保留作参考；当前工程已配置完成，直接打开即可编译下载：

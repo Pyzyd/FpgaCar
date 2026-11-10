@@ -7,8 +7,7 @@
 //         rst_n 拉低 ≥ 1 ms  →  拉高  →  再等 ≥ 20 ms  →  ready=1
 //      太快的后果：传感器内部稳压/时钟没稳，后面 SCCB 写进去也不生效，
 //      表现为"配置了半天没反应"，是最常见的坑。
-//   2. 把 SCCB 两脚置为总线空闲（SCLK=1、SDAT 释放靠外部上拉）。A3.2 接上
-//      sccb 引擎后由引擎驱动，本模块就只留 ready。
+//   2. （A3.2 起已移交）SCCB 两脚现在由 cam_sccb_cfg 驱动，本模块只提供 ready 作为它的启动条件。
 //   3. 统计 VSYNC 上升沿个数（100 ms 窗口）：
 //      OV5640 只要 XCLK 在跑、复位正确，**即使一条寄存器都没配**也会输出默认
 //      帧（VSYNC/HREF/PCLK 都有）。所以 V>0 是"XCLK、接线、复位都对"的独立
@@ -31,10 +30,6 @@ module cam_probe #(
     // ---- 到传感器的控制脚 ----
     output reg         cam_rst_n,    // CMOS_CTL2（GPIOL_04）
     output reg         cam_pwdn,     // CMOS_CTL3（GPIOL_N_00）
-    output wire        sccb_sclk,    // CMOS_SCLK（GPIOL_09）
-    input  wire        sccb_sdat_in, // CMOS_SDAT（GPIOR_13）回读
-    output wire        sccb_sdat_out,
-    output wire        sccb_sdat_oe,
     // ---- 从传感器来的探测信号 ----
     input  wire        vsync,        // CMOS_VSYNC
     // ---- 结果 ----
@@ -92,10 +87,7 @@ module cam_probe #(
     // SCCB 空闲：SCLK 高、SDAT 释放（外部 4.7k 上拉为高）
     // A3.2 接入 sccb 引擎后，这三根线改由引擎驱动。
     // ------------------------------------------------------------------
-    assign sccb_sclk     = 1'b1;
-    assign sccb_sdat_out = 1'b1;
-    assign sccb_sdat_oe  = 1'b0;
-    // sccb_sdat_in 目前未被使用（A3.2 读回寄存器时才需要），综合会报 unused 警告，忽略即可
+    // SCCB 三线已移交给 cam_sccb_cfg（A3.2），本模块只负责上电时序 + VSYNC 统计
 
     // ------------------------------------------------------------------
     // VSYNC 统计：两级同步 + 上升沿计数，每 WIN_MS 毫秒锁存一次

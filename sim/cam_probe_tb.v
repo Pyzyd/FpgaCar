@@ -24,10 +24,9 @@ module cam_probe_tb;
     always #20.8335 clk = ~clk;
 
     reg  vsync = 1'b0;
-    wire cam_rst_n, cam_pwdn, sccb_sclk, sccb_sdat_out, sccb_sdat_oe;
+    wire cam_rst_n, cam_pwdn;
     wire ready, vs_act;
     wire [7:0] vs_cnt;
-    reg  sccb_sdat_in = 1'b1;
 
     cam_probe #(
         .CLK_FREQ(24_000_000), .RST_LOW_MS(RST_LOW),
@@ -35,8 +34,6 @@ module cam_probe_tb;
     ) u_dut (
         .clk(clk), .rst_n(rst_n),
         .cam_rst_n(cam_rst_n), .cam_pwdn(cam_pwdn),
-        .sccb_sclk(sccb_sclk), .sccb_sdat_in(sccb_sdat_in),
-        .sccb_sdat_out(sccb_sdat_out), .sccb_sdat_oe(sccb_sdat_oe),
         .vsync(vsync), .ready(ready), .vs_cnt(vs_cnt), .vs_act(vs_act)
     );
 
@@ -75,13 +72,6 @@ module cam_probe_tb;
             $display("PASS: vs_cnt=%0d for 1kHz VSYNC in 10ms window", vs_cnt);
         if (vs_act !== 1'b1)    $display("FAIL: vs_act should be 1");
         else                    $display("PASS: vs_act=1");
-
-        // 5) SCCB 空闲电平
-        if (sccb_sclk !== 1'b1)     $display("FAIL: sccb_sclk should idle high");
-        if (sccb_sdat_oe !== 1'b0)  $display("FAIL: sccb_sdat_oe should be 0 (released)");
-        if (sccb_sdat_out !== 1'b1) $display("FAIL: sccb_sdat_out should idle high");
-        if (sccb_sclk === 1'b1 && sccb_sdat_oe === 1'b0 && sccb_sdat_out === 1'b1)
-            $display("PASS: SCCB bus idle (sclk high, sdat released)");
 
         // 6) 停掉 VSYNC，下一个窗口应归零
         vs_en = 1'b0;

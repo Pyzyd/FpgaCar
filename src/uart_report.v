@@ -31,10 +31,11 @@ module uart_report #(
     input  wire signed [4:0] pos,  // 线位置
     input  wire        obstacle,   // 障碍标志
     input  wire [7:0]  vs_cnt,     // 摄像头 VSYNC 计数（100 ms 窗口）
+    input  wire        cam_done,   // SCCB 配置完成
     output wire        tx
 );
 
-    localparam integer MSG_LEN = 35;
+    localparam integer MSG_LEN = 39;
 
     // ------------------------------------------------------------------
     // 无符号除以 10（移位-减法，10 次迭代，纯组合）
@@ -84,6 +85,7 @@ module uart_report #(
     reg         bad;         // 距离无效
     reg  [7:0]  ln;          // 锁存的循迹位图
     reg  [7:0]  vs;          // 锁存的 VSYNC 计数
+    reg         camd;        // 锁存的 SCCB 完成标志
     reg  signed [4:0] pz;    // 锁存的位置
     reg         obst;        // 锁存的障碍标志
 
@@ -123,6 +125,7 @@ module uart_report #(
             bad      <= 1'b1;
             ln       <= 8'h00;
             vs       <= 8'h00;
+            camd     <= 1'b0;
             pz       <= 5'sd0;
             obst     <= 1'b0;
         end else begin
@@ -140,6 +143,7 @@ module uart_report #(
                 v10  <= v_now;
                 ln   <= line;
                 vs   <= vs_cnt;
+                camd <= cam_done;
                 pz   <= pos;
                 obst <= obstacle;
                 rstate <= R_SEND;
@@ -203,8 +207,12 @@ module uart_report #(
         msg[30] = 8'h3D;                                   // '='
         msg[31] = (vs > 8'd99) ? 8'h39 : (8'h30 + v_t[3:0]);   // 十位（>99 显示 9 饱和）
         msg[32] = (vs > 8'd99) ? 8'h39 : (8'h30 + v_u[3:0]);   // 个位
-        msg[33] = 8'h0D;                                   // CR
-        msg[34] = 8'h0A;                                   // LF
+        msg[33] = 8'h20;                                   // ' '
+        msg[34] = 8'h43;                                   // 'C'
+        msg[35] = 8'h3D;                                   // '='
+        msg[36] = camd ? 8'h31 : 8'h30;                    // SCCB 配置完成 = 1
+        msg[37] = 8'h0D;                                   // CR
+        msg[38] = 8'h0A;                                   // LF
     end
 
 endmodule

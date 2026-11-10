@@ -278,14 +278,30 @@ module FpgaCar (
         .rst_n         (sys_rst_n),
         .cam_rst_n     (cmos_rst_n),
         .cam_pwdn      (cmos_pwdn),
-        .sccb_sclk     (cmos_sclk),
-        .sccb_sdat_in  (cmos_sdat_IN),
-        .sccb_sdat_out (cmos_sdat_OUT),
-        .sccb_sdat_oe  (cmos_sdat_OE),
         .vsync         (cmos_vsync),
         .ready         (cam_ready),
         .vs_cnt        (cam_vs_cnt),
         .vs_act        (cam_vs_act)
+    );
+
+    // ------------------------------------------------------------------
+    // OV5640 寄存器配置（A3.2）：cam_ready 之后才开始，252 条写完置 done
+    // ------------------------------------------------------------------
+    wire cam_cfg_done;
+
+    cam_sccb_cfg #(
+        .CLK_FREQ (24_000_000),
+        .I2C_FREQ (100_000),
+        .DEV_ADDR (8'h78)
+    ) u_sccb (
+        .clk      (clk),
+        .rst_n    (sys_rst_n),
+        .start    (cam_ready),
+        .sclk     (cmos_sclk),
+        .sdat_in  (cmos_sdat_IN),
+        .sdat_out (cmos_sdat_OUT),
+        .sdat_oe  (cmos_sdat_OE),
+        .done     (cam_cfg_done)
     );
 
     // ------------------------------------------------------------------
@@ -305,6 +321,7 @@ module FpgaCar (
         .pos        (line_pos),
         .obstacle   (obstacle),
         .vs_cnt     (cam_vs_cnt),
+        .cam_done   (cam_cfg_done),
         .tx         (uart_tx)
     );
 
