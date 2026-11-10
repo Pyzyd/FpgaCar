@@ -14,7 +14,7 @@
 module uart_report_tb;
 
     localparam real BIT_NS = 1.0e9 / 115200.0;
-    localparam integer MSG_LEN = 30;
+    localparam integer MSG_LEN = 35;
 
     reg         clk = 1'b0;
     reg         rst_n = 1'b0;
@@ -25,12 +25,13 @@ module uart_report_tb;
     reg  [7:0]  line = 8'h00;
     reg  signed [4:0] pos = 5'sd0;
     reg         obstacle = 1'b0;
+    reg  [7:0]  vs_cnt = 8'd0;
     wire        tx;
 
     uart_report #(.CLK_FREQ(24_000_000), .BAUD(115_200), .REPORT_EN(1)) u_dut (
         .clk(clk), .rst_n(rst_n),
         .dist_cm(dist_cm), .dist_valid(dist_valid),
-        .line(line), .pos(pos), .obstacle(obstacle),
+        .line(line), .pos(pos), .obstacle(obstacle), .vs_cnt(vs_cnt),
         .tx(tx)
     );
 
@@ -53,6 +54,7 @@ module uart_report_tb;
         input [7:0]  l,
         input signed [4:0] p,
         input        o,
+        input [7:0]  v,
         input [8*MSG_LEN-1:0] exp_str
     );
         reg [7:0] b;
@@ -60,7 +62,7 @@ module uart_report_tb;
         integer k;
         begin
             @(posedge clk); #1;
-            dist_cm = d; line = l; pos = p; obstacle = o;
+            dist_cm = d; line = l; pos = p; obstacle = o; vs_cnt = v;
             dist_valid = 1'b1;
             @(posedge clk); #1;
             dist_valid = 1'b0;
@@ -72,8 +74,8 @@ module uart_report_tb;
             end
 
             if (got !== exp_str)
-                $display("FAIL: dist=%0d line=%b pos=%0d o=%b\n      got \"%s\"\n      exp \"%s\"",
-                         d, l, p, o, got, exp_str);
+                $display("FAIL: dist=%0d line=%b pos=%0d o=%b v=%0d\n      got \"%s\"\n      exp \"%s\"",
+                         d, l, p, o, v, got, exp_str);
             else
                 $display("PASS: \"%s\"", got);
         end
@@ -90,14 +92,14 @@ module uart_report_tb;
         #200 rst_n = 1'b1;
         #500;
 
-        check_frame(16'd123, 8'b0001_1000, 5'sd2, 1'b0,
-                    {"D=123cm T=00011000 P=+02 O=0", 8'h0D, 8'h0A});
+        check_frame(16'd123, 8'b0001_1000, 5'sd2, 1'b0, 8'd3,
+                    {"D=123cm T=00011000 P=+02 O=0 V=03", 8'h0D, 8'h0A});
 
-        check_frame(16'hFFFF, 8'b1000_0001, -5'sd7, 1'b1,
-                    {"D=---cm T=10000001 P=-07 O=1", 8'h0D, 8'h0A});
+        check_frame(16'hFFFF, 8'b1000_0001, -5'sd7, 1'b1, 8'd0,
+                    {"D=---cm T=10000001 P=-07 O=1 V=00", 8'h0D, 8'h0A});
 
-        check_frame(16'd7, 8'b0000_0000, 5'sd0, 1'b0,
-                    {"D=007cm T=00000000 P=+00 O=0", 8'h0D, 8'h0A});
+        check_frame(16'd7, 8'b0000_0000, 5'sd0, 1'b0, 8'd42,
+                    {"D=007cm T=00000000 P=+00 O=0 V=42", 8'h0D, 8'h0A});
 
         $display("INFO: uart_report_tb done");
         $finish;

@@ -34,6 +34,10 @@ module FpgaCar_tb;
     reg         cmos_href;
     reg         cmos_vsync;
     reg  [7:0]  cmos_data;
+    wire        cmos_sclk;
+    reg         cmos_sdat_IN;
+    wire        cmos_sdat_OUT;
+    wire        cmos_sdat_OE;
     wire        cmos_rst_n;
     wire        cmos_pwdn;
     wire        ml_in1, ml_in2, ml_pwm;
@@ -64,6 +68,7 @@ module FpgaCar_tb;
         enc_la     = 1'b0;  enc_lb = 1'b0;
         enc_ra     = 1'b0;  enc_rb = 1'b0;
         uart_rx    = 1'b1;                  // UART 空闲
+        cmos_sdat_IN = 1'b1;                // SCCB 总线释放（外部上拉）
         ir_l       = 1'b1;  ir_r = 1'b1;     // 红外无遮挡
     end
 
@@ -88,6 +93,10 @@ module FpgaCar_tb;
         .cmos_href    (cmos_href),
         .cmos_vsync   (cmos_vsync),
         .cmos_data    (cmos_data),
+        .cmos_sclk    (cmos_sclk),
+        .cmos_sdat_IN (cmos_sdat_IN),
+        .cmos_sdat_OUT(cmos_sdat_OUT),
+        .cmos_sdat_OE (cmos_sdat_OE),
         .cmos_rst_n   (cmos_rst_n),
         .cmos_pwdn    (cmos_pwdn),
         .ml_in1       (ml_in1),

@@ -82,6 +82,11 @@ module FpgaCar (
     input  wire         cmos_href,
     input  wire         cmos_vsync,
     input  wire [7:0]   cmos_data,
+    // SCCB（配置 OV5640 用）：SCLK 单向输出；SDAT 物理是 inout，按 Efinix 规矩拆三根
+    output wire         cmos_sclk,      // GPIOL_09，mode=output
+    input  wire         cmos_sdat_IN,   // GPIOR_13 回读
+    output wire         cmos_sdat_OUT,  // 送向 GPIOR_13
+    output wire         cmos_sdat_OE,   // 1=驱动，0=释放靠外部上拉
     // 【为什么这里没有 cmos_xclk 端口】Efinix 的时钟输出不走 RTL：
     //   时钟树直接连到 interface block，clkout 型 GPIO 由 Interface Designer
     //   按 clock_name 取时钟网输出，RTL 里既没有这个端口也不能 assign。
@@ -150,8 +155,7 @@ module FpgaCar (
     assign mr_in2     = 1'b0;
     assign motor_stby = PWM_BENCH_TEST;   // 1=TB6612 工作，0=待机
 
-    assign cmos_rst_n = 1'b1;       // 上电时序还没做（A3.1 再做 1ms/20ms）
-    assign cmos_pwdn  = 1'b0;
+    // cmos_rst_n / cmos_pwdn / cmos_sclk / cmos_sdat_* 均由 cam_probe 驱动（见下）
 
     // ------------------------------------------------------------------
     // 子模块实例化：PWM 发生器（电机调速）+ 编码器解码（里程反馈）
@@ -257,8 +261,36 @@ module FpgaCar (
     wire obstacle = hc_near | ir_det;
 
     // ------------------------------------------------------------------
+    // 摄像头上电时序 + VSYNC 探测（A3.1）
+    // 里程碑：串口 V>0 就说明 XCLK、DVP 接线、复位全对 —— 与 SCCB 无关。
+    // ------------------------------------------------------------------
+    wire        cam_ready;
+    wire [7:0]  cam_vs_cnt;
+    wire        cam_vs_act;
+
+    cam_probe #(
+        .CLK_FREQ     (24_000_000),
+        .RST_LOW_MS   (1),
+        .CFG_DELAY_MS (20),
+        .WIN_MS       (100)
+    ) u_cam (
+        .clk           (clk),
+        .rst_n         (sys_rst_n),
+        .cam_rst_n     (cmos_rst_n),
+        .cam_pwdn      (cmos_pwdn),
+        .sccb_sclk     (cmos_sclk),
+        .sccb_sdat_in  (cmos_sdat_IN),
+        .sccb_sdat_out (cmos_sdat_OUT),
+        .sccb_sdat_oe  (cmos_sdat_OE),
+        .vsync         (cmos_vsync),
+        .ready         (cam_ready),
+        .vs_cnt        (cam_vs_cnt),
+        .vs_act        (cam_vs_act)
+    );
+
+    // ------------------------------------------------------------------
     // 调试串口：每测一次距离打一行
-    //   D=123cm T=00011000 P=+02 O=0\r\n
+    //   D=123cm T=00011000 P=+02 O=0 V=03\r\n
     // ------------------------------------------------------------------
     uart_report #(
         .CLK_FREQ  (24_000_000),
@@ -272,6 +304,7 @@ module FpgaCar (
         .line       (line_bits),
         .pos        (line_pos),
         .obstacle   (obstacle),
+        .vs_cnt     (cam_vs_cnt),
         .tx         (uart_tx)
     );
 

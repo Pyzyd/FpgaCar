@@ -246,6 +246,64 @@ D=123cm T=00011000 P=+02 O=0
    的 "input 24Mhz, PCLK 42Mhz" 即 1.75 倍）。XCLK=16 MHz → **PCLK ≈ 28 MHz**；若真测到
    ≈47.25 MHz，则说明 XCLK 实际是 27 MHz，也就是当前 peri.xml 与实际位流不一致，必须重编核对。
 
+## 3.10 进度记录：2026-11-10 第四轮（A3.1 摄像头链路探测）
+
+### 新增 `src/cam_probe.v`
+
+只做三件事，**不碰 SCCB**（那是 A3.2）：
+
+1. **上电时序**：`pwdn=0` → `rst_n` 拉低 **1 ms** → 拉高 → 再等 **20 ms** 才 `ready=1`。
+   太快会导致传感器内部稳压/时钟未稳、后面配置全不生效（最经典的坑）。
+2. **SCCB 空闲**：`sclk=1`、`sdat_oe=0`（释放靠外部 4.7k 上拉）。
+3. **VSYNC 统计**：两级同步 + 上升沿计数，100 ms 窗口锁存 → 串口 `V=xx`。
+   OV5640 只要 XCLK 在跑、复位正确，**一条寄存器都不配也会输出默认帧**，
+   所以 `V>0` 能把"时钟/接线/复位"和"SCCB 通不通"彻底解耦。
+
+### `peri.xml` 补齐 14 个 `cmos_*` 引脚
+
+全部从官方 `Ti60_Demo.peri.xml` **原样复制**（同板同网络，避免手写属性出错），
+`--flow interface` PASS，`pinout.csv` 逐条核对：
+
+| 信号 | 引脚 | bank/电平 | 模式 |
+|---|---|---|---|
+| cmos_xclk | C12 / GPIOR_16 | TR 3.3V | clkout（clock_name=clk） |
+| cmos_pclk | B8 / GPIOT_P_07 | 2A 1.8V | input（gclk, delay=15） |
+| cmos_href | D12 / GPIOR_20 | TR 3.3V | input |
+| cmos_vsync | A3 / GPIOL_03 | TL 3.3V | input |
+| cmos_data[0..7] | R3,R4,C3,A14,B5,B14,C4,A13 | 3.3V | input（bus cmos_data） |
+| cmos_sclk | A4 / GPIOL_09 | TL 3.3V | output |
+| cmos_sdat | A12 / GPIOR_13 | TR 3.3V | inout（生成 _IN/_OUT/_OE） |
+| cmos_rst_n | B3 / GPIOL_04 | TL 3.3V | output |
+| cmos_pwdn | R2 / GPIOL_N_00 | 1A 1.8V | output |
+
+### 调试行扩到 35 字节
+
+```
+D=123cm T=00011000 P=+02 O=0 V=03\r\n
+```
+
+`V=` 是 100 ms 窗口内的 VSYNC 个数（30 fps 时约 3）。
+
+### 本轮两个真实 bug
+
+1. **`uart_report.v` 的 `idx` 只有 5 位**（最大 31）。消息从 30 字节加长到 35 字节后，
+   `idx == MSG_LEN` 永远不成立 → 报文无限循环、CR/LF 发不出去，串口看到的是一串
+   重复的乱码。**加长报文时必须同步加宽索引位宽。**
+2. **1.8V LVCMOS 的 `drive_strength` 只允许 16/12/8/4**。从官方 3.3V 块复制来的
+   `drive_strength="2"` 让 `cmos_pwdn` 报 `gpio_rule_drive_strength` 错误，
+   `--flow interface` 直接 FAIL（`outflow/design_issue.xml` 里能看到具体规则名）。
+   Interface Designer 失败时先去读 `outflow/design_issue.xml`，比看控制台快。
+
+### 编译实测
+
+`interface` 数秒 PASS → `map` 1.5 min（ADD 201 / LUT4 598 / FF 356 / DSP48 2）→
+`pnr` 2.5 min（setup slack **37.122 ns**）→ `pgm` PASS，位流 **22:43:36**。
+
+### 遗留（预期内）
+
+`cmos_pclk` / `cmos_href` / `cmos_data[7:0]` / `cmos_sdat_IN` 仍报 `VDB-8003 unconnected`
+—— 采集逻辑（A3.3）和 SCCB（A3.2）还没接，等它们接入自然消失。
+
 ## 3.8 编译状态：已全部跑通，无需再手工做第 1–5 步
 
 以下步骤历史上走过的 GUI 路径保留作参考；当前工程已配置完成，直接打开即可编译下载：

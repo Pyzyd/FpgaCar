@@ -30,10 +30,11 @@ module uart_report #(
     input  wire [7:0]  line,       // 循迹压线位图
     input  wire signed [4:0] pos,  // 线位置
     input  wire        obstacle,   // 障碍标志
+    input  wire [7:0]  vs_cnt,     // 摄像头 VSYNC 计数（100 ms 窗口）
     output wire        tx
 );
 
-    localparam integer MSG_LEN = 30;
+    localparam integer MSG_LEN = 35;
 
     // ------------------------------------------------------------------
     // 无符号除以 10（移位-减法，10 次迭代，纯组合）
@@ -77,11 +78,12 @@ module uart_report #(
     // 报文组装
     // ------------------------------------------------------------------
     reg  [7:0]  msg [0:MSG_LEN-1];
-    reg  [4:0]  idx;
+    reg  [5:0]  idx;        // 6 位：MSG_LEN 已到 35，5 位只能数到 31（曾经因此死循环发不完）
 
     reg  [9:0]  v10;         // 距离（0..999）
     reg         bad;         // 距离无效
     reg  [7:0]  ln;          // 锁存的循迹位图
+    reg  [7:0]  vs;          // 锁存的 VSYNC 计数
     reg  signed [4:0] pz;    // 锁存的位置
     reg         obst;        // 锁存的障碍标志
 
@@ -100,6 +102,10 @@ module uart_report #(
     wire [7:0]  p_tt  = p_t;
     wire [7:0]  p_uu  = {3'd0, p_mag} - p_t * 8'd10;
 
+    // VSYNC 十进制（0..99，两位；Verilog-2001 不能对函数返回值直接取位，先落成 wire）
+    wire [7:0]  v_t   = div10u({2'b00, vs});
+    wire [7:0]  v_u   = vs - v_t * 8'd10;
+
     localparam [1:0] R_IDLE = 2'd0,
                      R_LOAD = 2'd1,
                      R_SEND = 2'd2,
@@ -112,10 +118,11 @@ module uart_report #(
             rstate   <= R_IDLE;
             tx_start <= 1'b0;
             tx_data  <= 8'h00;
-            idx      <= 5'd0;
+            idx      <= 6'd0;
             v10      <= 10'd0;
             bad      <= 1'b1;
             ln       <= 8'h00;
+            vs       <= 8'h00;
             pz       <= 5'sd0;
             obst     <= 1'b0;
         end else begin
@@ -123,7 +130,7 @@ module uart_report #(
 
             case (rstate)
             R_IDLE: begin
-                idx <= 5'd0;
+                idx <= 6'd0;
                 if (REPORT_EN != 0 && dist_valid) rstate <= R_LOAD;
             end
 
@@ -132,6 +139,7 @@ module uart_report #(
                 bad  <= bad_now;
                 v10  <= v_now;
                 ln   <= line;
+                vs   <= vs_cnt;
                 pz   <= pos;
                 obst <= obstacle;
                 rstate <= R_SEND;
@@ -143,7 +151,7 @@ module uart_report #(
                 end else if (!tx_busy && !tx_start) begin
                     tx_data  <= msg[idx];
                     tx_start <= 1'b1;
-                    idx      <= idx + 5'd1;
+                    idx      <= idx + 6'd1;
                     rstate   <= R_WAIT;
                 end
             end
@@ -190,8 +198,13 @@ module uart_report #(
         msg[25] = 8'h4F;                                   // 'O'
         msg[26] = 8'h3D;                                   // '='
         msg[27] = obst ? 8'h31 : 8'h30;
-        msg[28] = 8'h0D;                                   // CR
-        msg[29] = 8'h0A;                                   // LF
+        msg[28] = 8'h20;                                   // ' '
+        msg[29] = 8'h56;                                   // 'V'
+        msg[30] = 8'h3D;                                   // '='
+        msg[31] = (vs > 8'd99) ? 8'h39 : (8'h30 + v_t[3:0]);   // 十位（>99 显示 9 饱和）
+        msg[32] = (vs > 8'd99) ? 8'h39 : (8'h30 + v_u[3:0]);   // 个位
+        msg[33] = 8'h0D;                                   // CR
+        msg[34] = 8'h0A;                                   // LF
     end
 
 endmodule
