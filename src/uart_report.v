@@ -32,10 +32,12 @@ module uart_report #(
     input  wire        obstacle,   // 障碍标志
     input  wire [7:0]  vs_cnt,     // 摄像头 VSYNC 计数（100 ms 窗口）
     input  wire        cam_done,   // SCCB 配置完成
+    input  wire [15:0] cam_width,  // DVP 一行像素数
+    input  wire [15:0] cam_height, // DVP 一帧行数
     output wire        tx
 );
 
-    localparam integer MSG_LEN = 39;
+    localparam integer MSG_LEN = 52;
 
     // ------------------------------------------------------------------
     // 无符号除以 10（移位-减法，10 次迭代，纯组合）
@@ -57,6 +59,29 @@ module uart_report #(
                 end
             end
             div10u = q[7:0];
+        end
+    endfunction
+
+    // ------------------------------------------------------------------
+    // 16 位无符号除以 10（W/H 是 0..9999，原来的 div10u 只有 10 位不够）
+    // ------------------------------------------------------------------
+    function [15:0] dv10;
+        input [15:0] x;
+        integer i;
+        reg [15:0] q;
+        reg [15:0] r;
+        begin
+            q = 16'd0;
+            r = 16'd0;
+            for (i = 15; i >= 0; i = i - 1) begin
+                r = {r[14:0], x[i]};
+                q = q << 1;
+                if (r >= 16'd10) begin
+                    r = r - 16'd10;
+                    q = q + 16'd1;
+                end
+            end
+            dv10 = q;
         end
     endfunction
 
@@ -86,6 +111,7 @@ module uart_report #(
     reg  [7:0]  ln;          // 锁存的循迹位图
     reg  [7:0]  vs;          // 锁存的 VSYNC 计数
     reg         camd;        // 锁存的 SCCB 完成标志
+    reg  [15:0] cw, ch;      // 锁存的摄像头宽/高
     reg  signed [4:0] pz;    // 锁存的位置
     reg         obst;        // 锁存的障碍标志
 
@@ -108,6 +134,21 @@ module uart_report #(
     wire [7:0]  v_t   = div10u({2'b00, vs});
     wire [7:0]  v_u   = vs - v_t * 8'd10;
 
+    // W 四位 / H 三位
+    wire [15:0] w1 = dv10(cw);
+    wire [15:0] w2 = dv10(w1);
+    wire [15:0] w3 = dv10(w2);
+    wire [15:0] wd3 = w3;
+    wire [15:0] wd2 = w2 - w3 * 16'd10;
+    wire [15:0] wd1 = w1 - w2 * 16'd10;
+    wire [15:0] wd0 = cw - w1 * 16'd10;
+
+    wire [15:0] h1 = dv10(ch);
+    wire [15:0] h2 = dv10(h1);
+    wire [15:0] hd2 = h2;
+    wire [15:0] hd1 = h1 - h2 * 16'd10;
+    wire [15:0] hd0 = ch - h1 * 16'd10;
+
     localparam [1:0] R_IDLE = 2'd0,
                      R_LOAD = 2'd1,
                      R_SEND = 2'd2,
@@ -126,6 +167,8 @@ module uart_report #(
             ln       <= 8'h00;
             vs       <= 8'h00;
             camd     <= 1'b0;
+            cw       <= 16'd0;
+            ch       <= 16'd0;
             pz       <= 5'sd0;
             obst     <= 1'b0;
         end else begin
@@ -144,6 +187,8 @@ module uart_report #(
                 ln   <= line;
                 vs   <= vs_cnt;
                 camd <= cam_done;
+                cw   <= cam_width;
+                ch   <= cam_height;
                 pz   <= pos;
                 obst <= obstacle;
                 rstate <= R_SEND;
@@ -211,8 +256,21 @@ module uart_report #(
         msg[34] = 8'h43;                                   // 'C'
         msg[35] = 8'h3D;                                   // '='
         msg[36] = camd ? 8'h31 : 8'h30;                    // SCCB 配置完成 = 1
-        msg[37] = 8'h0D;                                   // CR
-        msg[38] = 8'h0A;                                   // LF
+        msg[37] = 8'h20;                                   // ' '
+        msg[38] = 8'h57;                                   // 'W'
+        msg[39] = 8'h3D;                                   // '='
+        msg[40] = 8'h30 + wd3[3:0];
+        msg[41] = 8'h30 + wd2[3:0];
+        msg[42] = 8'h30 + wd1[3:0];
+        msg[43] = 8'h30 + wd0[3:0];
+        msg[44] = 8'h20;                                   // ' '
+        msg[45] = 8'h48;                                   // 'H'
+        msg[46] = 8'h3D;                                   // '='
+        msg[47] = 8'h30 + hd2[3:0];
+        msg[48] = 8'h30 + hd1[3:0];
+        msg[49] = 8'h30 + hd0[3:0];
+        msg[50] = 8'h0D;                                   // CR
+        msg[51] = 8'h0A;                                   // LF
     end
 
 endmodule

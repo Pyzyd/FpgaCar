@@ -228,6 +228,26 @@ module FpgaCar (
     );
 
     // ------------------------------------------------------------------
+    // DVP 时序统计（A3.3）：在 pclk 域量每行像素/每帧行数，跨域送回
+    // ------------------------------------------------------------------
+    wire [15:0] dvp_width, dvp_height;
+    wire [31:0] dvp_frames;
+    wire        dvp_new_frame;
+
+    dvp_capture u_dvp (
+        .clk       (clk),
+        .rst_n     (sys_rst_n),
+        .pclk      (cmos_pclk),
+        .href      (cmos_href),
+        .vsync     (cmos_vsync),
+        .data      (cmos_data),
+        .width     (dvp_width),
+        .height    (dvp_height),
+        .frames    (dvp_frames),
+        .new_frame (dvp_new_frame)
+    );
+
+    // ------------------------------------------------------------------
     // 调试串口：每测一次距离打一行 "D=xxxcm\r\n"（CH340N，115200-8-N-1）
     // 这是现场 5 分钟调试窗口里最省事的观测手段，比接示波器快。
     // ------------------------------------------------------------------
@@ -327,6 +347,8 @@ module FpgaCar (
         .obstacle   (obstacle),
         .vs_cnt     (cam_vs_cnt),
         .cam_done   (cam_cfg_done),
+        .cam_width  (dvp_width),
+        .cam_height (dvp_height),
         .tx         (uart_tx)
     );
 
