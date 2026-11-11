@@ -34,10 +34,11 @@ module uart_report #(
     input  wire        cam_done,   // SCCB 配置完成
     input  wire [15:0] cam_width,  // DVP 一行像素数
     input  wire [15:0] cam_height, // DVP 一帧行数
+    input  wire [2:0]  cam_color,  // 主色：0其他 1红 2绿 3蓝 4黄 5白
     output wire        tx
 );
 
-    localparam integer MSG_LEN = 52;
+    localparam integer MSG_LEN = 56;
 
     // ------------------------------------------------------------------
     // 无符号除以 10（移位-减法，10 次迭代，纯组合）
@@ -104,7 +105,7 @@ module uart_report #(
     // 报文组装
     // ------------------------------------------------------------------
     reg  [7:0]  msg [0:MSG_LEN-1];
-    reg  [5:0]  idx;        // 6 位：MSG_LEN 已到 35，5 位只能数到 31（曾经因此死循环发不完）
+    reg  [5:0]  idx;        // 6 位：MSG_LEN=56，5 位只能数到 31（曾经因此死循环发不完）
 
     reg  [9:0]  v10;         // 距离（0..999）
     reg         bad;         // 距离无效
@@ -112,6 +113,7 @@ module uart_report #(
     reg  [7:0]  vs;          // 锁存的 VSYNC 计数
     reg         camd;        // 锁存的 SCCB 完成标志
     reg  [15:0] cw, ch;      // 锁存的摄像头宽/高
+    reg  [2:0]  col;         // 锁存的主色
     reg  signed [4:0] pz;    // 锁存的位置
     reg         obst;        // 锁存的障碍标志
 
@@ -169,6 +171,7 @@ module uart_report #(
             camd     <= 1'b0;
             cw       <= 16'd0;
             ch       <= 16'd0;
+            col      <= 3'd0;
             pz       <= 5'sd0;
             obst     <= 1'b0;
         end else begin
@@ -189,6 +192,7 @@ module uart_report #(
                 camd <= cam_done;
                 cw   <= cam_width;
                 ch   <= cam_height;
+                col  <= cam_color;
                 pz   <= pos;
                 obst <= obstacle;
                 rstate <= R_SEND;
@@ -269,8 +273,12 @@ module uart_report #(
         msg[47] = 8'h30 + hd2[3:0];
         msg[48] = 8'h30 + hd1[3:0];
         msg[49] = 8'h30 + hd0[3:0];
-        msg[50] = 8'h0D;                                   // CR
-        msg[51] = 8'h0A;                                   // LF
+        msg[50] = 8'h20;                                   // ' '
+        msg[51] = 8'h51;                                   // 'Q'
+        msg[52] = 8'h3D;                                   // '='
+        msg[53] = 8'h30 + {5'd0, col};                     // 主色代码 0~5
+        msg[54] = 8'h0D;                                   // CR
+        msg[55] = 8'h0A;                                   // LF
     end
 
 endmodule

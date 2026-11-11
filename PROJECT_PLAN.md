@@ -58,8 +58,12 @@ FpgaCar/
 > **2026-11-10 第二轮的进展**：`src/` 现有 7 个文件、5 个子模块已例化进顶层，
 > 全部通过 iVerilog 自测并重新生成位流（详见 §3.7）。
 >
-> **当前状态（2026-11-10 第三轮后，以 §3.9 / §4 为准）**：`src/` 已 8 个模块（新增 `track_line.v`）、
-> `sim/` 8 个 tb 全 PASS，位流最新版 `outflow/FpgaCar.bit` = **19:50**，顶层处于 `PWM_BENCH_TEST=1` 台架态。
+> **当前状态（2026-11-10 第三轮后，历史快照）**：`src/` 已 8 个模块（新增 `track_line.v`）、
+> `sim/` 8 个 tb 全 PASS，当时位流 `outflow/FpgaCar.bit` = **19:50**，顶层处于 `PWM_BENCH_TEST=1` 台架态。
+>
+> **⚠ 最新状态以 §3.14 为准（2026-11-11 21:38）**：`src/` 14 个设计文件、`sim/` 12 个 tb，
+> A3.4 颜色识别已进网表且 `map`/`pnr`/`pgm` 全 PASS，位流 **21:38:30**。
+> 顶层仍 `PWM_BENCH_TEST=1` 台架态，上地前须改回 0。
 
 ## 3.5 管脚与电平分配（已在 FpgaCar.peri.xml 落实，2026-11-10）
 
@@ -486,6 +490,70 @@ D=---cm T=00000000 P=+00 O=0 V=03 C=0 W=5184 H=801     ← 配置生效前的过
 
 另：`frames` 计数与 `V=` 互相印证（A3.3 的 `dvp_capture` 内部有 `frames`，暂未打印）。
 
+## 3.14 进度记录：2026-11-11（A3.4 颜色识别，已完成含全链路编译）
+
+### 新增 `src/color_detect.v`
+
+**流式统计，不需要帧缓存/DDR**：DVP 逐像素流，颜色块识别只要统计"一帧里各颜色各占多少像素"，
+纯计数器即可。5 个 20 位计数器（1280×720 = 92 万像素/帧）。
+
+| 输出 | 含义 |
+|---|---|
+| `color[2:0]` | 每帧一次的主色码：0=其他 1=红 2=绿 3=蓝 4=黄 5=白 |
+| `new_color` | 1 clk 脉冲（clk 域），跨域用 toggle + 两级同步 |
+
+分类链：先按 `R+G+B` 判黑（<36）与亮（>150），再判黄（R、G 都 >30 且 B <26），
+最后按通道领先 `DOM_MARGIN=14` 判红/绿/蓝。阈值均为参数，上板按 `Q=` 调。
+
+### 调试行扩到 56 字节
+
+```
+D=123cm T=00011000 P=+02 O=0 V=03 C=1 W=1280 H=720 Q=1
+```
+
+`Q=` 是主色代码。`idx` 已到 6 位上限 63，**再加字段必须放宽位宽**。
+
+### 本轮三个真实 bug（都在 color_detect 第一版里）
+
+1. **`BRIGHT_SUM = 7'd150` 超出 7 位**（最大 127）被截断成 22，判定全乱。
+   `R+G+B` 最大 187，必须 8 位。
+2. **给 HREF 做 2FF、data 不做**，两者错开 2 拍 → **字节奇偶整体反相**，
+   现象是"纯红被判成纯蓝"（R=B 互换）。
+   **在 pclk 域里 HREF/DATA/VSYNC 本来就是同步信号，只需一级寄存器，不能做 2FF。**
+3. **测试台在 posedge 改数据**，与 DUT 的采样沿打架。真实 OV5640 是**下降沿换数据、
+   上升沿数据稳定**，tb 必须在 negedge 更新 data/href/vsync。
+
+修完 `color_detect_tb` 7 项全 PASS（红/绿/蓝/黄/黑/小色斑/new_color 计数）。
+
+### 当前状态（2026-11-11 21:38 复核并收尾）
+
+- **补工程文件列表**：此前只写"已加"但实际没加。本轮已在 `FpgaCar/FpgaCar.xml` 的
+  `<efx:design_file>` 列表补上 `src/color_detect.v`（现共 14 个设计文件），
+  否则 `FpgaCar.v:256` 例化的 `color_detect u_color` 会在综合时报
+  `VERI-1063 instantiating unknown module 'color_detect'`。iverilog 不读 xml，
+  所以此前"仿真全 PASS"掩盖了这个缺口（同类坑见 §3.9:222）。
+- **shell 问题查清**：报 `spawn C:\Program Files\PowerShell\7\pwsh.exe ENOENT` 的是
+  编辑器侧的命令通道，不是本机缺文件——本机 `pwsh.exe` = 7.6.10 仍在，
+  `C:\Efinity\2026.1\bin\efx_run.bat` 也在。改用 `cmd.exe /c` 直接调用即绕开，
+  无需重装 PowerShell。
+- **仿真复验**（iverilog 10.x，`-g2012 -Wall`）：
+  `color_detect_tb` 7 项 PASS、`uart_report_tb` 3 项 PASS、`FpgaCar_tb` 顶层 smoke 5 项 PASS。
+- **全链路编译已跑通**（`cmd.exe /c efx_run.bat --flow <map|pnr|pgm> FpgaCar.xml`，三流水 EXIT=0）：
+  `map` PASS（**EFX_ADD 276 / EFX_LUT4 2053 / EFX_FF 697 / DSP48 2**；
+  `outflow/FpgaCar.hier_util.rpt` 里 `u_color` = 559 LUT / 104 FF，
+  `outflow/FpgaCar.map.out:27,41` 有 `color_detect.v` 的分析与编译记录，证明已进网表）→
+  `pnr` PASS（setup slack **36.462 ns**）→ `pgm` PASS。
+  位流 **`outflow/FpgaCar.bit` / `.hex` = 2026-11-11 21:38:30**（.bit 1665102 B）。
+- 顺手修 `src/uart_report.v:108` 注释笔误：`MSG_LEN 已到 35` → `MSG_LEN=56`（实际值从未变）。
+
+### 上板判据
+
+| 现象 | 含义 |
+|---|---|
+| 对着纯红 `Q=1`、纯绿 `Q=2`、纯蓝 `Q=3` | ✅ RGB565 假设成立，颜色通路打通 |
+| 对着红/绿/蓝 `Q` 都一样或都 0 | 输出不是 RGB565（可能是 YUV422），需要 YUV→RGB 转换 |
+| `Q=5` 一直出现 | 白色阈值太低（白纸背景被当成主色） |
+
 ## 3.8 编译状态：已全部跑通，无需再手工做第 1–5 步
 
 以下步骤历史上走过的 GUI 路径保留作参考；当前工程已配置完成，直接打开即可编译下载：
@@ -563,9 +631,14 @@ track_line + ir 融合的最新版）→ JTAG → Start Program。5 项预期里
 
 ## 5. 子模块开发顺序（按依赖与风险排）
 
-**已完成（2026-11-10，以 §3.9 为准）**：`pwm_gen.v`、`encoder_dec.v`、`i2c_master.v`、`hc_sr04.v`、
+**已完成（历史快照 2026-11-10）**：`pwm_gen.v`、`encoder_dec.v`、`i2c_master.v`、`hc_sr04.v`、
 `uart_tx.v`、`uart_report.v`、`track_line.v` 共 7 个模块全部例化进顶层并跑通仿真；
-最新综合：**EFX_ADD 166 / EFX_LUT4 486 / EFX_FF 296 / DSP48 2**，P&R setup slack 36.36 ns，位流已生成。
+当时综合 EFX_ADD 166 / EFX_LUT4 486 / EFX_FF 296 / DSP48 2，P&R setup slack 36.36 ns。
+**⚠ 这些数字已过时**：截至 §3.14（2026-11-11 21:38）`src/` 共 14 个设计文件（新增
+`cam_probe.v` / `dvp_capture.v` / `i2c_timing_ctrl_16bit.v` / `I2C_OV5640_1280720_Config.v` /
+`cam_sccb_cfg.v` / `color_detect.v`），`FpgaCar.xml` 14 条 `<efx:design_file>`，
+最新综合 **EFX_ADD 276 / EFX_LUT4 2053 / EFX_FF 697 / DSP48 2**，setup slack 36.462 ns，位流 21:38:30。
+下表 ① ③ ④ 的 ✅/待办状态也以 §3.11–§3.14 为准（① 和 ③ 前半已完成；**④ `oled_driver.v` 仍是实打实缺口**）。
 
 | 阶段 | 加进 `src/` 的模块 | 说明 | 对应分值 |
 | ① 接口控制器（收益最大、风险最低） | ✅ `pwm_gen.v`、✅ `encoder_dec.v`、✅ `i2c_master.v`、✅ `hc_sr04.v`、✅ `uart_tx.v` + ✅ `uart_report.v`；仍缺 `sccb_cfg.v`、`clk_div.v`（后者其实不需要，PLL 走 Interface Designer） | 全部片内 RTL，只需 IO + 无源上拉，不买任何芯片。已完成部分见 §3.7 | 全部 |

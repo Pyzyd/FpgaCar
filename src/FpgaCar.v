@@ -248,6 +248,23 @@ module FpgaCar (
     );
 
     // ------------------------------------------------------------------
+    // 颜色识别（A3.4）：流式统计，不需要帧缓存
+    // ------------------------------------------------------------------
+    wire [2:0] cam_color;
+    wire       cam_color_evt;
+
+    color_detect u_color (
+        .clk       (clk),
+        .rst_n     (sys_rst_n),
+        .pclk      (cmos_pclk),
+        .href      (cmos_href),
+        .vsync     (cmos_vsync),
+        .data      (cmos_data),
+        .color     (cam_color),
+        .new_color (cam_color_evt)
+    );
+
+    // ------------------------------------------------------------------
     // 调试串口：每测一次距离打一行 "D=xxxcm\r\n"（CH340N，115200-8-N-1）
     // 这是现场 5 分钟调试窗口里最省事的观测手段，比接示波器快。
     // ------------------------------------------------------------------
@@ -349,6 +366,7 @@ module FpgaCar (
         .cam_done   (cam_cfg_done),
         .cam_width  (dvp_width),
         .cam_height (dvp_height),
+        .cam_color  (cam_color),
         .tx         (uart_tx)
     );
 
