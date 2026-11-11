@@ -38,6 +38,7 @@ module FpgaCar_tb;
     reg         cmos_sdat_IN;
     wire        cmos_sdat_OUT;
     wire        cmos_sdat_OE;
+    wire        cmos_ctl1;
     wire        cmos_rst_n;
     wire        cmos_pwdn;
     wire        ml_in1, ml_in2, ml_pwm;
@@ -97,6 +98,7 @@ module FpgaCar_tb;
         .cmos_sdat_IN (cmos_sdat_IN),
         .cmos_sdat_OUT(cmos_sdat_OUT),
         .cmos_sdat_OE (cmos_sdat_OE),
+        .cmos_ctl1    (cmos_ctl1),
         .cmos_rst_n   (cmos_rst_n),
         .cmos_pwdn    (cmos_pwdn),
         .ml_in1       (ml_in1),

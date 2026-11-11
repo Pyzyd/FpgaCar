@@ -2,11 +2,11 @@
 // cam_probe.v —— 摄像头上电时序 + 链路探测（A3.1）
 // -----------------------------------------------------------------------------
 // 本模块只做三件事，**不碰 SCCB 配置**（那是 A3.2）：
-//   1. 按 OV5640 要求的上电时序放复位：
-//         pwdn = 0（不待机）
-//         rst_n 拉低 ≥ 1 ms  →  拉高  →  再等 ≥ 20 ms  →  ready=1
-//      太快的后果：传感器内部稳压/时钟没稳，后面 SCCB 写进去也不生效，
-//      表现为"配置了半天没反应"，是最常见的坑。
+//   1. 上电等待：复位释放后等 RST_LOW_MS + CFG_DELAY_MS（默认 1+20 ms）才
+//      置 ready，作为 cam_sccb_cfg 的启动条件。
+//      **注意（2026-11-11 实测更正）**：本模块原来还驱动 CTL2/CTL3（当成 rst_n/pwdn），
+//      实测“官方把三根 CTL 全部拉 0”，而我们把 CTL2 给了 1 时传感器**一帧都不出**
+//      （串口 V=00）。CTL 引脚现在全部由顶层恒 0 驱动，本模块不再碰它们。
 //   2. （A3.2 起已移交）SCCB 两脚现在由 cam_sccb_cfg 驱动，本模块只提供 ready 作为它的启动条件。
 //   3. 统计 VSYNC 上升沿个数（100 ms 窗口）：
 //      OV5640 只要 XCLK 在跑、复位正确，**即使一条寄存器都没配**也会输出默认
@@ -27,9 +27,6 @@ module cam_probe #(
 ) (
     input  wire        clk,
     input  wire        rst_n,        // 系统复位（已同步化）
-    // ---- 到传感器的控制脚 ----
-    output reg         cam_rst_n,    // CMOS_CTL2（GPIOL_04）
-    output reg         cam_pwdn,     // CMOS_CTL3（GPIOL_N_00）
     // ---- 从传感器来的探测信号 ----
     input  wire        vsync,        // CMOS_VSYNC
     // ---- 结果 ----
@@ -65,22 +62,13 @@ module cam_probe #(
 
     always @(posedge clk or negedge rst_n)
         if (!rst_n) begin
-            ms_cnt    <= 16'd0;
-            cam_rst_n <= 1'b0;
-            cam_pwdn  <= 1'b0;      // 0 = 不休眠
-            ready     <= 1'b0;
-        end else begin
-            cam_pwdn <= 1'b0;
-            if (ms_tick) begin
-                if (ms_cnt < RST_LOW_MS + CFG_DELAY_MS) begin
-                    ms_cnt <= ms_cnt + 16'd1;
-                end
-                // 第 RST_LOW_MS 个毫秒到点后释放复位
-                if (ms_cnt >= RST_LOW_MS - 1)
-                    cam_rst_n <= 1'b1;
-                if (ms_cnt >= RST_LOW_MS + CFG_DELAY_MS - 1)
-                    ready <= 1'b1;
-            end
+            ms_cnt <= 16'd0;
+            ready  <= 1'b0;
+        end else if (ms_tick) begin
+            if (ms_cnt < RST_LOW_MS + CFG_DELAY_MS)
+                ms_cnt <= ms_cnt + 16'd1;
+            if (ms_cnt >= RST_LOW_MS + CFG_DELAY_MS - 1)
+                ready <= 1'b1;
         end
 
     // ------------------------------------------------------------------

@@ -93,8 +93,12 @@ module FpgaCar (
     //   本工程在 FpgaCar.peri.xml 里建了 comp_gpio name="cmos_xclk"
     //   gpio_def="GPIOR_16" mode="clkout"，clock_name 指向系统 24 MHz 时钟。
     //   对照：官方 02-1_Ti60_OV5640 的 example_top.v 同样没有 cmos_xclk 端口。
-    output wire         cmos_rst_n,     // CMOS_CTL0/1
-    output wire         cmos_pwdn,      // CMOS_CTL2/3
+    // 三根 CTL：**必须全部驱动 0**（照抄官方 example_top.v:378-383 的实测值）。
+    // 名字沿用硬件接口表的 cmos_rst_n / cmos_pwdn，但电气上它们不是"高有效复位"：
+    // 实测把 CTL2 给 1 会让传感器完全不出图（串口 V=00）。
+    output wire         cmos_ctl1,      // GPIOR_15
+    output wire         cmos_rst_n,     // CMOS_CTL2（GPIOL_04）
+    output wire         cmos_pwdn,      // CMOS_CTL3（GPIOL_N_00）
 
     // ---------------- 运动执行：TB6612FNG（双路 H 桥）----------------
     // 一块 TB6612 带左右两个直流减速电机：IN1/IN2 定方向，PWM 定转速
@@ -155,7 +159,10 @@ module FpgaCar (
     assign mr_in2     = 1'b0;
     assign motor_stby = PWM_BENCH_TEST;   // 1=TB6612 工作，0=待机
 
-    // cmos_rst_n / cmos_pwdn / cmos_sclk / cmos_sdat_* 均由 cam_probe 驱动（见下）
+    // 三根 CTL 恒 0（官方实测值）；SCCB 由 cam_sccb_cfg 驱动（见下）
+    assign cmos_ctl1  = 1'b0;
+    assign cmos_rst_n = 1'b0;       // 不是复位！见端口处注释
+    assign cmos_pwdn  = 1'b0;
 
     // ------------------------------------------------------------------
     // 子模块实例化：PWM 发生器（电机调速）+ 编码器解码（里程反馈）
@@ -276,8 +283,6 @@ module FpgaCar (
     ) u_cam (
         .clk           (clk),
         .rst_n         (sys_rst_n),
-        .cam_rst_n     (cmos_rst_n),
-        .cam_pwdn      (cmos_pwdn),
         .vsync         (cmos_vsync),
         .ready         (cam_ready),
         .vs_cnt        (cam_vs_cnt),

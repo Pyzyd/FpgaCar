@@ -353,6 +353,54 @@ localparam  DELAY_TOP = CLK_FREQ;  //1ms Setting time ...
 `V>0` 且 `C=1` → 摄像头已按 1280x720 配置完成。
 `C=0` → SCCB 没通（查 SDAT 的 4.7k 上拉、上电 20 ms 够不够、XCLK 是否在跑）。
 
+## 3.12 上板实测修正：三根 CMOS_CTL 必须全部驱动 0（2026-11-11）
+
+### 现象
+
+A3.2 位流上板（OV5640 已插 DVP 排针），串口稳定输出：
+
+```
+D=---cm T=00000000 P=+00 O=0 V=00 C=1
+```
+
+`C=1` 说明 252 条寄存器都发出去了，但 `V=00` —— **传感器一帧都没输出**。
+
+### 根因
+
+上一版按硬件接口表的命名，把 CTL2 当"高有效复位释放"驱动为 **1**：
+
+```verilog
+cam_rst_n (CTL2) <= 1;   // ← 错
+```
+
+而官方固件 `example_top.v:378-383` 是：
+
+```verilog
+assign cmos_ctl1_o = 0;  assign cmos_ctl1_oe = 1;
+assign cmos_ctl2_o = 0;  assign cmos_ctl2_oe = 1;
+assign cmos_ctl3_o = 0;  assign cmos_ctl3_oe = 1;
+```
+
+**三根全为 0**。如果 CTL2 接的是 PWDN（高=待机），给 1 就等于让传感器一直掉电待机 →
+无 VSYNC、无 PCLK，正好对上现象。
+
+### 修正
+
+- `src/FpgaCar.v`：`cmos_ctl1`（新增，GPIOR_15）/ `cmos_rst_n`（CTL2）/ `cmos_pwdn`（CTL3）
+  **全部 `assign 1'b0`**，与官方一致。
+- `src/cam_probe.v`：不再驱动任何 CTL，只保留 1+20 ms 的 `ready` 时序与 VSYNC 统计。
+- `FpgaCar.peri.xml`：新增 `cmos_ctl1` GPIO 块（GPIOR_15，output，3.3 V，drive_strength=4）。
+
+### 教训
+
+**引脚名字 ≠ 电气功能**。硬件接口表写的 `cmos_rst_n` / `cmos_pwdn` 是自己起的名字，
+真实的极性/功能必须回到官方 RTL 的赋值去看。这与 §3.9「名字≠频率」是同一类错误。
+
+### 编译
+
+`interface` PASS（`B12/GPIOR_15/cmos_ctl1`）→ `map` PASS → `pnr` PASS → `pgm` PASS，
+位流 **2026-11-11 20:25:59**。
+
 ## 3.8 编译状态：已全部跑通，无需再手工做第 1–5 步
 
 以下步骤历史上走过的 GUI 路径保留作参考；当前工程已配置完成，直接打开即可编译下载：

@@ -24,7 +24,6 @@ module cam_probe_tb;
     always #20.8335 clk = ~clk;
 
     reg  vsync = 1'b0;
-    wire cam_rst_n, cam_pwdn;
     wire ready, vs_act;
     wire [7:0] vs_cnt;
 
@@ -33,7 +32,6 @@ module cam_probe_tb;
         .CFG_DELAY_MS(CFG_DELAY), .WIN_MS(WIN)
     ) u_dut (
         .clk(clk), .rst_n(rst_n),
-        .cam_rst_n(cam_rst_n), .cam_pwdn(cam_pwdn),
         .vsync(vsync), .ready(ready), .vs_cnt(vs_cnt), .vs_act(vs_act)
     );
 
@@ -44,17 +42,13 @@ module cam_probe_tb;
     initial begin
         #200 rst_n = 1'b1;
 
-        // 1) 复位刚释放：仍是复位态
+        // 1) 复位窗口内 ready 必须为 0
         #100_000;                              // 0.1 ms
-        if (cam_rst_n !== 1'b0) $display("FAIL: cam_rst_n should be low at 0.1ms");
-        else                    $display("PASS: cam_rst_n low during reset window");
-        if (cam_pwdn !== 1'b0)  $display("FAIL: cam_pwdn should be 0 (not standby)");
-        else                    $display("PASS: cam_pwdn=0");
+        if (ready !== 1'b0)     $display("FAIL: ready high too early at 0.1ms");
+        else                    $display("PASS: ready=0 during power-up window");
 
-        // 2) 1 ms 之后复位释放，但 ready 还不能来
-        #1_200_000;                            // 1.3 ms
-        if (cam_rst_n !== 1'b1) $display("FAIL: cam_rst_n not released at 1.3ms");
-        else                    $display("PASS: cam_rst_n released after 1ms");
+        // 2) 1.3 ms 时 ready 仍未到（还有 20 ms 守卫）
+        #1_200_000;
         if (ready !== 1'b0)     $display("FAIL: ready came too early at 1.3ms");
         else                    $display("PASS: ready still 0 at 1.3ms (20ms guard)");
 
