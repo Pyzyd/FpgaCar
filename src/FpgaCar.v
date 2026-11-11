@@ -252,6 +252,7 @@ module FpgaCar (
     // ------------------------------------------------------------------
     wire [2:0] cam_color;
     wire       cam_color_evt;
+    wire [7:0] cam_dbg_b0, cam_dbg_b1;
 
     color_detect u_color (
         .clk       (clk),
@@ -261,7 +262,9 @@ module FpgaCar (
         .vsync     (cmos_vsync),
         .data      (cmos_data),
         .color     (cam_color),
-        .new_color (cam_color_evt)
+        .new_color (cam_color_evt),
+        .dbg_b0    (cam_dbg_b0),
+        .dbg_b1    (cam_dbg_b1)
     );
 
     // ------------------------------------------------------------------
@@ -367,6 +370,8 @@ module FpgaCar (
         .cam_width  (dvp_width),
         .cam_height (dvp_height),
         .cam_color  (cam_color),
+        .cam_b0     (cam_dbg_b0),
+        .cam_b1     (cam_dbg_b1),
         .tx         (uart_tx)
     );
 

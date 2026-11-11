@@ -34,11 +34,13 @@ module uart_report #(
     input  wire        cam_done,   // SCCB 配置完成
     input  wire [15:0] cam_width,  // DVP 一行像素数
     input  wire [15:0] cam_height, // DVP 一帧行数
-    input  wire [2:0]  cam_color,  // 主色：0其他 1红 2绿 3蓝 4黄 5白
+    input  wire [2:0]  cam_color,  // 主色：0中性 1红 2绿 3蓝 4黄
+    input  wire [7:0]  cam_b0,     // 画面中心像素高字节（确认 RGB565/YUV 用）
+    input  wire [7:0]  cam_b1,     // 画面中心像素低字节
     output wire        tx
 );
 
-    localparam integer MSG_LEN = 56;
+    localparam integer MSG_LEN = 64;
 
     // ------------------------------------------------------------------
     // 无符号除以 10（移位-减法，10 次迭代，纯组合）
@@ -87,6 +89,16 @@ module uart_report #(
     endfunction
 
     // ------------------------------------------------------------------
+    // 半字节转 ASCII（0-9 / A-F）
+    // ------------------------------------------------------------------
+    function [7:0] hexd;
+        input [3:0] n;
+        begin
+            hexd = (n < 4'd10) ? (8'h30 + {4'd0, n}) : (8'h37 + {4'd0, n});
+        end
+    endfunction
+
+    // ------------------------------------------------------------------
     // UART 发送器
     // ------------------------------------------------------------------
     reg [7:0] tx_data;
@@ -105,7 +117,7 @@ module uart_report #(
     // 报文组装
     // ------------------------------------------------------------------
     reg  [7:0]  msg [0:MSG_LEN-1];
-    reg  [5:0]  idx;        // 6 位：MSG_LEN=56，5 位只能数到 31（曾经因此死循环发不完）
+    reg  [6:0]  idx;        // 7 位：MSG_LEN=64，6 位（<=63）数不到 64，会无限循环（犯过两次）
 
     reg  [9:0]  v10;         // 距离（0..999）
     reg         bad;         // 距离无效
@@ -114,6 +126,7 @@ module uart_report #(
     reg         camd;        // 锁存的 SCCB 完成标志
     reg  [15:0] cw, ch;      // 锁存的摄像头宽/高
     reg  [2:0]  col;         // 锁存的主色
+    reg  [7:0]  b0, b1;      // 锁存的中心像素两字节
     reg  signed [4:0] pz;    // 锁存的位置
     reg         obst;        // 锁存的障碍标志
 
@@ -151,6 +164,11 @@ module uart_report #(
     wire [15:0] hd1 = h1 - h2 * 16'd10;
     wire [15:0] hd0 = ch - h1 * 16'd10;
 
+    wire [7:0]  b0h = hexd(b0[7:4]);
+    wire [7:0]  b0l = hexd(b0[3:0]);
+    wire [7:0]  b1h = hexd(b1[7:4]);
+    wire [7:0]  b1l = hexd(b1[3:0]);
+
     localparam [1:0] R_IDLE = 2'd0,
                      R_LOAD = 2'd1,
                      R_SEND = 2'd2,
@@ -163,7 +181,7 @@ module uart_report #(
             rstate   <= R_IDLE;
             tx_start <= 1'b0;
             tx_data  <= 8'h00;
-            idx      <= 6'd0;
+            idx      <= 7'd0;
             v10      <= 10'd0;
             bad      <= 1'b1;
             ln       <= 8'h00;
@@ -172,6 +190,8 @@ module uart_report #(
             cw       <= 16'd0;
             ch       <= 16'd0;
             col      <= 3'd0;
+            b0       <= 8'h00;
+            b1       <= 8'h00;
             pz       <= 5'sd0;
             obst     <= 1'b0;
         end else begin
@@ -179,7 +199,7 @@ module uart_report #(
 
             case (rstate)
             R_IDLE: begin
-                idx <= 6'd0;
+                idx <= 7'd0;
                 if (REPORT_EN != 0 && dist_valid) rstate <= R_LOAD;
             end
 
@@ -193,6 +213,8 @@ module uart_report #(
                 cw   <= cam_width;
                 ch   <= cam_height;
                 col  <= cam_color;
+                b0   <= cam_b0;
+                b1   <= cam_b1;
                 pz   <= pos;
                 obst <= obstacle;
                 rstate <= R_SEND;
@@ -204,7 +226,7 @@ module uart_report #(
                 end else if (!tx_busy && !tx_start) begin
                     tx_data  <= msg[idx];
                     tx_start <= 1'b1;
-                    idx      <= idx + 6'd1;
+                    idx      <= idx + 7'd1;
                     rstate   <= R_WAIT;
                 end
             end
@@ -277,8 +299,16 @@ module uart_report #(
         msg[51] = 8'h51;                                   // 'Q'
         msg[52] = 8'h3D;                                   // '='
         msg[53] = 8'h30 + {5'd0, col};                     // 主色代码 0~5
-        msg[54] = 8'h0D;                                   // CR
-        msg[55] = 8'h0A;                                   // LF
+        msg[54] = 8'h20;                                   // ' '
+        msg[55] = 8'h58;                                   // 'X'
+        msg[56] = 8'h59;                                   // 'Y'
+        msg[57] = 8'h3D;                                   // '='
+        msg[58] = b0h;
+        msg[59] = b0l;
+        msg[60] = b1h;
+        msg[61] = b1l;
+        msg[62] = 8'h0D;                                   // CR
+        msg[63] = 8'h0A;                                   // LF
     end
 
 endmodule

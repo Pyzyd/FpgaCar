@@ -14,7 +14,7 @@
 module uart_report_tb;
 
     localparam real BIT_NS = 1.0e9 / 115200.0;
-    localparam integer MSG_LEN = 56;
+    localparam integer MSG_LEN = 64;
 
     reg         clk = 1'b0;
     reg         rst_n = 1'b0;
@@ -30,12 +30,14 @@ module uart_report_tb;
     reg  [15:0] cam_width  = 16'd0;
     reg  [15:0] cam_height = 16'd0;
     reg  [2:0]  cam_color  = 3'd0;
+    reg  [7:0]  cam_b0     = 8'hF8;
+    reg  [7:0]  cam_b1     = 8'h00;
     wire        tx;
 
     uart_report #(.CLK_FREQ(24_000_000), .BAUD(115_200), .REPORT_EN(1)) u_dut (
         .clk(clk), .rst_n(rst_n),
         .dist_cm(dist_cm), .dist_valid(dist_valid),
-        .line(line), .pos(pos), .obstacle(obstacle), .vs_cnt(vs_cnt), .cam_done(cam_done), .cam_width(cam_width), .cam_height(cam_height), .cam_color(cam_color),
+        .line(line), .pos(pos), .obstacle(obstacle), .vs_cnt(vs_cnt), .cam_done(cam_done), .cam_width(cam_width), .cam_height(cam_height), .cam_color(cam_color), .cam_b0(cam_b0), .cam_b1(cam_b1),
         .tx(tx)
     );
 
@@ -102,13 +104,13 @@ module uart_report_tb;
         #500;
 
         check_frame(16'd123, 8'b0001_1000, 5'sd2, 1'b0, 8'd3, 1'b1, 16'd1280, 16'd720, 3'd1,
-                    {"D=123cm T=00011000 P=+02 O=0 V=03 C=1 W=1280 H=720 Q=1", 8'h0D, 8'h0A});
+                    {"D=123cm T=00011000 P=+02 O=0 V=03 C=1 W=1280 H=720 Q=1 XY=F800", 8'h0D, 8'h0A});
 
         check_frame(16'hFFFF, 8'b1000_0001, -5'sd7, 1'b1, 8'd0, 1'b0, 16'd0, 16'd0, 3'd0,
-                    {"D=---cm T=10000001 P=-07 O=1 V=00 C=0 W=0000 H=000 Q=0", 8'h0D, 8'h0A});
+                    {"D=---cm T=10000001 P=-07 O=1 V=00 C=0 W=0000 H=000 Q=0 XY=F800", 8'h0D, 8'h0A});
 
         check_frame(16'd7, 8'b0000_0000, 5'sd0, 1'b0, 8'd42, 1'b1, 16'd9999, 16'd999, 3'd3,
-                    {"D=007cm T=00000000 P=+00 O=0 V=42 C=1 W=9999 H=999 Q=3", 8'h0D, 8'h0A});
+                    {"D=007cm T=00000000 P=+00 O=0 V=42 C=1 W=9999 H=999 Q=3 XY=F800", 8'h0D, 8'h0A});
 
         $display("INFO: uart_report_tb done");
         $finish;
