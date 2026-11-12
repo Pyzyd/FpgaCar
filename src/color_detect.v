@@ -46,10 +46,27 @@
 
 module color_detect #(
     parameter [5:0]  SAT_MIN   = 6'd16,    // 饱和度门限：低于此值算中性色，不计数
-    parameter [5:0]  YEL_RG    = 6'd28,    // 黄：min(R,G) 至少这么大（太暗的不算黄）
-    parameter [5:0]  YEL_DR    = 6'd14,    // 黄：|R-G| 不超过这么大（黄的 R≈G）
-    parameter [5:0]  YEL_DB    = 6'd12,    // 黄：min(R,G) - B 至少这么大
-    parameter [19:0] MIN_PIX   = 20'd200   // 少于这么多像素不认（滤掉小色斑）
+    parameter [5:0]  YEL_RG    = 6'd8,     // 黄：min(R,G) 至少这么大（太暗的不算黄）
+                                           // 28→16→8 的两次下调都源于同一个现象：黄纸的阴影/背光像素
+                                           // min(R,G) 只有 8~20，被这条"绝对亮度地板"踢出黄色分支，
+                                           // 落到下面"绿最大"分支，导致 Y 和 G 同时达标、Q 在 4/2 之间轮询。
+                                           // 中性色（白/灰/黑）早已被 SAT_MIN 先滤掉，这条只防"极暗无彩噪声"。
+    parameter [5:0]  GRN_DR    = 6'd16,    // 绿：G 必须比 R 高出这么多才算绿
+                                           // 光靠"G 是最大分量"不够：偏绿白平衡下黄纸像素常是
+                                           // R=32 G=43（G 最大但只高 11），会被误判成绿。
+                                           // 真绿 R=10 G=44（差 34）远超门槛，不会误伤。
+    parameter [5:0]  YEL_DR    = 6'd24,    // 黄：|R-G| 不超过这么大（黄的 R≈G）
+                                           // 实测偏绿白平衡下黄纸 R=32 G=43（|diff|=11~18），
+                                           // 14 会把同一张黄纸劈成「一半黄一半绿」，故放宽到 24。
+                                           // 真绿 R=10 G=44（|diff|=34）仍被判绿，不会误吞。
+    parameter [5:0]  YEL_DB    = 6'd8,     // 黄：min(R,G) - B 至少这么大
+                                           // 黄纸实测 min(R,G)=32、B=18，差值 14；旧值 12 只剩 2 的余量，
+                                           // 偏暗的黄会滑到绿色，降到 8 留出余量（中性色已被 SAT_MIN 先滤掉）。
+    parameter [19:0] MIN_PIX   = 20'd200,  // 少于这么多像素不认（滤掉小色斑）
+    parameter [1:0]  DOM_SHIFT = 2'd2      // 主导色门限：计数不到"本帧最大色"的 1/4 就不算达标
+                                           // 上板实测：黄纸铺满画面时黄 56707 px、残留绿 7960 px（阴影/边缘），
+                                           // 7960 仍 > MIN_PIX，轮询会照样轮给绿，Q 就在 4/2 之间跳。
+                                           // 有这道门限后残留绿（7%）被压掉，四色等面积场景（各 25%）仍全部达标。
 ) (
     input  wire        clk,          // 24 MHz 系统域
     input  wire        rst_n,
@@ -62,7 +79,19 @@ module color_detect #(
     output reg  [2:0]  color,        // 0=无色/中性 1=红 2=绿 3=蓝 4=黄
     output reg         new_color,    // 1 clk 脉冲：color 已更新（每帧一次）
     output reg  [7:0]  dbg_b0,       // 中心像素高字节（原样，用于确认格式）
-    output reg  [7:0]  dbg_b1        // 中心像素低字节
+    output reg  [7:0]  dbg_b1,       // 中心像素低字节
+    // ---- 帧统计遥测（v4：只加观测，不改判定）----
+    // 上板 Q 全 0 时，光看 Q 分不清「画面没颜色」还是「阈值/分类错了」，
+    // 所以把每帧的四色计数、最大饱和度、最亮像素都送出来给串口第二行。
+    output reg  [19:0] dbg_cnt_r,    // 本帧红/绿/蓝/黄像素数（原始值）
+    output reg  [19:0] dbg_cnt_g,
+    output reg  [19:0] dbg_cnt_b,
+    output reg  [19:0] dbg_cnt_y,
+    output reg  [6:0]  dbg_sat,      // 本帧见过的最大饱和度（0..63）
+    output reg  [7:0]  dbg_sb0,      // 最大饱和度那个像素的原始两字节
+    output reg  [7:0]  dbg_sb1,
+    output reg  [7:0]  dbg_lb0,      // 本帧最亮（G 最大）像素的原始两字节
+    output reg  [7:0]  dbg_lb1
 );
 
     // ==================================================================
@@ -129,7 +158,9 @@ module color_detect #(
         else if (mx == r7)
             cls = 3'd1;                                  // 红
         else if (mx == g7)
-            cls = 3'd2;                                  // 绿
+            // G 虽是最大分量，但不够"绿"（如偏绿白平衡下的黄纸 R=32 G=43）
+            // 就别硬塞进绿色 —— 记为中性，宁可漏计也不要造成假绿。
+            cls = (g7 >= r7 + {1'b0, GRN_DR}) ? 3'd2 : 3'd0;
         else
             cls = 3'd3;                                  // 蓝
     end
@@ -142,6 +173,15 @@ module color_detect #(
     reg [2:0]  col_lat;
     reg        tog_p;
 
+    // ---- v4 帧统计（pclk 域采集，vs_rise 时锁存到 lat_*，clk 域随 col_evt 搬走）----
+    reg [19:0] lat_r, lat_g, lat_b, lat_y;
+    reg [6:0]  lat_sat;
+    reg [7:0]  lat_sb0, lat_sb1, lat_lb0, lat_lb1;
+    reg [6:0]  sat_max, lum_max;         // 本帧最大饱和度 / 最大绿（近似亮度）
+    reg [7:0]  sat_p0, sat_p1;           // 取到最大值那个像素的两个原始字节
+    reg [7:0]  lum_p0, lum_p1;
+    reg [7:0]  hb_val;                   // 当前像素的高字节（低字节拍上做统计用）
+
     reg [11:0] pix_idx;         // 行内像素序号（0..2559）
     reg [10:0] line_idx;        // 帧内行号（0..719）
     reg        cap_pend;        // 已抓到高字节，等低字节
@@ -152,8 +192,16 @@ module color_detect #(
     // ---- 轮询选择：从 rr 开始，挑第一个计数达标的颜色 ----
     // elig 的位序固定为 {黄, 蓝, 绿, 红}；把它按 rr 做循环右移，
     // 移位后 er[0] 就是"从 rr 起第一个候选"，再按优先级取下标。
-    wire [3:0] elig = {(cnt_y >= MIN_PIX), (cnt_b >= MIN_PIX),
-                       (cnt_g >= MIN_PIX), (cnt_r >= MIN_PIX)};
+    // 主导色门限：先求本帧最大色计数，只有 >= 它的 1/(2^DOM_SHIFT) 才算达标。
+    wire [19:0] mx_rg  = (cnt_r > cnt_g) ? cnt_r : cnt_g;
+    wire [19:0] mx_by  = (cnt_b > cnt_y) ? cnt_b : cnt_y;
+    wire [19:0] cnt_mx = (mx_rg > mx_by) ? mx_rg : mx_by;
+    wire [19:0] dom_lim = cnt_mx >> DOM_SHIFT;
+
+    wire [3:0] elig = {(cnt_y >= MIN_PIX) && (cnt_y >= dom_lim),
+                       (cnt_b >= MIN_PIX) && (cnt_b >= dom_lim),
+                       (cnt_g >= MIN_PIX) && (cnt_g >= dom_lim),
+                       (cnt_r >= MIN_PIX) && (cnt_r >= dom_lim)};
     reg  [3:0] er;
     always @(*) begin
         case (rr)
@@ -177,6 +225,22 @@ module color_detect #(
             cnt_g    <= 20'd0;
             cnt_b    <= 20'd0;
             cnt_y    <= 20'd0;
+            lat_r    <= 20'd0;
+            lat_g    <= 20'd0;
+            lat_b    <= 20'd0;
+            lat_y    <= 20'd0;
+            lat_sat  <= 7'd0;
+            lat_sb0  <= 8'h00;
+            lat_sb1  <= 8'h00;
+            lat_lb0  <= 8'h00;
+            lat_lb1  <= 8'h00;
+            sat_max  <= 7'd0;
+            lum_max  <= 7'd0;
+            sat_p0   <= 8'h00;
+            sat_p1   <= 8'h00;
+            lum_p0   <= 8'h00;
+            lum_p1   <= 8'h00;
+            hb_val   <= 8'h00;
             rr       <= 2'd0;
             col_lat  <= 3'd0;
             tog_p    <= 1'b0;
@@ -195,6 +259,7 @@ module color_detect #(
                 if (!hi_byte) begin
                     r5      <= data_r[7:3];       // 高字节
                     g_hi    <= data_r[2:0];
+                    hb_val  <= data_r;        // 原样留一份，统计时和低字节配对送出
                     hi_byte <= 1'b1;
                     if (line_idx == CTR_LINE && pix_idx == CTR_PIX) begin
                         dbg_b0   <= data_r;       // 中心像素高字节
@@ -221,6 +286,21 @@ module color_detect #(
                 endcase
             end
 
+            // ---- 帧统计：这一帧到底有没有"鲜艳"和"明亮"的像素 ----
+            // 两个原始字节一起送出，能直接看出是不是全画面对比度不够。
+            if (px_valid) begin
+                if (sat > sat_max) begin
+                    sat_max <= sat;
+                    sat_p0  <= hb_val;
+                    sat_p1  <= data_r;
+                end
+                if (g7 > lum_max) begin
+                    lum_max <= g7;
+                    lum_p0  <= hb_val;
+                    lum_p1  <= data_r;
+                end
+            end
+
             // ---- 帧边界：按轮询报一个颜色出去 ----
             if (vs_rise) begin
                 line_idx <= 11'd0;
@@ -228,11 +308,24 @@ module color_detect #(
                 col_lat <= sel_ok ? ({1'b0, sel} + 3'd1) : 3'd0;
                 if (sel_ok) rr <= sel + 2'd1;     // 2 位自然回绕，下一帧从它后面开始
 
-                cnt_r <= 20'd0;
-                cnt_g <= 20'd0;
-                cnt_b <= 20'd0;
-                cnt_y <= 20'd0;
-                tog_p <= ~tog_p;
+                // 先把统计量锁存到 lat_*（clk 域随后搬走），再清零本帧计数
+                lat_r   <= cnt_r;
+                lat_g   <= cnt_g;
+                lat_b   <= cnt_b;
+                lat_y   <= cnt_y;
+                lat_sat <= sat_max;
+                lat_sb0 <= sat_p0;
+                lat_sb1 <= sat_p1;
+                lat_lb0 <= lum_p0;
+                lat_lb1 <= lum_p1;
+
+                cnt_r   <= 20'd0;
+                cnt_g   <= 20'd0;
+                cnt_b   <= 20'd0;
+                cnt_y   <= 20'd0;
+                sat_max <= 7'd0;
+                lum_max <= 7'd0;
+                tog_p   <= ~tog_p;
             end else if (href_p && pix_idx == 12'd0 && !hi_byte) begin
                 // 每行行首先进（用 pix_idx==0 且刚进入高字节的时机）
                 line_idx <= line_idx + 11'd1;
@@ -259,6 +352,16 @@ module color_detect #(
             if (col_evt) begin
                 color     <= col_lat;
                 new_color <= 1'b1;
+                // 统计量在本帧内保持稳定（vs_rise 才更新），这里跟着 col_evt 整体搬过去
+                dbg_cnt_r <= lat_r;
+                dbg_cnt_g <= lat_g;
+                dbg_cnt_b <= lat_b;
+                dbg_cnt_y <= lat_y;
+                dbg_sat   <= lat_sat;
+                dbg_sb0   <= lat_sb0;
+                dbg_sb1   <= lat_sb1;
+                dbg_lb0   <= lat_lb0;
+                dbg_lb1   <= lat_lb1;
             end
         end
 

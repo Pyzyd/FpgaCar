@@ -36,10 +36,21 @@ module color_detect_tb;
     wire [2:0] color;
     wire       new_color;
 
+    // v4 新增的遥测端口（只观测，本 tb 不比对，留着看波形）
+    wire [19:0] dbg_cnt_r, dbg_cnt_g, dbg_cnt_b, dbg_cnt_y;
+    wire [6:0]  dbg_sat;
+    wire [7:0]  dbg_sb0, dbg_sb1, dbg_lb0, dbg_lb1;
+
     color_detect u_dut (
         .clk(clk), .rst_n(rst_n),
         .pclk(pclk), .href(href), .vsync(vsync), .data(data),
-        .color(color), .new_color(new_color)
+        .color(color), .new_color(new_color),
+        .dbg_b0(), .dbg_b1(),
+        .dbg_cnt_r(dbg_cnt_r), .dbg_cnt_g(dbg_cnt_g),
+        .dbg_cnt_b(dbg_cnt_b), .dbg_cnt_y(dbg_cnt_y),
+        .dbg_sat(dbg_sat),
+        .dbg_sb0(dbg_sb0), .dbg_sb1(dbg_sb1),
+        .dbg_lb0(dbg_lb0), .dbg_lb1(dbg_lb1)
     );
 
     integer nfr = 0;
@@ -100,6 +111,19 @@ module color_detect_tb;
         end
     endtask
 
+    // 两段色带：主色 n1 个 + 次色 n2 个，用于验证主导色门限
+    task send_two (input [7:0] r1, input [7:0] g1, input [7:0] b1, input integer n1,
+                   input [7:0] r2, input [7:0] g2, input [7:0] b2, input integer n2);
+        integer i;
+        begin
+            @(negedge pclk);
+            href = 1'b1;
+            for (i = 0; i < n1; i = i + 1) px(r1[7:3], g1[7:2], b1[7:3]);
+            for (i = 0; i < n2; i = i + 1) px(r2[7:3], g2[7:2], b2[7:3]);
+            frame_end;
+        end
+    endtask
+
     task check (input [2:0] exp, input [8*8-1:0] name);
         begin
             #3000;                           // 等跨域同步（24 MHz 几个周期）
@@ -140,6 +164,41 @@ module color_detect_tb;
         // ---- v3 新增：暖光/浅黄，v2 的绝对门限必失败 ----
         send_frame(8'd255, 8'd240, 8'd140, NPIX); check(3'd4, "warmyel");
         send_frame(8'd250, 8'd250, 8'd180, NPIX); check(3'd4, "paleyel");
+
+        // ---- v4 新增：按上板实测补两条"偏色"回归 ----
+        // 板子实际白平衡偏绿，同一张黄纸中心像素 = R=32 G=43 B=18（6 位），
+        // 即 8 位 R≈137 G≈173 B≈72。旧门限 YEL_DR=14 时 |R-G|=11 只是勉强过，
+        // 光照稍变就滑到绿色，表现为 Q 在 2/4 之间跳 —— 这条用例锁死该行为。
+        send_frame(8'd137, 8'd173, 8'd72,  NPIX); check(3'd4, "yelcast");
+
+        // 真绿 R=42 G=177 B=42（6 位 10/44/10）：|R-G|=34 > YEL_DR=24，
+        // 放宽黄门限后**不能**把它误吞成黄。
+        send_frame(8'd42,  8'd177, 8'd42,  NPIX); check(3'd2, "truegrn");
+
+        // 黄纸暗部：6 位 20/26/10（8 位 80/104/40）。旧 YEL_RG=28 会把它踢出黄色分支、
+        // 落到"绿最大"分支导致 G 计数虚高 —— 这是 Q 在 4/2 之间轮询的真正来源。
+        send_frame(8'd80,  8'd104, 8'd40,  NPIX); check(3'd4, "yeldsdw");
+
+        // 黄纸更深一档的阴影：6 位 8/30/0（8 位 32/120/0）。
+        // min(R,G)=8 正好卡在新 YEL_RG 上；旧值 16/28 会把它踢到绿色分支。
+        send_frame(8'd32,  8'd120, 8'd0,   NPIX); check(3'd4, "yelsdw2");
+
+        // 同样暗的真绿：6 位 4/30/4（8 位 16/120/16）。G 比 R 高 26 > GRN_DR=16，必须仍是绿。
+        send_frame(8'd16,  8'd120, 8'd16,  NPIX); check(3'd2, "grnsdw2");
+
+        // ---- v4 新增：主导色门限 ----
+        // 黄铺满 4000 px + 残留绿 300 px（> MIN_PIX=200，但 < 4000/4=1000）：
+        // 绿必须被压掉，连发 3 帧 Q 都要稳稳是 4。
+        send_two(8'd137, 8'd173, 8'd72, 4000,  8'd42, 8'd177, 8'd42, 300);
+        check(3'd4, "domyel1");
+        send_two(8'd137, 8'd173, 8'd72, 4000,  8'd42, 8'd177, 8'd42, 300);
+        check(3'd4, "domyel2");
+        send_two(8'd137, 8'd173, 8'd72, 4000,  8'd42, 8'd177, 8'd42, 300);
+        check(3'd4, "domyel3");
+
+        // 反过来：绿铺满 + 残留黄 300 px，必须稳定是 2（门限是双向对称的）
+        send_two(8'd42, 8'd177, 8'd42, 4000,  8'd137, 8'd173, 8'd72, 300);
+        check(3'd2, "domgrn1");
 
         // ---- v3 新增：四色同帧，连发 4 帧必须四色全到 ----
         seen = 5'b00000;

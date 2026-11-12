@@ -253,6 +253,10 @@ module FpgaCar (
     wire [2:0] cam_color;
     wire       cam_color_evt;
     wire [7:0] cam_dbg_b0, cam_dbg_b1;
+    // v4 帧统计遥测：直接短路到串口第二行，不参与任何判定
+    wire [19:0] cam_cnt_r, cam_cnt_g, cam_cnt_b, cam_cnt_y;
+    wire [6:0]  cam_sat;
+    wire [7:0]  cam_sb0, cam_sb1, cam_lb0, cam_lb1;
 
     color_detect u_color (
         .clk       (clk),
@@ -264,7 +268,16 @@ module FpgaCar (
         .color     (cam_color),
         .new_color (cam_color_evt),
         .dbg_b0    (cam_dbg_b0),
-        .dbg_b1    (cam_dbg_b1)
+        .dbg_b1    (cam_dbg_b1),
+        .dbg_cnt_r (cam_cnt_r),
+        .dbg_cnt_g (cam_cnt_g),
+        .dbg_cnt_b (cam_cnt_b),
+        .dbg_cnt_y (cam_cnt_y),
+        .dbg_sat   (cam_sat),
+        .dbg_sb0   (cam_sb0),
+        .dbg_sb1   (cam_sb1),
+        .dbg_lb0   (cam_lb0),
+        .dbg_lb1   (cam_lb1)
     );
 
     // ------------------------------------------------------------------
@@ -372,6 +385,15 @@ module FpgaCar (
         .cam_color  (cam_color),
         .cam_b0     (cam_dbg_b0),
         .cam_b1     (cam_dbg_b1),
+        .cam_cnt_r  (cam_cnt_r),
+        .cam_cnt_g  (cam_cnt_g),
+        .cam_cnt_b  (cam_cnt_b),
+        .cam_cnt_y  (cam_cnt_y),
+        .cam_sat    (cam_sat),
+        .cam_sb0    (cam_sb0),
+        .cam_sb1    (cam_sb1),
+        .cam_lb0    (cam_lb0),
+        .cam_lb1    (cam_lb1),
         .tx         (uart_tx)
     );
 

@@ -15,6 +15,17 @@ The FpgaCar top level emits one ASCII line per 60 ms:
   Q  dominant colour class: 0 neutral, 1 red, 2 green, 3 blue, 4 yellow
   XY two raw centre bytes from the DVP bus (debug only)
 
+followed immediately by a second, shorter hex line (v4 frame statistics):
+
+    R=00300 G=00000 B=00000 Y=00000 S=3F SB=F800 LB=F800\r\n
+
+  R/G/B/Y  pixels classified as red/green/blue/yellow in the frame just ended
+           (hex, 0..4B000). MNI_PIX is 200, so anything below 200 (C8) never
+           wins the election -> Q stays 0.
+  S        largest saturation (max-min) seen anywhere in that frame, 6 bit hex
+  SB       the two raw DVP bytes of the most saturated pixel
+  LB       the two raw DVP bytes of the brightest pixel (by green)
+
 Usage:
     python uart_mon.py [PORT] [SECONDS]
 
@@ -100,16 +111,45 @@ def main():
     for ln in lines[-20:]:
         print(ln)
 
+    line1 = [ln for ln in lines if ln.startswith("D=")]
+    line2 = [ln for ln in lines if ln.startswith("R=")]
     fields = {"D": r"D=(-{0,3}|\d+)cm", "T": r"T=([01]{8})", "P": r"P=([+-]\d+)",
               "O": r"O=(\d)", "V": r"V=(\d+)", "C": r"C=(\d)", "W": r"W=(\d+)",
               "H": r"H=(\d+)", "Q": r"Q=(\d)", "XY": r"XY=([0-9A-Fa-f]{4})"}
-    print("--- summary (last value seen) ---")
+    print("--- line 1 summary (last value seen) ---")
     for key, pat in fields.items():
-        vals = [m.group(1) for m in (re.search(pat, ln) for ln in lines) if m]
+        vals = [m.group(1) for m in (re.search(pat, ln) for ln in line1) if m]
         if vals:
             uniq = sorted(set(vals))
             shown = uniq if len(uniq) <= 4 else uniq[:4] + ["..."]
             print("  %-2s = %s" % (key, " ".join(shown)))
+
+    if line2:
+        print("--- line 2 frame statistics (hex) ---")
+        fields2 = {"R": r"R=([0-9A-Fa-f]{5})", "G": r"G=([0-9A-Fa-f]{5})",
+                   "B": r"B=([0-9A-Fa-f]{5})", "Y": r"Y=([0-9A-Fa-f]{5})",
+                   "S": r"S=([0-9A-Fa-f]{2})", "SB": r"SB=([0-9A-Fa-f]{4})",
+                   "LB": r"LB=([0-9A-Fa-f]{4})"}
+        for key, pat in fields2.items():
+            vals = [m.group(1) for m in (re.search(pat, ln) for ln in line2) if m]
+            if not vals:
+                continue
+            count = {"R": 0, "G": 1, "B": 2, "Y": 3}.get(key)
+            if count is None:
+                uniq = sorted(set(vals))
+                shown = uniq if len(uniq) <= 4 else uniq[:4] + ["..."]
+                print("  %-2s = %s" % (key, " ".join(shown)))
+            else:
+                # 计数是十六进制，但"有没有超过 200 像素门槛"看十进制才直观
+                dec = [int(v, 16) for v in vals]
+                print("  %-2s = %s   (%d..%d dec, max %s = %d)"
+                      % (key, " ".join(sorted(set(vals))), min(dec), max(dec),
+                         hex(max(dec)), max(dec)))
+        # 四色计数全为 0 而 S 却很高 -> 分类/阈值问题；S 也低 -> 画面本来就没饱和色
+        print("  verdict: 若 S 明显 >0（例如 >=16）且四色都 <200，说明饱和色存在但"
+              "分类或 MIN_PIX 门槛卡住了；若 S 只有个位数，是镜头/曝光/数据位序问题。")
+    else:
+        print("--- no line-2 telemetry yet (bitstream too old?) ---")
     return 0
 
 

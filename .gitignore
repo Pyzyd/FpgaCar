@@ -21,6 +21,13 @@ _sim/
 *.qdb
 _jtag.jcf
 
+# 上板抓包产生的临时数据（tools/cap.py 的输出），可随时重新抓，不入库
+_cap*.csv
+_*.csv
+
+# 一次性探测/分析脚本（下划线前缀表示临时）；tools/ 下正式的脚本照常入库
+tools/_*.py
+
 # IP Manager 生成的中间件（若将来有真 IP，只提交 ip/<name>/settings.json 之类的配置）
 # ip/
 
