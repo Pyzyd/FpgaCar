@@ -5,9 +5,13 @@ Line 2 (hex):      R=00000 G=00000 B=00065 Y=00000 S=14 SB=6C17 LB=CF3E
 
 Usage:  python cap.py [PORT] [SECONDS] [OUT.csv]
 """
+import os
 import re
 import sys
 import time
+
+# 抓包数据统一放在工程根的 data/ 下，避免根目录被 _cap*.csv 堆满
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -49,6 +53,7 @@ def main():
     numeric = [a for a in args if re.fullmatch(r"[0-9.]+", a)]
     named = [a for a in args if not re.fullmatch(r"[0-9.]+", a)]
     csv_path = None
+    os.makedirs(DATA_DIR, exist_ok=True)
     if named and re.fullmatch(r".+\.csv", named[-1], re.I):
         csv_path = named.pop()
     port = named[0] if named else find_port()
@@ -116,6 +121,8 @@ def main():
         hb, lb = int(rows[-1][idx][0:2], 16), int(rows[-1][idx][2:4], 16)
         print("  last %s %s -> R=%d G=%d B=%d" % (tag, rows[-1][idx], *rgb565(hb, lb)))
 
+    if csv_path and not os.path.isabs(csv_path) and os.sep not in csv_path and "/" not in csv_path:
+        csv_path = os.path.join(DATA_DIR, csv_path)   # 只给文件名 -> 落到 data/
     if csv_path:
         with open(csv_path, "w", encoding="utf-8") as fp:
             fp.write("D,Q,R,G,B,Y,S,SB,LB\n")

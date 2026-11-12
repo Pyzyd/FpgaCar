@@ -6,7 +6,7 @@ work_syn/
 work_pnr/
 ooc/
 .dide/
-_sim/
+.scratch/
 
 *.bit
 *.hex
@@ -21,7 +21,9 @@ _sim/
 *.qdb
 _jtag.jcf
 
-# 上板抓包产生的临时数据（tools/cap.py 的输出），可随时重新抓，不入库
+# 上板抓包产生的临时数据（tools/cap.py / grab_frame.py 的输出，统一落在 data/），
+# 可随时重新抓，不入库
+data/
 _cap*.csv
 _*.csv
 

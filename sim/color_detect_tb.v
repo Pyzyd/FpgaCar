@@ -186,19 +186,40 @@ module color_detect_tb;
         // 同样暗的真绿：6 位 4/30/4（8 位 16/120/16）。G 比 R 高 26 > GRN_DR=16，必须仍是绿。
         send_frame(8'd16,  8'd120, 8'd16,  NPIX); check(3'd2, "grnsdw2");
 
-        // ---- v4 新增：主导色门限 ----
-        // 黄铺满 4000 px + 残留绿 300 px（> MIN_PIX=200，但 < 4000/4=1000）：
-        // 绿必须被压掉，连发 3 帧 Q 都要稳稳是 4。
-        send_two(8'd137, 8'd173, 8'd72, 4000,  8'd42, 8'd177, 8'd42, 300);
+        // ---- v6 主导色门限：占本帧最大色的 1/5（v5 的"占总量 1/32"已废弃）----
+        // 场景取自实测：黄纸 9000 px + 阴影/边缘残留绿 250 px，
+        // 250*5 = 1250 < 9000，残留绿被压掉，连发 3 帧必须稳稳是 4。
+        // （总量口径下 9250>>5=289 也压得住，但同一批实测里残留蓝占总量的比例
+        //   够高就能帧帧入选 —— 总量口径没有绝对锚点，主色一暗门限就塌。）
+        send_two(8'd137, 8'd173, 8'd72, 9000,  8'd42, 8'd177, 8'd42, 250);
         check(3'd4, "domyel1");
-        send_two(8'd137, 8'd173, 8'd72, 4000,  8'd42, 8'd177, 8'd42, 300);
+        send_two(8'd137, 8'd173, 8'd72, 9000,  8'd42, 8'd177, 8'd42, 250);
         check(3'd4, "domyel2");
-        send_two(8'd137, 8'd173, 8'd72, 4000,  8'd42, 8'd177, 8'd42, 300);
+        send_two(8'd137, 8'd173, 8'd72, 9000,  8'd42, 8'd177, 8'd42, 250);
         check(3'd4, "domyel3");
 
-        // 反过来：绿铺满 + 残留黄 300 px，必须稳定是 2（门限是双向对称的）
-        send_two(8'd42, 8'd177, 8'd42, 4000,  8'd137, 8'd173, 8'd72, 300);
+        // 反过来：绿铺满 + 残留黄 250 px，必须稳定是 2（门限双向对称）
+        send_two(8'd42, 8'd177, 8'd42, 9000,  8'd137, 8'd173, 8'd72, 250);
         check(3'd2, "domgrn1");
+
+        // ---- v6 核心动机：小块**真色**不能被一大块主色挤掉 ----
+        // 黄 4000 + 绿 900：900*5 = 4500 >= 4000，绿占最大色的 22.5% > 1/5(20%)，
+        // 既过 MIN_PIX 又过门限，必须在两帧内轮到一次
+        // （从哪个颜色起轮由上一帧决定，故只查"都出现过"）。
+        // 旧 1/4 口径（4000/4=1000 > 900）会永远只报黄，color_seq 就漏记这个绿块。
+        // 20% 是实测选出的平衡点：y13 残留蓝占黄 max 16.5% 被压死，
+        // y10 真实场景仍有 99.2% 的帧可轮（1/4 会掉到 93.9%）。
+        seen = 5'b00000;
+        send_two(8'd137, 8'd173, 8'd72, 4000,  8'd42, 8'd177, 8'd42, 900); grab(q0);
+        send_two(8'd137, 8'd173, 8'd72, 4000,  8'd42, 8'd177, 8'd42, 900); grab(q1);
+        if (q0 != 3'd0) seen[q0] = 1'b1;
+        if (q1 != 3'd0) seen[q1] = 1'b1;
+        $display("INFO: domrot results %0d %0d", q0, q1);
+        if (seen[2] !== 1'b1 || seen[4] !== 1'b1) begin
+            $display("FAIL: small real color starved by big block (seen=%b)", seen);
+            fails = fails + 1;
+        end else
+            $display("PASS: small real color still rotate 2/4");
 
         // ---- v3 新增：四色同帧，连发 4 帧必须四色全到 ----
         seen = 5'b00000;
@@ -217,6 +238,21 @@ module color_detect_tb;
         end else
             $display("PASS: quad round-robin covers 1/2/3/4");
 
+
+        // ---- v6b：大帧位宽回归（cnt*5 必须用 23 位）----
+        // 单色上限 1280*720 = 921600，×5 = 4,608,000 > 2^22 = 4,194,304。
+        // 若 cnt_*5 仍声明为 22 位，则 cnt > 838860 时乘积回绕（921600 会变成 413696），
+        // 于是 cnt*5 反而 < cnt_mx，elig 全 0 → 整帧被判成"无色"。这帧 900000 px 专门锁死它。
+        // （900000*5 = 4,500,000，22 位下回绕成 305,696，远小于 900000，必报 0。）
+        send_frame(8'd255, 8'd255, 8'd0, 900000);
+        #3000;    // 等 vs_rise 的锁存经 toggle 同步进 clk 域，否则读到的是上一帧的旧值
+        $display("INFO: bigframe cnt_y=%0d", dbg_cnt_y);
+        if (dbg_cnt_y < 20'd900000) begin
+            $display("FAIL: bigframe cnt_y=%0d (expect 900000)", dbg_cnt_y);
+            fails = fails + 1;
+        end
+        check(3'd4, "bigframe");
+
         if (nfr < 12) begin
             $display("FAIL: new_color pulses=%0d (expect >=12)", nfr);
             fails = fails + 1;
@@ -229,7 +265,7 @@ module color_detect_tb;
     end
 
     initial begin
-        #5_000_000;
+        #200_000_000;   // v6b 大帧用例（900000 px ≈ 21.4 ms）需要更长预算
         $display("TIMEOUT: color_detect_tb hung");
         $finish;
     end
