@@ -118,18 +118,18 @@ module FpgaCar_tb;
     );
 
     // ------------------------------------------------------------------
-    // 自检：静态安全信号 + PWM 占空比 + 心跳/编码器计数在跑
-    // 注意 PWM_BENCH_TEST=1 时 motor_stby=1、左轮 IN1=1，这是刻意的台架试车态；
-    // 跑车前把 FpgaCar.v 里 PWM_BENCH_TEST 改回 0 后，本 tb 的期望值也要跟着改。
+    // 自检：上电安全性 + 循迹通道 + 心跳
+    // 闭环已接入（PWM_BENCH_TEST=0）：上电先 IDLE 2 s，这段时间电机必须完全断电。
+    // RUN 之后的行为由 car_fsm_tb / track_pid_tb 覆盖（否则本 tb 要跑 2 秒仿真）。
     // ------------------------------------------------------------------
     integer high_cnt, n;
 
     initial begin
         #2000;
-        if (motor_stby !== 1'b1)  $display("FAIL: bench mode expects motor_stby=1, got %b", motor_stby);
-        else                      $display("PASS: bench mode motor_stby=1");
-        if (ml_in1 !== 1'b1 || ml_in2 !== 1'b0) $display("FAIL: left motor direction not set");
-        else                                    $display("PASS: left motor forward direction set");
+        if (motor_stby !== 1'b0)  $display("FAIL: IDLE expects motor_stby=0, got %b", motor_stby);
+        else                      $display("PASS: IDLE -> TB6612 standby (motors off)");
+        if (ml_in1 !== 1'b0 || ml_in2 !== 1'b0) $display("FAIL: left motor driven during IDLE");
+        else                                    $display("PASS: IDLE -> left motor undriven");
         if (i2c_sda_OE !== 1'b0)  $display("FAIL: I2C SDA should be released (OE=0)");
         if (i2c_scl !== 1'b1)     $display("FAIL: I2C SCL should idle high");
         if (u_dut.heartbeat === 24'd0) $display("FAIL: heartbeat counter not running");
@@ -141,16 +141,16 @@ module FpgaCar_tb;
         if (u_dut.line_lost !== 1'b1) $display("FAIL: line_lost should be 1 when all white");
         else                          $display("PASS: line_lost=1 on all-white");
 
-        // 量一个 PWM 周期（1200 clk）内的高电平拍数，期望 300 (25%)
+        // IDLE 期间 PWM 必须恒低（量一个完整 PWM 周期）
         high_cnt = 0;
         for (n = 0; n < 1200; n = n + 1) begin
             @(posedge clk);
             if (ml_pwm) high_cnt = high_cnt + 1;
         end
-        if (high_cnt < 295 || high_cnt > 305)
-            $display("FAIL: ml_pwm duty = %0d/1200 (expect ~300)", high_cnt);
+        if (high_cnt != 0)
+            $display("FAIL: ml_pwm high for %0d/1200 during IDLE (expect 0)", high_cnt);
         else
-            $display("PASS: ml_pwm duty = %0d/1200 (25%%)", high_cnt);
+            $display("PASS: ml_pwm idle low during IDLE (0/1200)");
 
         $display("INFO: FpgaCar smoke test done, heartbeat=%0d", u_dut.heartbeat);
         $finish;

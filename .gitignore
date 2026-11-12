@@ -7,6 +7,8 @@ work_pnr/
 ooc/
 .dide/
 .scratch/
+# iverilog 编译产物与临时脚本目录（曾被从忽略列表里丢掉，导致 _sim/patch_*.py 被误加进提交）
+_sim/
 
 *.bit
 *.hex

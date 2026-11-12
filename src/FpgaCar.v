@@ -143,21 +143,25 @@ module FpgaCar (
         else        rst_sync <= {rst_sync[0], 1'b1};
 
     // ------------------------------------------------------------------
-    // 阶段 1 台架试车开关
+    // 运动闭环（track_pid + car_fsm）接线
     // ------------------------------------------------------------------
-    // PWM_BENCH_TEST = 1 : 左轮以 25% 占空比持续正转、TB6612 STBY 放开
-    //                      —— 用于验证"PWM 波形真的出来了、电机真的转"。
-    //                      【上地跑车前必须改回 0】，否则上电即走。
-    // PWM_BENCH_TEST = 0 : 电机完全待机（安全默认值），PWM 输出恒低。
-    // car_fsm / track_pid 接入后，这两个 localparam 由闭环输出取代。
-    localparam        PWM_BENCH_TEST = 1'b1;
+    // 【台架开关】PWM_BENCH_TEST = 1 时绕过闭环：左轮 25% 常转，用于验证
+    //   "PWM 波形真的出来、电机真的转、TB6612 接线对"。
+    //   默认 0 = 走闭环；上电后会先 IDLE 2 s（留时间把车摆正）再起跑。
+    //   【接 TB6612 之前务必确认这里是 0】，否则上电即走。
+    localparam        PWM_BENCH_TEST = 1'b0;
     localparam [10:0] BENCH_DUTY     = 11'd300;     // 300/1200 = 25%
 
-    assign ml_in1     = PWM_BENCH_TEST;   // 左轮正转方向
-    assign ml_in2     = 1'b0;
-    assign mr_in1     = 1'b0;             // 右轮不给方向 = 不动
-    assign mr_in2     = 1'b0;
-    assign motor_stby = PWM_BENCH_TEST;   // 1=TB6612 工作，0=待机
+    wire              ctrl_en;                       // car_fsm 的电机使能
+    wire              ctrl_dir_l, ctrl_dir_r;        // 1 = 正转
+    wire [10:0]       ctrl_duty_l, ctrl_duty_r;      // car_fsm 输出占空比
+    wire [10:0]       pid_duty_l, pid_duty_r;        // track_pid 输出占空比
+    wire signed [10:0] pid_corr;                     // 转向修正量（观察用）
+    wire [2:0]        car_state;                     // 0 IDLE 1 RUN 2 LOST 3 SEARCH 4 STOP
+
+    wire        motor_en = PWM_BENCH_TEST ? 1'b1 : ctrl_en;
+    wire [10:0] ml_duty  = PWM_BENCH_TEST ? BENCH_DUTY : ctrl_duty_l;
+    wire [10:0] mr_duty  = PWM_BENCH_TEST ? BENCH_DUTY : ctrl_duty_r;
 
     // 三根 CTL 恒 0（官方实测值）；SCCB 由 cam_sccb_cfg 驱动（见下）
     assign cmos_ctl1  = 1'b0;
@@ -166,11 +170,8 @@ module FpgaCar (
 
     // ------------------------------------------------------------------
     // 子模块实例化：PWM 发生器（电机调速）+ 编码器解码（里程反馈）
-    // 阶段 1 用台架常量驱动；car_fsm / track_pid 就绪后把 en/duty 换成闭环输出。
+    // en/duty 由 car_fsm + track_pid 驱动（台架开关打开时被旁路）
     // ------------------------------------------------------------------
-    wire        motor_en = PWM_BENCH_TEST;      // TODO: 接 car_fsm 的使能
-    wire [10:0] ml_duty  = PWM_BENCH_TEST ? BENCH_DUTY : 11'd0;  // TODO: 接 track_pid
-    wire [10:0] mr_duty  = PWM_BENCH_TEST ? BENCH_DUTY : 11'd0;
 
     pwm_gen u_pwm_l (
         .clk   (clk),
@@ -319,6 +320,65 @@ module FpgaCar (
     wire hc_near  = (dist_cm != 16'hFFFF) && (dist_cm <= OBSTACLE_CM);
     wire ir_det   = ~ir_l | ~ir_r;              // NPN 低有效
     wire obstacle = hc_near | ir_det;
+
+    // ------------------------------------------------------------------
+    // 运动闭环：track_pid（位置 PID）+ car_fsm（状态机）
+    //   信号流：track_line.pos → track_pid → 左右占空比 → car_fsm 选通
+    //           car_fsm 决定 en / 方向（找线时一轮反转）/ 停车
+    // 【speed_meter】已写好并自测通过，但当前只做位置环、不用速度环；
+    //   等电机到货实测后再接进来（速度环需要先标定 pulse/米）。
+    // ------------------------------------------------------------------
+    track_pid #(
+        .CLK_FREQ  (24_000_000),
+        .TICK_MS   (10),
+        .DUTY_MAX  (1200),
+        .BASE_DUTY (600),
+        .P_GAIN    (40),
+        .D_GAIN    (24),
+        .I_SHIFT   (5),
+        .I_LIMIT   (640)
+    ) u_pid (
+        .clk     (clk),
+        .rst_n   (sys_rst_n),
+        .en      (ctrl_en),
+        .pos     (line_pos),
+        .on_line (line_on),
+        .lost    (line_lost),
+        .duty_l  (pid_duty_l),
+        .duty_r  (pid_duty_r),
+        .corr    (pid_corr)
+    );
+
+    car_fsm #(
+        .CLK_FREQ     (24_000_000),
+        .START_MS     (2000),
+        .LOST_HOLD_MS (300),
+        .SEARCH_MS    (1500),
+        .SEARCH_DUTY  (500),
+        .DIR_DEAD_MS  (10)
+    ) u_car (
+        .clk      (clk),
+        .rst_n    (sys_rst_n),
+        .on_line  (line_on),
+        .lost     (line_lost),
+        .obstacle (obstacle),
+        .pos      (line_pos),
+        .pid_l    (pid_duty_l),
+        .pid_r    (pid_duty_r),
+        .en       (ctrl_en),
+        .dir_l    (ctrl_dir_l),
+        .dir_r    (ctrl_dir_r),
+        .duty_l   (ctrl_duty_l),
+        .duty_r   (ctrl_duty_r),
+        .state    (car_state)
+    );
+
+    // TB6612 方向脚：使能时才驱动，且 IN1/IN2 永不同时为 1（否则短路刹车）
+    assign ml_in1     = PWM_BENCH_TEST ? 1'b1     : (motor_en &  ctrl_dir_l);
+    assign ml_in2     = PWM_BENCH_TEST ? 1'b0     : (motor_en & ~ctrl_dir_l);
+    assign mr_in1     = PWM_BENCH_TEST ? 1'b0     : (motor_en &  ctrl_dir_r);
+    assign mr_in2     = PWM_BENCH_TEST ? 1'b0     : (motor_en & ~ctrl_dir_r);
+    assign motor_stby = motor_en;                 // 1=工作，0=待机（电机自由）
 
     // ------------------------------------------------------------------
     // 摄像头上电时序 + VSYNC 探测（A3.1）

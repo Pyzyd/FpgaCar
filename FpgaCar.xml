@@ -20,6 +20,9 @@
         <efx:design_file name="src/I2C_OV5640_1280720_Config.v" version="default" library="default" />
         <efx:design_file name="src/cam_sccb_cfg.v" version="default" library="default" />
         <efx:design_file name="src/color_detect.v" version="default" library="default" />
+        <efx:design_file name="src/track_pid.v" version="default" library="default" />
+        <efx:design_file name="src/car_fsm.v" version="default" library="default" />
+        <efx:design_file name="src/speed_meter.v" version="default" library="default" />
         <efx:design_file name="src/frame_snap.v" version="default" library="default" />
         <efx:design_file name="src/color_seq.v" version="default" library="default" />
         <efx:design_file name="src/oled_font.v" version="default" library="default" />
