@@ -59,7 +59,12 @@ module oled_driver #(
     // ---- 状态观测 ----
     output wire       busy,        // 总线事务进行中
     output reg        ack_err,     // 最近一次事务有 NACK（每次事务开始清零）
-    output reg        frame_done   // 1 clk 脉冲：一整屏推完
+    output reg        frame_done,  // 1 clk 脉冲：一整屏推完
+    // 粘滞标志：复位后只要出现过一次 NACK 就置 1，且不再清零。
+    // 用途：上板黑屏时区分「屏一次都没应答」（接线/地址/上拉）与
+    //       「总线通了但屏没显示」（时序/对比度/电荷泵）——ack_err 每笔事务
+    //       开始就清，靠它无法在串口上看到历史，所以单独锁存一份。
+    output reg        nack_seen
 );
 
     // ------------------------------------------------------------------
@@ -150,6 +155,7 @@ module oled_driver #(
             tb2     <= 8'h00;
             e_busy  <= 1'b0;
             e_done  <= 1'b0;
+            nack_seen <= 1'b0;      // 只在复位时清，运行中永不回落
             scl     <= 1'b1;
             sda_out <= 1'b1;
             sda_oe  <= 1'b0;
@@ -232,6 +238,7 @@ module oled_driver #(
                 default: begin
                     scl     <= 1'b0;
                     ack_err <= ack_err | sda_q;          // 1 = NACK
+                    if (sda_q) nack_seen <= 1'b1;        // 粘滞：记「曾经没人应答」
                     ephase  <= 2'd0;
                     ebit    <= 3'd7;
                     bytec   <= bytec - 11'd1;

@@ -525,7 +525,7 @@ module FpgaCar (
     //   · i2c_scl  / i2c_sda_*     —— 板上公共 I2C（OLED / VL53L1X / YB-MUX04）
     // 显存：4 个 32x32 汉字横排，纵向居中（page 2~5），空槽不画。
     // ------------------------------------------------------------------
-    wire oled_busy, oled_ack_err, oled_frame_done;
+    wire oled_busy, oled_ack_err, oled_frame_done, oled_nack_seen;
 
     oled_driver #(
         .CLK_FREQ (24_000_000),
@@ -548,7 +548,8 @@ module FpgaCar (
         .sda_oe     (i2c_sda_OE),
         .busy       (oled_busy),
         .ack_err    (oled_ack_err),
-        .frame_done (oled_frame_done)
+        .frame_done (oled_frame_done),
+        .nack_seen  (oled_nack_seen)
     );
 
     // ------------------------------------------------------------------
@@ -606,7 +607,10 @@ module FpgaCar (
     //          【为什么用左右异或】enc_r_pos 目前没有下游使用，综合会把它整块优化掉、
     //          连 enc_ra/enc_rb 引脚一起删掉（VDB-8003）；异或让两路都留在网表里，
     //          PID 接入前也能上板验证右侧编码器。
-    assign led = {heartbeat[23], ~line_bits[3:0],
+    //          【LED[5] 兼作 OLED 诊断】oled_driver 的 nack_seen 是粘滞位：
+    //          屏从复位起一次都没回过 ACK（接线/地址/上拉问题）时 LED[5] 常亮，
+    //          正常时恢复慢闪。黑屏现场因此能一步分成两类，不用示波器。
+    assign led = {oled_nack_seen ? 1'b0 : heartbeat[23], ~line_bits[3:0],
                   line_lost ? 1'b0 : ((enc_l_pos[22] ^ enc_r_pos[22]) & heartbeat[22])};
 
     // ------------------------------------------------------------------

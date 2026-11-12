@@ -1118,6 +1118,13 @@ WARNING: Mapping into logic memory block 'u_oled/fb' (8192 bits) because read po
 | 白闪之后花屏/雪花，或整屏常白不转黑 | I2C 时序或上拉问题：`SCL_FREQ` 400 k→100 k 重编；`BOOT_MS` 20→100（电荷泵没稳定）|
 | 对着红/绿/蓝/黄色块，每认出一个就从左往右多一格汉字 | ✅ `color_detect` → `color_seq` → `oled_driver` 整链打通 |
 | 串口 `Q=` 出现 **4** | ✅ v3 判黄生效（v2 的绝对门限在这盏灯下永远出不来 4，见 §3.16 color_detect v3）|
+| **LED[5] 常亮不闪** | ❌ 屏从复位起**一次都没回过 ACK** → 查接线（P4 pin 15/16）、`DEV_ADDR`（0x3C↔0x3D）、上拉（TXS0108E 通路）|
+| **LED[5] 慢闪（约 0.7 s 周期）** | ✅ 总线**至少 ACK 过一次** → 若屏仍黑，问题在屏侧而非总线：`SCL_FREQ` 400 k→100 k、`BOOT_MS` 20→100、对比度 `81 CF` |
+
+> **LED[5] 是黑屏的第一分诊器**（`oled_driver.v` 的 `nack_seen` 粘滞位，`FpgaCar.v:609`）：
+> 它只在复位时清零，运行中一旦出现 NACK 就永久保持。
+> 因此上电后看一眼 LED[5] 即可判断「屏从没应答」还是「总线通了但屏不亮」，
+> 不必先接串口或示波器。板载 LED 低电平点亮，**常亮 = 故障**。
 
 > 自检可关：`FLASH_MS = 0` 关白闪，`ALIVE_MARK = 0` 关小方块（比赛时想留标记就保持 1）。
 

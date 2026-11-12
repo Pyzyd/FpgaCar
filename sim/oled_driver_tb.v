@@ -12,6 +12,8 @@
 //   6) SCL 频率符合参数（本 tb 用 4 MHz 缩短仿真时间）
 //   7) 上电自检：第 1 帧整屏 0xFF（白闪）、第 2 帧整屏 0x00（转黑），
 //      之后每帧在 page0/col0..7 带 8 字节存活标记（ALIVE_MARK=1）
+//   8) 粘滞 nack_seen：正常运行期恒 0；注入地址失配后必须锁存为 1 且不再回落
+//      （上板黑屏靠它在 LED[5] 上区分「屏没应答」与「总线通了但屏不亮」）
 // =============================================================================
 `timescale 1ns/1ps
 
@@ -28,7 +30,7 @@ module oled_driver_tb;
     reg [2:0]  seq0 = 3'd1, seq1 = 3'd2, seq2 = 3'd3, seq3 = 3'd4;
 
     wire scl, sda_out, sda_oe, sda_in;
-    wire busy, ack_err, frame_done;
+    wire busy, ack_err, frame_done, nack_seen;
 
     // 物理 SDA：主机与从机共用一条线，外部上拉
     wire sda_line;
@@ -44,7 +46,8 @@ module oled_driver_tb;
         .clk(clk), .rst_n(rst_n),
         .seq_valid(seq_valid), .seq0(seq0), .seq1(seq1), .seq2(seq2), .seq3(seq3),
         .scl(scl), .sda_in(sda_in), .sda_out(sda_out), .sda_oe(sda_oe),
-        .busy(busy), .ack_err(ack_err), .frame_done(frame_done)
+        .busy(busy), .ack_err(ack_err), .frame_done(frame_done),
+        .nack_seen(nack_seen)
     );
 
     // 期望值参考：同一份字形 ROM
@@ -72,6 +75,7 @@ module oled_driver_tb;
     reg [7:0]  rx      = 8'h00;
     reg [7:0]  ctrl    = 8'h00;
     reg        addr_ok = 1'b1;
+    reg [6:0]  slv_addr = 7'h3C;   // 故障注入时可改，模拟「屏不应答」
     integer    bitn    = 0;
     integer    byten   = 0;
     integer    ncmd    = 0;
@@ -102,8 +106,8 @@ module oled_driver_tb;
                     st <= SL_ACK;
                     slv_oe_r <= addr_ok;
                     if (byten == 0) begin
-                        addr_ok <= (rx[7:1] == 7'h3C) && (rx[0] == 1'b0);
-                        if (!((rx[7:1] == 7'h3C) && (rx[0] == 1'b0))) nack <= nack + 1;
+                        addr_ok <= (rx[7:1] == slv_addr) && (rx[0] == 1'b0);
+                        if (!((rx[7:1] == slv_addr) && (rx[0] == 1'b0))) nack <= nack + 1;
                     end else if (byten == 1) begin
                         ctrl <= rx;
                         if (rx == 8'h40) ndata <= 0;   // 每次数据流从 0 开始
@@ -134,6 +138,7 @@ module oled_driver_tb;
     reg [7:0] exp_fb [0:1023];
     reg [2:0] cols   [0:3];
     integer   mi, mg, mc, ms, mcol, mism;
+    integer   tw;                      // 故障注入阶段的超时计数
 
     task build_exp;
         integer i2, s2i, g2, c2, col2;
@@ -301,6 +306,28 @@ module oled_driver_tb;
 
         if (busy !== 1'b0) $display("FAIL: busy still high at end");
         else               $display("PASS: bus idle at end");
+
+        // ---- 第 4 阶段：故障注入（从机地址不匹配）——粘滞 nack_seen 必须锁存 ----
+        // 这一条是上板诊断路径的回归：黑屏时靠 nack_seen 区分「屏没应答」与
+        // 「总线通了但屏不亮」，所以必须证明它真的会被置起来，而不只是恒 0。
+        if (nack_seen !== 1'b0) $display("FAIL: nack_seen set before fault injection");
+        else                    $display("PASS: nack_seen clear during healthy run");
+
+        slv_addr = 7'h3D;              // 屏换地址 / 未接线 / 上拉缺失的表现
+        @(posedge clk); #1;
+        seq0 = 3'd3; seq1 = 3'd1;      // 改 seq 触发重画一帧
+        seq_valid = 1'b1;
+        @(posedge clk); #1;
+        seq_valid = 1'b0;
+
+        tw = 0;
+        while (nack_seen !== 1'b1 && tw < 20000) begin
+            @(posedge clk); tw = tw + 1;
+        end
+        if (nack_seen !== 1'b1)
+            $display("FAIL: nack_seen never latched after address mismatch (%0d clk)", tw);
+        else
+            $display("PASS: nack_seen latched (sticky) after NACK, %0d clk", tw);
 
         $display("INFO: oled_driver_tb done");
         $finish;
