@@ -19,6 +19,7 @@ _sim/
 *.bin
 *.pickle
 *.qdb
+_jtag.jcf
 
 # IP Manager 生成的中间件（若将来有真 IP，只提交 ip/<name>/settings.json 之类的配置）
 # ip/

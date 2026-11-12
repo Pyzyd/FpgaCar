@@ -1,5 +1,5 @@
 // =============================================================================
-// color_detect.v —— RGB565 流式颜色识别（v2：饱和度优先）
+// color_detect.v —— RGB565 流式颜色识别（v3：相对判黄 + 帧内四色轮询）
 // -----------------------------------------------------------------------------
 // 【v1 为什么失败（2026-11-11 上板实测）】
 // v1 的分类链是"先判黑/白、再比通道优势"，结果 Q 一直停在 5（白）：
@@ -10,12 +10,31 @@
 //   1. 算饱和度 sat = max(R,G,B) - min(R,G,B)
 //   2. sat < SAT_MIN 的像素（白/灰/黑/浅色背景）**一个都不计**
 //   3. 剩下的只按"哪个通道最大"分门别类（黄单独判：R、G 都高且 B 低）
-//   这样背景彻底被排除，只有真正鲜艳的东西才参与竞争 —— 正是"找色块"需要的语义。
+//   这样背景彻底被排除，只有真正鲜艳的东西才参与竞争。
 //
-// 【顺带加的格式自检】输出画面中心像素（第 360 行、第 640 个像素）的原始两个字节
+// 【v2 上板剩的问题（2026-11-12 实测：Q 只在 2/3 之间跳，从不出现 4）】
+// 判黄是**绝对门限**（R>30 且 G>30 且 B<26，6 位空间，即 8 位 B<104）。
+// 室内灯光下印刷黄块实测 B 落在 28~35（6 位），永远不满足 B<26；
+// 而黄的 R、G 几乎相等，谁多一点点就被下面的 max 分支判成红或绿。
+// 于是 color_seq 只收到红/绿/蓝三种颜色，第 4 个槽永远空着 ——
+// 屏上只有 3 个色块，正是现场看到的现象。
+//
+// 【v3 的两处改动】
+// 1. 判黄改成**相对判据**：不再看 B 的绝对值，而是看黄的固有特征 ——
+//      R、G 互相接近（|R-G| <= YEL_DR），且都比 B 明显高（min(R,G) - B >= YEL_DB），
+//      同时 min(R,G) 不低于 YEL_RG（避免暗部噪声算黄）。
+//    光源偏暖 / 整幅画面被整体抬亮时这个判据依然成立，绝对门限则必然失效。
+// 2. 帧末不再只报"占比最大的那一个颜色"，改成**帧内四色轮询**：
+//    每帧从轮询指针 rr 开始，挑第一个计数 >= MIN_PIX 的颜色报出去，rr 后移一位。
+//    四个色块同时摆在画面里时，v2 只会反复报最大的那个，其它颜色**永远轮不到**；
+//    轮询保证每个达标颜色最多 4 帧（33 ms × 4 ≈ 130 ms）内必被报到一次。
+//    上层 color_seq 本来就是"先到先得 + 去重"，多余的重复会被它滤掉。
+//    （原设想是"左右半幅各自投票"，但半幅只是把"谁最大"换成"每半边谁最大"，
+//      四块同时入画时仍会有颜色被饿死；轮询是从根上解决饿死问题。）
+//
+// 【顺带保留的格式自检】输出画面中心像素（第 360 行、第 640 个像素）的原始两个字节
 // dbg_b0/dbg_b1，串口以 XY= 打出来。红纸在 RGB565 下应看到 B0≈F8、B1≈00；
 // 若是 YUV422 则会看到 Y≈4C、U/V≈5A/F0 这种成对出现的值。
-// 这是判定"到底是不是 RGB565"的唯一硬证据，比看 Q 猜可靠。
 //
 // 【RGB565 字节顺序】OV5640 在 8 位 DVP 上高字节先出：
 //   第 1 个 PCLK： R[4:0] G[5:3]
@@ -27,8 +46,9 @@
 
 module color_detect #(
     parameter [5:0]  SAT_MIN   = 6'd16,    // 饱和度门限：低于此值算中性色，不计数
-    parameter [5:0]  YEL_RG    = 6'd30,    // 黄色要求 R、G 都超过此值
-    parameter [5:0]  YEL_B_MAX = 6'd26,    // 且 B 低于此值
+    parameter [5:0]  YEL_RG    = 6'd28,    // 黄：min(R,G) 至少这么大（太暗的不算黄）
+    parameter [5:0]  YEL_DR    = 6'd14,    // 黄：|R-G| 不超过这么大（黄的 R≈G）
+    parameter [5:0]  YEL_DB    = 6'd12,    // 黄：min(R,G) - B 至少这么大
     parameter [19:0] MIN_PIX   = 20'd200   // 少于这么多像素不认（滤掉小色斑）
 ) (
     input  wire        clk,          // 24 MHz 系统域
@@ -93,12 +113,19 @@ module color_detect #(
     wire [6:0] mn     = (b7 < rg_min) ? b7 : rg_min;
     wire [6:0] sat    = mx - mn;
 
+    // ---- 相对判黄（v3）----
+    wire [6:0] rg_diff   = (r7 > g7) ? (r7 - g7) : (g7 - r7);   // |R-G|
+    wire [6:0] yel_b_lim = b7 + {1'b0, YEL_DB};                 // R/G 至少要比 B 高这么多
+    wire       is_yel    = (rg_min  >= {1'b0, YEL_RG}) &&       // R、G 都够亮
+                           (rg_diff <= {1'b0, YEL_DR}) &&       // 且互相接近
+                           (rg_min  >= yel_b_lim);              // 且明显高于 B
+
     reg [2:0] cls;
     always @(*) begin
         if (sat < {1'b0, SAT_MIN})
             cls = 3'd0;                                  // 中性色（白/灰/黑/浅背景）
-        else if (px_r > YEL_RG && px_g > YEL_RG && px_b < YEL_B_MAX)
-            cls = 3'd4;                                  // 黄：R、G 都高且 B 低
+        else if (is_yel)
+            cls = 3'd4;                                  // 黄：R≈G 且都明显高于 B
         else if (mx == r7)
             cls = 3'd1;                                  // 红
         else if (mx == g7)
@@ -108,9 +135,10 @@ module color_detect #(
     end
 
     // ==================================================================
-    // 帧内计数 + 中心像素采样
+    // 帧内计数（四色）+ 帧末轮询 + 中心像素采样
     // ==================================================================
     reg [19:0] cnt_r, cnt_g, cnt_b, cnt_y;
+    reg [1:0]  rr;              // 轮询起点：本帧先看哪个颜色（0=红 1=绿 2=蓝 3=黄）
     reg [2:0]  col_lat;
     reg        tog_p;
 
@@ -121,11 +149,24 @@ module color_detect #(
     localparam [11:0] CTR_PIX  = 12'd640;   // 1280 宽的中心
     localparam [10:0] CTR_LINE = 11'd360;   // 720 高的中心
 
-    // 帧末主色：只在"有饱和色"的东西里选最大
-    wire [19:0] max_all = (cnt_r > cnt_g) ? ((cnt_r > cnt_b) ? ((cnt_r > cnt_y) ? cnt_r : cnt_y)
-                                                               : ((cnt_b > cnt_y) ? cnt_b : cnt_y))
-                                          : ((cnt_g > cnt_b) ? ((cnt_g > cnt_y) ? cnt_g : cnt_y)
-                                                             : ((cnt_b > cnt_y) ? cnt_b : cnt_y));
+    // ---- 轮询选择：从 rr 开始，挑第一个计数达标的颜色 ----
+    // elig 的位序固定为 {黄, 蓝, 绿, 红}；把它按 rr 做循环右移，
+    // 移位后 er[0] 就是"从 rr 起第一个候选"，再按优先级取下标。
+    wire [3:0] elig = {(cnt_y >= MIN_PIX), (cnt_b >= MIN_PIX),
+                       (cnt_g >= MIN_PIX), (cnt_r >= MIN_PIX)};
+    reg  [3:0] er;
+    always @(*) begin
+        case (rr)
+        2'd0:    er = elig;
+        2'd1:    er = {elig[0],    elig[3:1]};
+        2'd2:    er = {elig[1:0],  elig[3:2]};
+        default: er = {elig[2:0],  elig[3]};
+        endcase
+    end
+
+    wire [1:0] sel_off = er[0] ? 2'd0 : (er[1] ? 2'd1 : (er[2] ? 2'd2 : 2'd3));
+    wire       sel_ok  = |er;
+    wire [1:0] sel     = (rr + sel_off) & 2'd3;
 
     always @(posedge pclk or negedge rst_n) begin
         if (!rst_n) begin
@@ -136,6 +177,7 @@ module color_detect #(
             cnt_g    <= 20'd0;
             cnt_b    <= 20'd0;
             cnt_y    <= 20'd0;
+            rr       <= 2'd0;
             col_lat  <= 3'd0;
             tog_p    <= 1'b0;
             pix_idx  <= 12'd0;
@@ -179,20 +221,12 @@ module color_detect #(
                 endcase
             end
 
-            // ---- 帧边界 ----
+            // ---- 帧边界：按轮询报一个颜色出去 ----
             if (vs_rise) begin
                 line_idx <= 11'd0;
 
-                if (max_all < MIN_PIX)
-                    col_lat <= 3'd0;
-                else if (cnt_r == max_all)
-                    col_lat <= 3'd1;
-                else if (cnt_g == max_all)
-                    col_lat <= 3'd2;
-                else if (cnt_b == max_all)
-                    col_lat <= 3'd3;
-                else
-                    col_lat <= 3'd4;
+                col_lat <= sel_ok ? ({1'b0, sel} + 3'd1) : 3'd0;
+                if (sel_ok) rr <= sel + 2'd1;     // 2 位自然回绕，下一帧从它后面开始
 
                 cnt_r <= 20'd0;
                 cnt_g <= 20'd0;

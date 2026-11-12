@@ -376,13 +376,75 @@ module FpgaCar (
     );
 
     // ------------------------------------------------------------------
-    // I2C 主机（OV5640 SCCB / OLED / VL53L1X 共用）
-    // 当前 start 恒 0：总线保持释放状态（SCL 高、SDA 高阻靠外部上拉）。
-    // sccb_cfg / oled_driver 接入后改为驱动 start/dev_addr/wr_data。
+    // 颜色顺序记录（A3.4 / 4.3.3）：把 color_detect 的逐帧结果压成「先后顺序」
+    // color_detect 每帧只报一个颜色，且同一色块会被反复上报；color_seq 负责
+    // 去重 + 先到先得地填 4 个槽。槽号 = 出现次序，供 OLED 横排显示。
+    // ------------------------------------------------------------------
+    wire [2:0] seq0, seq1, seq2, seq3;
+    wire [2:0] seq_cnt;
+    wire       seq_valid;
+    wire       seq_full;
+
+    color_seq u_seq (
+        .clk       (clk),
+        .rst_n     (sys_rst_n),
+        .color_in  (cam_color),
+        .new_color (cam_color_evt),
+        .clr       (1'b0),              // TODO: 接整机状态机的「新一轮」信号
+        .seq0      (seq0),
+        .seq1      (seq1),
+        .seq2      (seq2),
+        .seq3      (seq3),
+        .cnt       (seq_cnt),
+        .seq_valid (seq_valid),
+        .complete  (seq_full)
+    );
+
+    // ------------------------------------------------------------------
+    // 车载显示：0.96" SSD1306 OLED（I2C 0x3C）
+    // 细则 4.3.3 / 5.1 要求颜色顺序在车载屏上【持续显示】到裁判拍照，
+    // 所以这里独立挂一个 I2C 主机（oled_driver 自带引擎），不与 OV5640 的
+    // SCCB 共用总线 —— 两颗从机地址不同没错，但 OLED 一帧要连发 1026 字节，
+    // 和 SCCB 交错会让两边状态机互相打断，分开最省心：
+    //   · cmos_sclk / cmos_sdat_*  —— OV5640 SCCB（cam_sccb_cfg 驱动）
+    //   · i2c_scl  / i2c_sda_*     —— 板上公共 I2C（OLED / VL53L1X / YB-MUX04）
+    // 显存：4 个 32x32 汉字横排，纵向居中（page 2~5），空槽不画。
+    // ------------------------------------------------------------------
+    wire oled_busy, oled_ack_err, oled_frame_done;
+
+    oled_driver #(
+        .CLK_FREQ (24_000_000),
+        .SCL_FREQ (400_000),
+        .DEV_ADDR (7'h3C),
+        .BOOT_MS  (20),
+        .FLASH_MS (600),        // 上电整屏白闪 0.6 s：肉眼确认「固件起来了」
+        .ALIVE_MARK (1)         // 左上角 8x8 常亮方块：屏在线但还没颜色可显示时的活口
+    ) u_oled (
+        .clk        (clk),
+        .rst_n      (sys_rst_n),
+        .seq_valid  (seq_valid),
+        .seq0       (seq0),
+        .seq1       (seq1),
+        .seq2       (seq2),
+        .seq3       (seq3),
+        .scl        (i2c_scl),
+        .sda_in     (i2c_sda_IN),
+        .sda_out    (i2c_sda_OUT),
+        .sda_oe     (i2c_sda_OE),
+        .busy       (oled_busy),
+        .ack_err    (oled_ack_err),
+        .frame_done (oled_frame_done)
+    );
+
+    // ------------------------------------------------------------------
+    // 通用 I2C 主机（VL53L1X / YB-MUX04 I2C 模式备用）
+    // 当前 start 恒 0，物理总线已交给 oled_driver；等冗余测距接入时，
+    // 需要先把 OLED 与这些从机做成总线仲裁（或改到另一组引脚）。
     // ------------------------------------------------------------------
     wire        i2c_busy;
     wire [7:0]  i2c_rd_data;
     wire        i2c_ack_err;
+    wire        i2c_scl_spare, i2c_sda_out_spare, i2c_sda_oe_spare;
 
     i2c_master #(
         .CLK_FREQ (24_000_000),
@@ -390,18 +452,18 @@ module FpgaCar (
     ) u_i2c (
         .clk      (clk),
         .rst_n    (sys_rst_n),
-        .start    (1'b0),               // TODO: 接 sccb_cfg 的命令 FSM
-        .dev_addr (7'h3C),              // OV5640 SCCB 写地址 0x78>>1
+        .start    (1'b0),               // TODO: 接 VL53L1X / MUX 的命令 FSM
+        .dev_addr (7'h29),              // VL53L1X 默认 7 位地址
         .rw       (1'b0),
         .wr_data  (8'h00),
         .rd_data  (i2c_rd_data),
         .ack_err  (i2c_ack_err),
         .busy     (i2c_busy),
         .done     (),
-        .scl      (i2c_scl),
-        .sda_in   (i2c_sda_IN),
-        .sda_out  (i2c_sda_OUT),
-        .sda_oe   (i2c_sda_OE)
+        .scl      (i2c_scl_spare),
+        .sda_in   (1'b1),
+        .sda_out  (i2c_sda_out_spare),
+        .sda_oe   (i2c_sda_oe_spare)
     );
 
     // ------------------------------------------------------------------
@@ -434,11 +496,12 @@ module FpgaCar (
 
     // ------------------------------------------------------------------
     // 待实现子模块（顺序见 PROJECT_PLAN.md 第 5 节）
-    //   sccb_cfg      u_sccb  —— 用 u_i2c 把 OV5640 寄存器表写进去   ← 下一步
-    //   dvp_capture   u_cam   —— DVP 8bit 采集，写 DDR3 帧缓存
-    //   color_detect  u_color —— 红/绿/蓝/黄顺序识别
-    //   sign_detect   u_sign  —— 左转/右转标识
-    //   oled_driver   u_oled  —— 颜色顺序持续显示（裁判拍照）
+    //   √ sccb_cfg    u_sccb  —— 用 u_i2c 把 OV5640 寄存器表写进去
+    //   √ dvp_capture u_cam   —— DVP 8bit 采集，数 HREF/VSYNC 与帧数
+    //   √ color_detect u_color—— 逐帧主色判定（含 Q= 遥测）
+    //   √ color_seq   u_seq   —— 去重 + 先到先得记 4 个色的出现顺序
+    //   √ oled_driver u_oled  —— 颜色顺序持续显示（裁判拍照）
+    //   sign_detect   u_sign  —— 左转/右转标识                 ← 下一步
     //   track_pid     u_track —— 用 track[7:0] + enc_*_step 做 PID
     //   car_fsm       u_fsm   —— 整机状态机（循迹/避障/入库/停稳）
     // 说明：enc_l_step / enc_r_step / enc_l_dir / enc_r_dir / i2c_busy /

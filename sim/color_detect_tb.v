@@ -1,15 +1,20 @@
 // =============================================================================
-// color_detect_tb.v —— color_detect 自测（按真实 DVP 时序造 RGB565 字节流）
+// color_detect_tb.v —— color_detect v3 自测（按真实 DVP 时序造 RGB565 字节流）
 // iverilog -g2012 -Wall -s color_detect_tb -o color_detect_tb.vvp \
 //          src/color_detect.v sim/color_detect_tb.v && vvp color_detect_tb.vvp
 // -----------------------------------------------------------------------------
 // 【关键：时序模型】OV5640 在 PCLK **下降沿**改变数据，上升沿处数据稳定。
 // 所以本 tb 一律在 negedge 更新 data/href/vsync，DUT 在 posedge 采样。
-// （之前在 posedge 更新数据，等于和采样沿打架，字节奇偶必然错位 ——
-//  这也是本轮踩到的坑，记进 PROJECT_PLAN）
 //
-// 每帧 NPIX=256 像素（> MIN_PIX=200），VSYNC 上升沿表示"一帧结束"。
-// 验收：红→1 绿→2 蓝→3 黄→4 黑→0，小色斑（各 128 < 200）→0
+// 每帧默认 NPIX=256 像素（> MIN_PIX=200），VSYNC 上升沿表示"一帧结束"。
+// 验收（v3 新增 6/7/8 三条，对应 2026-11-12 上板现象）：
+//   1) 纯红/绿/蓝/黄 → 1/2/3/4          （v2 起就有）
+//   2) 全黑 → 0                          （中性色不计）
+//   3) 小色斑（各 64 < 200）→ 0          （MIN_PIX 生效）
+//   4) 暖光下的黄 R=255 G=240 B=140 → 4  （B 抬到 6 位 34，v2 的 B<26 必失败）
+//   5) 浅黄 R=250 G=250 B=180 → 4        （低饱和但仍是黄）
+//   6) 一帧里四色各 256 像素 → 连续 4 帧必须把 1/2/3/4 全都报一遍（轮询不饿死）
+//   7) 每帧都有 new_color 脉冲
 // =============================================================================
 `timescale 1ns/1ps
 
@@ -40,7 +45,30 @@ module color_detect_tb;
     integer nfr = 0;
     always @(posedge clk) if (rst_n && new_color) nfr = nfr + 1;
 
-    // 送 n 个像素，末尾给一个 VSYNC 上升沿结束本帧
+    integer fails = 0;
+
+    // ---- 单个像素：先高字节后低字节，都在 negedge 更新 ----
+    task px (input [4:0] r5, input [5:0] g6, input [4:0] b5);
+        begin
+            data = {r5, g6[5:3]};        // 高字节 R[4:0] G[5:3]
+            @(negedge pclk);
+            data = {g6[2:0], b5};        // 低字节 G[2:0] B[4:0]
+            @(negedge pclk);
+        end
+    endtask
+
+    task frame_end;
+        begin
+            href = 1'b0;
+            repeat (2) @(negedge pclk);
+            vsync = 1'b1;                    // 帧结束
+            @(negedge pclk);
+            vsync = 1'b0;
+            repeat (3) @(negedge pclk);
+        end
+    endtask
+
+    // 送 n 个同色像素，末尾给一个 VSYNC 上升沿结束本帧
     task send_frame (input [7:0] r, input [7:0] g, input [7:0] b, input integer n);
         reg [4:0] r5;
         reg [5:0] g6;
@@ -53,30 +81,46 @@ module color_detect_tb;
 
             @(negedge pclk);
             href = 1'b1;
-            for (i = 0; i < n; i = i + 1) begin
-                data = {r5, g6[5:3]};        // 高字节 R[4:0] G[5:3]
-                @(negedge pclk);
-                data = {g6[2:0], b5};        // 低字节 G[2:0] B[4:0]
-                @(negedge pclk);
-            end
-            href = 1'b0;
-            repeat (2) @(negedge pclk);
-            vsync = 1'b1;                    // 帧结束
+            for (i = 0; i < n; i = i + 1) px(r5, g6, b5);
+            frame_end;
+        end
+    endtask
+
+    // 一帧里四段等长色带（红绿蓝黄各 n 个像素）
+    task send_quad (input integer n);
+        integer i;
+        begin
             @(negedge pclk);
-            vsync = 1'b0;
-            repeat (3) @(negedge pclk);
+            href = 1'b1;
+            for (i = 0; i < n; i = i + 1) px(5'd31, 6'd0,  5'd0);   // 红 (255,0,0)
+            for (i = 0; i < n; i = i + 1) px(5'd0,  6'd63, 5'd0);   // 绿
+            for (i = 0; i < n; i = i + 1) px(5'd0,  6'd0,  5'd31);  // 蓝
+            for (i = 0; i < n; i = i + 1) px(5'd31, 6'd60, 5'd0);   // 黄
+            frame_end;
         end
     endtask
 
     task check (input [2:0] exp, input [8*8-1:0] name);
         begin
             #3000;                           // 等跨域同步（24 MHz 几个周期）
-            if (color !== exp)
+            if (color !== exp) begin
                 $display("FAIL: %0s -> color=%0d (expect %0d)", name, color, exp);
-            else
+                fails = fails + 1;
+            end else
                 $display("PASS: %0s -> color=%0d", name, color);
         end
     endtask
+
+    // 抓一帧的结果（不比对，用于轮询测试）
+    task grab (output [2:0] c);
+        begin
+            #3000;
+            c = color;
+        end
+    endtask
+
+    reg [2:0] q0, q1, q2, q3;
+    reg [4:0] seen;    // 下标 = 颜色码 1..4
 
     initial begin
         #400 rst_n = 1'b1;
@@ -88,20 +132,45 @@ module color_detect_tb;
         send_frame(8'd255, 8'd255, 8'd0,   NPIX); check(3'd4, "yellow");
         send_frame(8'd0,   8'd0,   8'd0,   NPIX); check(3'd0, "black ");
 
-        // 红 64 + 绿 64：都 < MIN_PIX=200，应判"其他"
-        send_frame(8'd255, 8'd0, 8'd0, 64);
-        send_frame(8'd0, 8'd255, 8'd0, 64);
+        // 小色斑：红 64 + 绿 64，都 < MIN_PIX=200
+        send_frame(8'd255, 8'd0,   8'd0,   64);
+        send_frame(8'd0,   8'd255, 8'd0,   64);
         check(3'd0, "sparse");
 
-        if (nfr < 6) $display("FAIL: new_color pulses=%0d (expect >=6)", nfr);
-        else         $display("PASS: new_color pulses=%0d", nfr);
+        // ---- v3 新增：暖光/浅黄，v2 的绝对门限必失败 ----
+        send_frame(8'd255, 8'd240, 8'd140, NPIX); check(3'd4, "warmyel");
+        send_frame(8'd250, 8'd250, 8'd180, NPIX); check(3'd4, "paleyel");
 
-        $display("INFO: color_detect_tb done");
+        // ---- v3 新增：四色同帧，连发 4 帧必须四色全到 ----
+        seen = 5'b00000;
+        send_quad(NPIX); grab(q0);
+        send_quad(NPIX); grab(q1);
+        send_quad(NPIX); grab(q2);
+        send_quad(NPIX); grab(q3);
+        if (q0 != 3'd0) seen[q0] = 1'b1;
+        if (q1 != 3'd0) seen[q1] = 1'b1;
+        if (q2 != 3'd0) seen[q2] = 1'b1;
+        if (q3 != 3'd0) seen[q3] = 1'b1;
+        $display("INFO: quad results %0d %0d %0d %0d", q0, q1, q2, q3);
+        if (seen[1] !== 1'b1 || seen[2] !== 1'b1 || seen[3] !== 1'b1 || seen[4] !== 1'b1) begin
+            $display("FAIL: quad round-robin missed colors (seen=%b)", seen);
+            fails = fails + 1;
+        end else
+            $display("PASS: quad round-robin covers 1/2/3/4");
+
+        if (nfr < 12) begin
+            $display("FAIL: new_color pulses=%0d (expect >=12)", nfr);
+            fails = fails + 1;
+        end else
+            $display("PASS: new_color pulses=%0d", nfr);
+
+        if (fails == 0) $display("INFO: color_detect_tb ALL PASS");
+        else            $display("INFO: color_detect_tb FAILURES=%0d", fails);
         $finish;
     end
 
     initial begin
-        #2_000_000;
+        #5_000_000;
         $display("TIMEOUT: color_detect_tb hung");
         $finish;
     end

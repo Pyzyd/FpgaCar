@@ -554,6 +554,96 @@ D=123cm T=00011000 P=+02 O=0 V=03 C=1 W=1280 H=720 Q=1
 | 对着红/绿/蓝 `Q` 都一样或都 0 | 输出不是 RGB565（可能是 YUV422），需要 YUV→RGB 转换 |
 | `Q=5` 一直出现 | 白色阈值太低（白纸背景被当成主色） |
 
+## 3.15 下载与调试工具链（2026-11-12 打通，命令行全自动）
+
+目标：不再依赖 Efinity GUI 的 Programmer 按钮，从命令行完成"烧位流 / 固化 Flash / 看遥测"。
+
+### 三个可用的脚本（`FpgaCar/tools/`）
+
+| 脚本 | 作用 | 实测结果 |
+|---|---|---|
+| `tools\dl.bat [file.bit]` | JTAG 烧 `outflow\FpgaCar.bit`，掉电丢失 | `Device ID read from JTAG: 0x10660A79` / `PROGRAMMING DONE` |
+| `tools\flash.bat [file.hex]` | 把 `.hex` 写进板上 SPI Flash（三步全自动） | `Flash device: Winbond W25Q64 8 MiB (JEDEC ID: 0xEF6017)` / `Flash verify successful` / `FLASH DONE` |
+| `tools\mon.bat [COM12] [秒]` | 读调试串口（CH340 → COM12，115200-8-N-1）并汇总各字段 | 4 s 收到 149 行遥测 |
+
+辅助文件：`tools\env.bat`（Efinity 2026.1 全套环境变量 + `PYEXE`）、
+`tools\jtag_program.py`（修复 Efinity 自带下载器的越界 bug）、
+`tools\uart_mon.py`（串口解析）、`FpgaCar\_jtag.jcf`（JTAG 链描述，已生成）。
+
+### 官方命令行也能直接烧（2026-11-12 实测有效）
+
+```bat
+cd /d D:\VF-Ti60F225_HDK_V2.1_20251009\FpgaCar
+C:\Efinity\2026.1\bin\efx_run.bat FpgaCar.xml --flow program --pgm_opts mode=jtag
+```
+
+注意 **design 位置参数必须在最前**，`--flow program` 放后面；只给 `--flow` 会报
+`error: the following arguments are required: design`。
+实测输出（EXIT=0，约 14 s）：
+
+```
+Programming using Board Profile: Generic Board Profile Using FT232H
+Connecting to JTAG_TAP: efx_ti
+JTAG Programming on ftdi://0x0403:0x6014:0:ff/1
+Programming 'outflow\FpgaCar.bit' via JTAG at freq 3.0 MHz
+Device ID read from JTAG: 0x10660A79
+... finished with JTAG programming
+```
+
+这与 3.15 前面记的 `ftdi_program.py:3090` 越界 bug 不冲突：走 `efx_run --flow program` 时
+`run_program()` 里的 `set_up_urls()` 已经被 `efx_run.py` 自己的 URL 填充路径绕开，
+所以**这条路不需要 `tools\jtag_program.py` 补丁**。`tools\dl.bat` 仍保留（它更短、能指定任意 `.bit`）。
+
+烧完立刻读串口可确认新位流已在跑（`V=03`、`W=2560 H=720` 是本次编译的值）：
+`cmd /c "tools\mon.bat COM12 5"`。JTAG 烧写是**易失**的，掉电后回到 Flash 里的旧镜像，
+要固化仍需 `tools\flash.bat`。
+### 为什么 `flash.bat` 必须三步
+
+1. **SPI Active 直连不可用**：本板 FT232H 只引到 JTAG 引脚，CCK/CS 不在 FTDI 排针上，
+   直接烧报 `ERROR: Unknown error trying to read flash device, aborting`。
+2. **Flash 只能经 JTAG→SPI bridge 访问**，而 bridge 本身是要先跑起来的位流。
+   Efinity 自带预编译镜像 `C:\Efinity\2026.1\pgm\fli\titanium\u10660A79.bit`；
+   不先烧它会报 `Unsupported JTAG Bridge version: 255.255`。
+3. 写完 Flash 后板上跑的是 bridge 设计，所以要回烧应用位流，否则车不工作。
+
+### 踩过的两个坑（都可复现）
+
+- **Efinity 2026.1 下载器自身 bug**：`ftdi_program.py:3090` `set_up_urls()` 用
+  `bus_to_url_idx['B'] = 1` 取 `url_list[1]`（JTAG 的 TCK 在 BDBUS），
+  而单接口 FT232H 的 `target.URLS` 只有 1 项 → `IndexError: tuple index out of range`。
+  `tools\jtag_program.py` 把 URL 列表补成 4 项后同时修好了 `set_up_urls()` 与
+  `configure_jtag_session()`。
+- **环境变量必须齐**：缺 `PYTHONHOME` 报 `No module named 'encodings'`，
+  缺 `EFINITY_USER_DIR(_INI)` 报 `KeyError`。全部集中在 `tools\env.bat`。
+
+### 调试能力现状（重要：分三档）
+
+| 档 | 能力 | 现状 | 代价 |
+|---|---|---|---|
+| A | **串口遥测**：`D/T/P/O/V/C/W/H/Q/XY` 全部关键量，60 ms 一行 | ✅ 已可用 | 0（已占 56 字节/行） |
+| B | **加更多遥测字段**：任何内部信号都能塞进串口行 | 改 `uart_report.v` + `FpgaCar.v` 后重编 | 改 RTL，占少量逻辑 |
+| C | **Efinity Debugger（VIO/LA）在线看波形** | ❌ 当前位流里没有任何调试核 | 见下 |
+
+C 档的根本原因：`FpgaCar.xml:109-113` 的 `<efx:debugger>` 是
+`auto_instantiation="off"` / `profile="NONE"`，`FpgaCar.peri.xml` 里没有
+`<efxpt:jtag_info>` 块，顶层也没有 `jtag_inst1_*` 端口 —— 所以 Debugger 连上去也看不到信号。
+要走 C 档需四件套：
+
+1. `FpgaCar.peri.xml` 加 `<efxpt:jtag_info>`（`JTAG_USER1`，11 根 `jtag_inst1_*`，
+   参考 `C:\Efinity\2026.1\examples\helloworld-dbg_AUTO_AND_MANUAL\helloworld.peri.xml:132-148`）；
+2. 顶层加对应端口并标 `(* syn_peri_port = 0 *)`；
+3. 写 `debug_profile.wizard.json`（要抓的信号列表 + 采样深度）；
+4. `FpgaCar.xml` 的 `<efx:debugger>` 改 `auto_instantiation="on"` + 指向该 profile，
+   再走 `efx_run --flow compile`（会自动生成 `work_dbg/debug_top.v` 并给 pnr 加 `--enable_dbg`）。
+
+另外 `efx_dbg.shell` 虽然能无头跑（`python -m efx_dbg.shell < cmds.txt`），但它的
+`auto_config` 在本板会 `KeyError: 'Single RS232-HS'`（本板 FT232H **序列号为空的**，
+而它的描述表只认官方 devkit 名字），`config_jtag` 又不收 URL —— 所以不能纯脚本化驱动，
+C 档实际操作时得开 GUI。
+
+**结论**：日常迭代用 A 档（`dl.bat` + `mon.bat` 循环，几秒一轮）；
+只有当某个 bug 靠串口数值定位不了（例如 DVP 时序毛刺、PID 内部抖动）才值得上 C 档。
+
 ## 3.8 编译状态：已全部跑通，无需再手工做第 1–5 步
 
 以下步骤历史上走过的 GUI 路径保留作参考；当前工程已配置完成，直接打开即可编译下载：
@@ -593,12 +683,288 @@ D=123cm T=00011000 P=+02 O=0 V=03 C=1 W=1280 H=720 Q=1
 > 把顶层端口改成该块输出名（参考 `06-FPGA_HDL_Basic-2023.2/01_LED_8bit_Test/src/LED_8bit_Test.v`
 > 用的是 `pll_inst1_CLKOUT0` / `pll_inst1_LOCKED`）。
 
+## 3.16 进度记录：2026-11-12（A3.5 车载显示 = OLED 驱动 + 颜色顺序记录）
+
+### 为什么这一轮先做显示，而不是继续图像
+
+细则 4.3.3 / 5.1 明确：颜色顺序必须**在车载屏上持续显示到裁判拍照**，口头报告不计分。
+而 `color_detect` 每帧只输出"本帧占比最大的那一个颜色"，**根本不含顺序信息**——
+同一色块会被连报几十上百帧，若直接送去显示，屏上永远只有一个颜色。
+所以显示链路要两级：`color_detect`（逐帧判色）→ **`color_seq`（去重 + 先到先得记顺序）** → `oled_driver`（画屏）。
+这一段不依赖电机、不依赖车架，纯片上 RTL + 手上已到货的 0.96" OLED，是当前能拿到分的最短路径。
+
+### 新增 `src/color_seq.v`（2563 B）
+
+```verilog
+module color_seq (clk, rst_n, color_in[2:0], new_color, clr,
+                  seq0..seq3[2:0], cnt[2:0], seq_valid, complete);
+```
+
+- `complete = (cnt == 3'd4)`。
+- 去重：`wire dup = (color_in == seq0) | ... | (color_in == seq3);`。
+  **空槽恒 0，而 `color_in` 进到这里时已非 0**（0 = 中性色被下面的条件挡住），所以不会误判重复。
+- 只在 `new_color && color_in != 0 && cnt < 4 && !dup` 时写入 `seq{cnt}` 并给 `seq_valid` 打一拍。
+- 4 槽填满后冻结（先到先得，后来的不覆盖）；`clr` 清空重来（顶层当前接常量 0，留给 `car_fsm` 的"新一轮"）。
+
+### 新增 `src/oled_driver.v` + `src/oled_font.v`
+
+- `oled_driver` **自带 I2C 字节引擎**，不复用 `i2c_master`：一帧要连发 1026 字节
+  （1 地址 + 1 控制 + 1024 数据），和 SCCB 交错会让两个状态机互相打断。
+- 显存 `reg [7:0] fb [0:1023]`（128×64 页格式），写只在清屏/渲染状态，读只在发送时 → 综合推断为 RAM。
+- 上电序列：`AE`（关显示）→ `D5 80` → `A8 3F`（1/64 duty）→ `8D 14`（电荷泵）→ `AF`（开显示）；
+  之后每帧 `21 00 7F`（列窗 0..127）+ `22 00 07`（页窗 0..7）再推 1024 字节整屏显存（单事务 1026 字节）。
+- 版面：4 个 32×32 汉字横排（红/绿/蓝/黄），纵向居中在 page 2~5，空槽不画。
+- `oled_font.v` 是 `tools/gen_oled_font.py` 从 `simhei.ttf`（30 号）生成的点阵 ROM：
+  1=红 2=绿 3=蓝 4=黄，4 字形 × 128 B = 512 B，地址 `(color-1)*128 + page*32 + col`。
+
+### 上电自检「白闪 + 存活标记」（2026-11-12 补，解决黑屏无从判断）
+
+**问题**：初版驱动清屏后就等着颜色输入，而 4 个槽初值全是 0、空槽不画 → 上电屏就是**全黑**，
+和"没接好/没烧进去/屏坏了"完全同一个现象，用户在现场无法区分（现场反馈："本来就是黑的，也看不出来有没有启动"）。
+
+**做法**（`oled_driver.v`，状态机加了 `S_FLASH_WAIT = 3'd6` / `S_MARK = 3'd7` 两个原本空着的编码）：
+
+1. 复位后 `clr_val = 8'hFF`，`S_CLEAR` 把 1024 B 显存全填 `0xFF` → `S_PUSH` 整屏推出去 → 屏**全白**；
+2. 进 `S_FLASH_WAIT` 停 `FLASH_MS × 24 MHz`（默认 600 ms），让肉眼看得见；
+3. 计时到 → `clr_val = 8'h00` 再走一遍 `S_CLEAR`/`S_PUSH` → 屏**转黑**；
+4. 之后才进正常渲染；`ALIVE_MARK = 1` 时先走 `S_MARK` 在 page 0 / col 0..7 写 `0xFF`，
+   即左上角一个 8×8 常亮小方块——**没有颜色可显示时，屏上就只剩这个小方块**，一眼分辨死屏与活屏。
+
+参数在顶层 `FpgaCar.v:415-420`：`FLASH_MS (600)`、`ALIVE_MARK (1)`；`FLASH_MS = 0` 关白闪、`ALIVE_MARK = 0` 关标记。
+新增寄存器：`clr_val / boot_flash / need_render / flash_cnt[25:0] / mk[3:0]`。
+`S_PUSH` 推完一屏后：`boot_flash` → `S_FLASH_WAIT`，其余一律回 `S_WAIT`，由 `S_WAIT` 在 `!pend`
+（传输真正结束）后再进 `S_RENDER`——这样"白屏那一帧"和"色块那一帧"都不会漏推
+（初版 `S_CLEAR` 完直接进 `S_RENDER`，清屏结果从来没上过屏）。
+
+**仿真逮到的三个时序坑**（`sim/oled_driver_tb.v` 全 PASS 之后才敢上板）：
+
+1. **白闪计时不能边推边数**：1026 B @ 400 kHz ≈ 26 ms，若 `S_FLASH_WAIT` 一进去就倒计时，
+   计时到点会把还在发送中的 `fb` 改掉，整屏只推出去一半。改成 `if (pend) flash_cnt <= 0;`
+   ——必须等这一笔真正发完再开始数。
+2. **推完不能立刻渲染**：同理会改掉还没发出去的显存（表现为"一半黑一半色块"）。
+   渲染入口统一收到 `S_WAIT` 里，且 `S_WAIT` 先看 `need_render` 再看 `dirty`。
+3. **tb 里不能用 `wait (frame_done === 1'b1)`**：`frame_done` 是 1 clk 脉冲，
+   电平 wait 会在脉冲还没撤的同一拍立刻返回，等于没等——第二帧起比对就串位了。
+   必须 `@(posedge frame_done)`。
+
+最终仿真结论：白闪全 `0xFF`、转黑全 `0x00`、frame1/2/3 逐字节匹配、1024 B 单事务、
+无 NACK、SCL 4.00 MHz、总线收尾空闲，全 PASS。
+
+### 本轮两个真实 bug
+
+1. **`gp + 2'd2` 位宽溢出**：`fb[{(gp + 2'd2), 7'd0} + ...]` 里 `gp+2'd2` 只有 2 位，
+   `gp=3` 时回绕成 1 → page 5 全空、page 1 被覆盖（frame1 有 357 字节对不上）。
+   改成 `{(gp + 3'd2), 7'd0}` 后逐字节全对。
+2. **`ndata` 在控制字节处被清零**：初始化命令是一条一条发的，原先在每个事务的
+   控制字节（`byten==1`）就清 `ndata`，导致只保留最后一条命令，AE/8D14/AF 全都抽查不到。
+   修法：只有 `rx == 8'h40`（显存数据流）才清 `ndata`，命令路径不清。
+
+### 验证结果
+
+- `sim/color_seq_tb.v`：11 项全 PASS（忽略中性色、红先、蓝次、重复丢弃、填满冻结、
+  恰好 4 个 `seq_valid` 脉冲、`clr` 后 `complete` 拉低并可重新记录）。
+- `sim/oled_driver_tb.v`（10593 B）：frame1（红绿蓝黄）/ frame2（蓝黄红绿）/ frame3（只 2 槽）
+  **显存 1024 字节逐字节匹配**；1024 数据字节单事务；无 NACK；init 含 AE/8D 14/AF；
+  21/22 窗口命令正确；SCL 周期 250 ns = **4.00 MHz**；结束总线空闲。
+- `sim/FpgaCar_tb.v` 顶层 smoke 5 项仍全 PASS。
+
+### 全链路编译（2026-11-12 19:05，带白闪自检，efx_run 三流水 EXIT=0）
+
+| 阶段 | 结果 |
+|---|---|
+| `map` | PASS，**FF 3718 / ADD 408 / LUT4 12392 / DSP48 2**（`outflow/FpgaCar.res.csv`）|
+| `pnr` | PASS，`clk` setup slack **31.805 ns**、hold slack 0.090 ns；XLR **15612/60800 = 25.68%** |
+| `pgm` | PASS，位流 `outflow/FpgaCar.bit` = **2026-11-12 19:05:40**（1886343 B） |
+
+> 相比 18:21 那一版（12636 XLR / 20.78%），白闪自检让 `u_oled` 涨到 **2967 FF + 10408 LUT**
+> （`res.csv:22`），整片多用了约 3000 XLR。原因同上：`fb` 被映射成逻辑存储器，
+> 而自检又多加了一整套清屏/标记/计时寄存器。25.68% 仍然宽裕。
+
+`outflow/FpgaCar.map.out:28-30` 有 `color_seq.v` / `oled_font.v` / `oled_driver.v` 的分析记录，
+`FpgaCar.map.out:56-59` 有编译记录，`hier_util.rpt` 里 `u_oled` = 7788 XLR、`u_seq` = 29 XLR，确认已进网表。
+关键路径在 `u_oled/txa[0]` → `u_oled/shreg[5]`（显存读 + 移位寄存器），8.343 ns。
+
+### 一条需要注意的警告（不影响功能）
+
+```
+WARNING: Mapping into logic memory block 'u_oled/fb' (8192 bits) because read port is not synchronous. [EFX-0657]
+```
+
+显存 `fb` 是异步读（`fb[txa]` 直接进移位寄存器加载路径），所以综合把它铺成逻辑存储器而不是块 RAM，
+`u_oled` 因此占了 7788 个 XLR。当前整片用 20.78%，完全够用；若以后要省资源，
+把读改成同步读（`fb` 输出打一拍，发送状态机相应延一拍）即可换回 BRAM。
+
+### 上板判据
+
+上电自检（`FLASH_MS = 600` / `ALIVE_MARK = 1`，见 `FpgaCar.v:415-420`）：
+复位后整屏填 `0xFF` 推出去 → **全白闪 0.6 s** → 整屏填 `0x00` 推出去 → 转黑 →
+正常渲染 4 个色块；`ALIVE_MARK = 1` 时 page 0 / col 0..7 常亮一个 8×8 实心方块。
+
+| 现象 | 含义 |
+|---|---|
+| 上电**全白闪一下**（然后转黑） | ✅ 初始化 + 清屏 + 整屏推送 + 屏本体**全通**。这是「固件起来了」的硬证据 |
+| 没白闪，但左上角有 8×8 小方块 | ✅ 通；只是还没有颜色顺序要显示（`ALIVE_MARK` 常亮标记） |
+| 没白闪、也没小方块，屏全黑 | ❌ 没有一次事务成功：先量 P4 pin 15 静态高（无波形 = 引脚/约束），再查 `DEV_ADDR` 是否该用 `7'h3D` |
+| 屏全黑且 SCL 完全没有波形 | `i2c_scl` 没到 P4 pin 15 / 引脚约束缺失；先万用表量 P4 pin 15 静态高 |
+| SCL 有波形但无 ACK | 屏地址不是 0x3C（有些模块是 0x3D），改 `DEV_ADDR`（`FpgaCar.v:418`）|
+| 白闪之后花屏/雪花，或整屏常白不转黑 | I2C 时序或上拉问题：`SCL_FREQ` 400 k→100 k 重编；`BOOT_MS` 20→100（电荷泵没稳定）|
+| 对着红/绿/蓝/黄色块，每认出一个就从左往右多一格汉字 | ✅ `color_detect` → `color_seq` → `oled_driver` 整链打通 |
+| 串口 `Q=` 出现 **4** | ✅ v3 判黄生效（v2 的绝对门限在这盏灯下永远出不来 4，见 §3.16 color_detect v3）|
+
+> 自检可关：`FLASH_MS = 0` 关白闪，`ALIVE_MARK = 0` 关小方块（比赛时想留标记就保持 1）。
+
+### OLED 四脚接线（已按原理图逐脚核对，2026-11-12）
+
+模块 4 脚 → 板上 **P4（`DC3-40P`，顶层 sheet）** 针脚：
+
+| OLED 模块 | 接到 | 通路 / 说明 |
+|---|---|---|
+| VCC | **P4 pin 29 = `D3V3`** | 3.3V。**不要接 pin 11 的 `D5V0`**：TXS0108E B 侧绝对最大 4.6V，模块板载上拉会把 SCL/SDA 顶到 VCC |
+| GND | **P4 pin 12 或 pin 30 = `GND`** | 两个 GND 脚等价 |
+| SCL | **P4 pin 15 = `User_IO12`** | `User_3V3_IO12` → TXS0108E 通道 → `GPIOL_N_13`（BGA `E3`，bank 1B）；RTL `i2c_scl` = output |
+| SDA | **P4 pin 16 = `User_IO13`** | `User_3V3_IO13` → TXS0108E 通道 → `GPIOL_P_13`（BGA `F3`，bank 1B）；RTL `i2c_sda` = inout |
+
+- **P4 针脚排布**：左列奇数 1/3/…/39，右列偶数 2/4/…/40；**pin 11 = `D5V0`、pin 12 = `GND`、pin 29 = `D3V3`、pin 30 = `GND`** 是四个电源脚，
+  IO 编号跨过它们：左列 pin1–9 = IO0–IO8、pin13–27 = IO10–IO24、pin31–39 = IO26–IO34（右列 = IO1–IO9 / IO11–IO25 / IO27–IO35）。
+  所以 **IO12 = pin 15、IO13 = pin 16**（不是 13/14）。
+- **电平**：0Ω 选择电阻 `R1 = 0R` 把 `VOUT` 接到 `D3V3`（默认；`R10` 空贴 `D1V8`），与丝印"默认 DC3-40 为 3.3V 电平"一致；TXS0108E 的 `OE` 接 `D1V8` 常使能。
+- **上拉核算**：TXS0108E B 侧内部 10 kΩ ∥ 模块板载 10 kΩ ≈ 5 kΩ；400 kHz 要求上升沿 < 300 ns，排线电容 > 60 pF 就会临界。
+  上板若 NACK / 花屏，先把 `FpgaCar.v:417` 的 `SCL_FREQ` 从 `400_000` 降到 `100_000`（`oled_driver.v:30` 默认值同步改）。
+- **从机地址**：`FpgaCar.v:418` / `oled_driver.v:31` 为 `7'h3C`；部分模块是 `0x3D`，全黑无 ACK 时先查这个。
+- 手册里 `VCC` 允许 1.65–3.3V（模块内部电荷泵升到 7.5V 驱动面板），**模块板载没有稳压器**，所以外部供 3.3V 是硬要求。
+
+### color_detect v3：相对判黄 + 帧内四色轮询（2026-11-12 19:50）
+
+#### 为什么改：串口实测第 4 槽永远空
+
+上板跑 v2 后连续采样 40 s，串口 `Q=` **只在 2 和 3 之间跳，一次都没出现过 4（黄）**。
+同期 `XY=` 在 `0862/0863/0882/0883/08A2/08A3/1083` 之间变，拆开是 R5=1,G=3,B=6 这种近黑深蓝灰——
+**色块根本不在画面正中**，所以「打中心像素」这条排查路走不通，只能从判据本身找原因。
+
+根因在 v2 的判黄是**绝对门限**：
+
+```verilog
+// v2（错）：px_b < YEL_B_MAX(26)
+else if (px_r > YEL_RG && px_g > YEL_RG && px_b < YEL_B_MAX) cls = 4;
+```
+
+室内灯光下印刷黄卡的 B 通道实测落在 **28~35**，恒 > 26，于是 `cls=4` 永不成立；
+像素落进 `mx==r7` / `mx==g7` 分支被判成红/绿，又被 `color_seq` 的 `dup` 吃掉。
+结果就是前 3 槽能填、第 4 槽永远空。
+
+#### v3 判据：只比通道之间的关系，不设绝对亮度
+
+`src/color_detect.v:48-52` 参数改成 5 个（**`YEL_B_MAX` 已删除**）：
+
+| 参数 | 值 | 含义 |
+|---|---|---|
+| `SAT_MIN` | `6'd16` | 饱和度下限，低于此值算中性色（判 0） |
+| `YEL_RG` | `6'd28` | 黄：`min(R,G)` 至少这么大（太暗的不算黄） |
+| `YEL_DR` | `6'd14` | 黄：`\|R-G\|` 不超过这么大（黄的 R≈G） |
+| `YEL_DB` | `6'd12` | 黄：`min(R,G) - B` 至少这么大（黄一定比 B 亮一截） |
+| `MIN_PIX` | `20'd200` | 单帧某色像素少于这么多不认（滤小色斑） |
+
+```verilog
+wire [6:0] rg_diff = (r7 > g7) ? (r7 - g7) : (g7 - r7);
+wire [6:0] yel_b_lim = b7 + {1'b0, YEL_DB};
+wire is_yel = (rg_min >= {1'b0, YEL_RG}) && (rg_diff <= {1'b0, YEL_DR})
+           && (rg_min >= yel_b_lim);
+```
+
+分类链：`sat < SAT_MIN → 0`；`is_yel → 4`；`mx == r7 → 1`；`mx == g7 → 2`；否则 `3`。
+
+这样**换成暖黄（255,240,140）或冷白偏黄（250,250,180）也都能判成黄**，
+因为它只看「R≈G 且明显高于 B」，不看 B 的绝对值。
+
+#### 第二处改动：整帧单赢家 → 帧内四色轮询
+
+v2 每帧只在 `cnt_r/g/b/y` 里挑**全局最大**的那个当主色。当画面里同时有多个色块
+（或某个色块面积大得多）时，小面积的那色永远选不上，四个槽就凑不齐。
+
+v3 改成**轮询（round-robin）**：帧末先算出四个「够格」标志
+
+```verilog
+wire [3:0] elig = {(cnt_y>=MIN_PIX),(cnt_b>=MIN_PIX),(cnt_g>=MIN_PIX),(cnt_r>=MIN_PIX)};
+```
+
+再按当前轮询指针 `rr` 把 `elig` 循环右移 `rr` 位，取最低的置位项——即「从 rr 开始往前找第一个够格的」：
+
+```verilog
+wire [1:0] sel_off = er[0] ? 2'd0 : (er[1] ? 2'd1 : (er[2] ? 2'd2 : 2'd3));
+wire       sel_ok  = |er;
+wire [1:0] sel     = (rr + sel_off) & 2'd3;
+// vs_rise：
+col_lat <= sel_ok ? ({1'b0, sel} + 3'd1) : 3'd0;   // 1..4
+if (sel_ok) rr <= sel + 2'd1;                       // 下次从下一色开始找
+```
+
+于是同一画面连续几帧会依次吐出 1 → 2 → 3 → 4，四色一定能凑齐，
+而不是「谁面积大谁一直赢」。`sel_ok = 0`（这帧一个色都不够格）时仍报 0，不会污染顺序。
+
+> **一个设计决定**：计数没有改成 `reg [19:0] cnt [0:3]` 配 `rr` 做非阻塞下标。
+> 那样会触发动态部分选择（variable part-select），综合出来是一堆多路选择器，
+> 代价比四个平坦寄存器大得多。这里保持 `cnt_r/cnt_g/cnt_b/cnt_y` 平面写法，
+> 只在帧末做一次 4 选 1。
+
+#### 仿真（`sim/color_detect_tb.v` 重写，11 项全 PASS）
+
+tb 用 `task px(r5,g6,b5)` 逐字节在 negedge 驱动、posedge 采样，
+`send_frame(r,g,b,n)` 灌单色帧，`send_quad(n)` 连发红/绿/蓝/黄四帧。
+
+| 断言 | 期望 | 结果 |
+|---|---|---|
+| 红 (255,0,0) | 1 | PASS |
+| 绿 (0,255,0) | 2 | PASS |
+| 蓝 (0,0,255) | 3 | PASS |
+| 印刷黄 (255,255,0) | 4 | PASS |
+| 黑 (0,0,0) | 0 | PASS |
+| 稀疏小斑点（总量 < 200） | 0 | PASS |
+| **暖黄 (255,240,140)** | 4 | PASS（v2 会判成 1） |
+| **淡黄 (250,250,180)** | 4 | PASS（v3 的核心回归项） |
+| **quad 连发 4 帧** | 依次 1,2,3,4 全覆盖 | PASS |
+| `new_color` 脉冲数 | ≥ 6（实测 13） | PASS |
+
+期间还修了 tb 自己的两个 bug：quad 的红段误写成 `px(5'd31,6'd63,5'd0)`（那是黄）；
+`reg [3:0] seen` 存不下下标 4，改成 `reg [4:0]`。
+
+回归全绿：`color_seq_tb` 11 项、`uart_report_tb` 3 组 64 字节整行、`oled_driver_tb`（白闪/转黑/3 帧逐字节/1026 B 单事务/无 NACK/SCL 4.00 MHz）。
+
+#### 全链路编译（2026-11-12 19:50，efx_run 四段 EXIT=0）
+
+| 阶段 | 结果 |
+|---|---|
+| `map` | PASS，**FF 3739 / ADD 422 / LUT4 12195 / DSP48 2** |
+| `interface` | PASS |
+| `pnr` | PASS，`clk` setup slack **32.622 ns**（约束 41.667 ns）、hold slack **0.090 ns**；XLR **15815/60800 = 26.01%** |
+| `pgm` | PASS，位流 `outflow/FpgaCar.bit` = **2026-11-12 19:50**（1881027 B）|
+
+> 对比 19:05 版（408 / 12392 / 2 / 3718、slack 31.805 ns、XLR 15612 = 25.68%）：
+> 逻辑**没涨反降**约 200 LUT，多出的 203 个 XLR 来自新增的轮询/比较逻辑。
+> 资源占用四分之一，离满还很远。
+> 关键路径仍是 `u_oled/txa[0]` → `u_oled/shreg[3]`（显存异步读），8.819 ns。
+
+#### 上板验证（这版要看的判据）
+
+1. 拿**黄色**色卡对着摄像头：串口 `Q=` 应该出现 **4**（这是 v3 的唯一验收点；v2 永远看不到 4）。
+2. 依次出示红→绿→蓝→黄：OLED 四格应该**按出示顺序**填满，不再留空槽。
+3. 如果黄仍判不出来，按顺序调参重编：先降 `YEL_DR`（14→18，放宽 R/G 不等程度），
+   再降 `YEL_RG`（28→20，容许更暗的黄），最后降 `SAT_MIN`（16→10）。
+
 ## 4. 下一步（2026-11-10 按实际到货情况重排）
 
 ### 第 1 步：现在就能做的上板验证（不需要任何待买硬件）
 
-Programmer → Select Image File → `outflow/FpgaCar.bit`（**2026-11-10 19:50 生成**，含
-track_line + ir 融合的最新版）→ JTAG → Start Program。5 项预期里先做这 3 项：
+**命令行直接烧（2026-11-12 起可用，见 §3.15）**：
+
+```
+cd FpgaCar
+tools\dl.bat          # JTAG 烧 outflow\FpgaCar.bit（掉电丢失）
+tools\mon.bat COM12 5 # 读 5 秒串口遥测
+tools\flash.bat       # 固化进 SPI Flash（三步：bridge → 写入 → 回烧应用）；上电自启动用这个
+```
+
+也可继续走 GUI：Programmer → Select Image File → `outflow/FpgaCar.bit` → JTAG → Start Program
+（**位流 2026-11-12 19:50**，含 `color_detect` v3 的黄色判据 + 帧内四色轮询）。5 项预期里先做这 4 项：
 
 1. `LED[5]` 约 0.35 s 慢闪 → 位流已加载、24 MHz 时钟在跑。
 2. YB-MUX04 接上（8 根线到 User_IO2~9 + 5V/GND，板子已有）→ 黑线在探头下从左往右推，
@@ -607,22 +973,30 @@ track_line + ir 融合的最新版）→ JTAG → Start Program。5 项预期里
 3. 串口助手（115200-8-N-1）每 60 ms 一行 `D=xxxcm T=xxxxxxxx P=+xx O=x`；不接 HC-SR04
    时是 `D=---cm`；接上后用手在探头前晃，数字跟着变 → 超声波通道打通。
    顺带万用表测 `i2c_scl`/`i2c_sda` 恒高 → I2C 总线释放正常（是第 2 步 sccb_cfg 的前置）。
+4. **OLED 接好先看「有没有白闪」**（接线见 §3.16，只能接 P4 pin 15/16/29，VCC 千万别上 pin 11 的 D5V0）：
+   按复位（或重新烧）后，屏应**整屏白闪约 0.6 s，然后转黑**，之后左上角留一个 8×8 小方块——
+   这就是「固件起来了、屏在线」的判据（`FLASH_MS`/`ALIVE_MARK`，`FpgaCar.v:415-420`）。
+   没白闪也不该继续等：全黑 = 一次事务都没成功，先量 P4 pin 15 有没有波形，再换 `DEV_ADDR` `7'h3D`。
+   白闪之后花屏/雪花 = I2C 时序或上拉问题，先把 `FpgaCar.v:417` 的 `SCL_FREQ` 降到 `100_000` 重编。
+   然后拿红/绿/蓝/黄色卡逐张对着摄像头：每认出一个，屏上从左往右多一个 32x32 汉字，
+   顺序与出示顺序一致 → `color_detect`→`color_seq`→`oled_driver` 整链打通。
+   注意 OLED 一帧 1026 字节、400 kHz 下约 26 ms，且走独立 I2C 总线，不会卡住摄像头采集。
 
 暂做不了、等电机/编码器到货再验的：**左轮 25% 转动**（PWM→TB6612 通路）、
 **手转轮看 `LED[0]` 闪**（编码器 AB 相，能提前发现接反/缺上拉）。
 
-当前顶层是台架态：`FpgaCar.v:139` `PWM_BENCH_TEST = 1'b1`（`ml_in1`/`motor_stby` 直接绑它，
+当前顶层是台架态：`FpgaCar.v:153` `PWM_BENCH_TEST = 1'b1`（`ml_in1`/`motor_stby` 直接绑它，
 =1 时 TB6612 一上电就工作）。**电机到货、车架上地之前必须改回 `0`。**
 
 ### 第 2 步：下一段 RTL = `sccb_cfg.v`（理由：零新硬件依赖 + 卡 45 分）
 
 | 序 | 模块 | 为什么是它 | 依赖 |
 |---|---|---|---|
-| 1 | `sccb_cfg.v` | 用 `i2c_master` 把资料包 `I2C_OV5640_1280720_Config.v` 的寄存器表灌进 OV5640。**不配通 SCCB，`dvp_capture` 一帧都采不到，标识 25 + 颜色 20 = 45 分全部停摆**；同一条 I2C 顺带解锁 OLED。寄存器表直接用官方 14 KB 那份，别手写 | 仅 `i2c_master`（已完成）+ 手上已有的 OV5640 |
+| 1 | `sccb_cfg.v` | 用 `i2c_master` 把资料包 `I2C_OV5640_1280720_Config.v` 的寄存器表灌进 OV5640。**不配通 SCCB，`dvp_capture` 一帧都采不到，标识 25 + 颜色 20 = 45 分全部停摆**。（OLED 走板上另一组 `i2c_scl/i2c_sda`，不占 SCCB，见 §3.16。）寄存器表直接用官方 14 KB 那份，别手写 | 仅 `i2c_master`（已完成）+ 手上已有的 OV5640 |
 | 2 | `track_pid.v` + `car_fsm.v` | 用 `track[7:0]` + `enc_*_step` 做循迹 PID，把 `PWM_BENCH_TEST` 换成闭环输出（循迹 20 + 入库 15）。纯片内 RTL，可先在仿真里写验，但**参数整定必须等电机到货** | `pwm_gen`/`encoder_dec`（已完成） |
 | 3 | `dvp_capture.v` | 移植 `06-.../02-1_.../src/cmos_i2c/CMOS_Capture_RAW_Gray.v`，先做"采到帧、能数到 HREF/VSYNC 边沿"，再谈识别 | OV5640 配置成功 |
 | 4 | `color_detect.v` / `sign_detect.v` | 颜色顺序 20 + 标识 25；需要先确认镜头视野能同时覆盖前方标识牌与侧方 25 cm 色块（结构件问题） | `dvp_capture` |
-| 5 | `oled_driver.v` | 颜色顺序必须在车载屏持续显示到裁判拍照 | `i2c_master` |
+| 5 | ✅ `oled_driver.v`（已完成，见 §3.16） | 颜色顺序必须在车载屏持续显示到裁判拍照。已做成自带 I2C 引擎的独立驱动 + 1024 B 显存 + 4×32×32 汉字点阵 ROM，仿真 3 帧逐字节比对全 PASS | 无（自带引擎，不依赖 `i2c_master`） |
 
 ### 第 3 步：硬件侧立刻并行启动（交期不可压缩，别等 RTL）
 
@@ -636,15 +1010,17 @@ track_line + ir 融合的最新版）→ JTAG → Start Program。5 项预期里
 当时综合 EFX_ADD 166 / EFX_LUT4 486 / EFX_FF 296 / DSP48 2，P&R setup slack 36.36 ns。
 **⚠ 这些数字已过时**：截至 §3.14（2026-11-11 21:38）`src/` 共 14 个设计文件（新增
 `cam_probe.v` / `dvp_capture.v` / `i2c_timing_ctrl_16bit.v` / `I2C_OV5640_1280720_Config.v` /
-`cam_sccb_cfg.v` / `color_detect.v`），`FpgaCar.xml` 14 条 `<efx:design_file>`，
-最新综合 **EFX_ADD 276 / EFX_LUT4 2053 / EFX_FF 697 / DSP48 2**，setup slack 36.462 ns，位流 21:38:30。
-下表 ① ③ ④ 的 ✅/待办状态也以 §3.11–§3.14 为准（① 和 ③ 前半已完成；**④ `oled_driver.v` 仍是实打实缺口**）。
+`cam_sccb_cfg.v` / `color_detect.v` / `color_seq.v` / `oled_font.v` / `oled_driver.v`），
+`FpgaCar.xml` 17 条 `<efx:design_file>`，
+最新（§3.16，2026-11-12 19:50，color_detect v3）**EFX_ADD 422 / EFX_LUT4 12195 / EFX_FF 3739 / DSP48 2**，setup slack 32.622 ns，XLR 26.01%，位流 1881027 B。
+（§3.14 那次是 EFX_ADD 276 / EFX_LUT4 2053 / EFX_FF 697、slack 36.462 ns、位流 21:38:30。）
+下表 ① ③ ④ 的 ✅/待办状态以 §3.11–§3.14 与 §3.16 为准（① 已完成；③ 前半已完成；**④ 显示已补齐**）。
 
 | 阶段 | 加进 `src/` 的模块 | 说明 | 对应分值 |
 | ① 接口控制器（收益最大、风险最低） | ✅ `pwm_gen.v`、✅ `encoder_dec.v`、✅ `i2c_master.v`、✅ `hc_sr04.v`、✅ `uart_tx.v` + ✅ `uart_report.v`；仍缺 `sccb_cfg.v`、`clk_div.v`（后者其实不需要，PLL 走 Interface Designer） | 全部片内 RTL，只需 IO + 无源上拉，不买任何芯片。已完成部分见 §3.7 | 全部 |
 | ② 运动闭环 | `track_pid.v`、`car_fsm.v`（整机状态机）、`speed_meter.v`（用 `enc_*_step` 数脉冲测速） | 循迹 PID、避障绕行回线、5 s 停稳入库都靠编码器里程闭环；开环在 4.2 的 5 分钟调试窗口几乎调不稳 | 循迹 20 + 避障 20 + 入库 15 |
 | ③ 图像流水线 | `dvp_capture.v`、`rgb2hsv.v`、`color_detect.v`、`sign_detect.v`、`ddr_frame_buf` | 板卡强项。直接改资料包 `07-FPGA_HDL_Image-2023.2/02-1_Ti60_OV5640_LCD-HDMI_1080P60`（**整目录连 `ip/` 一起复制**）。参考实现是 `06-.../02-1_.../src/cmos_i2c/CMOS_Capture_RAW_Gray.v`（6.2 KB）与同目录 `I2C_OV5640_1280720_Config.v`（14 KB 寄存器表）。**注意**：本资料包内**没有** `11_Ti60_Edge_Detect` 工程（2026-11-10 按 `*Edge*` 全盘搜索，0 命中），早期版本本文档引用它"已实证 Sobel→DDR3→HDMI"是不成立的，别按那个前提排期 | 标识 25 + 颜色 20 |
-| ④ 显示 | `oled_driver.v` + 点阵字库（放 BRAM） | 细则 4.3.3 / 5.1：颜色顺序必须在**车载显示屏持续显示**到裁判拍照，口头报告不计分；0.96" OLED 建议大号色块 + 字符，别用小字 | 颜色 20 |
+| ④ 显示 | ✅ `oled_driver.v` + ✅ `color_seq.v` + ✅ `oled_font.v`（32×32 汉字点阵） | 细则 4.3.3 / 5.1：颜色顺序必须在**车载显示屏持续显示**到裁判拍照，口头报告不计分；0.96" OLED 建议大号色块 + 字符，别用小字。已按 32×32 汉字横排 4 格实现（§3.16） | 颜色 20 |
 | ⑤ 决策层（二选一） | 纯 Verilog FSM，或 Efinity **Sapphire RISC-V** 软核跑 C | Ti60 无硬核 CPU，二者都不需要外挂 STM32/Arduino | 全部 |
 
 **省不掉的硬边界**（别试图在片内实现）：传感器本体（红外收发管、CMOS+镜头、超声波换能器及模拟前端）、
@@ -659,7 +1035,7 @@ H 桥 MOSFET / 电机 / 电池 DC-DC、5 V→3.3 V 分压（HC-SR04 Echo、E18-D
 
 - **已具备（形态已照片确认）**：OV5640（接口匹配、用过）、TB6612FNG 红色突破板（标准 12 脚）、
   YB-MUX04-1.0（X1~X8 = 8 路数字直读 → track[7:0]，TX/RX/SCL/SDA 悬空不接）、HC-SR04、
-  0.96" OLED（SSD1306 I2C 4 脚版，接 User_IO12/13 + D3V3）。
+  0.96" OLED（SSD1306 I2C 4 脚版，接 User_IO12/13 + D3V3 = P4 pin 15/16/29，见 §3.16 接线表）。
 - **待买·必配**：直流减速电机 ×2 带轮、2S 锂电池组 7.4V、DC-DC 5V/≥3A（3.2.3② 电源不得脱离车体；与电机功率地单点共地）。
 - **待买·强烈建议**：光电编码器 ×2（**光电式**，3.2.2 禁磁/霍尔）。
 - **待买·已确认**：**E18-D80NK ×2**（左/右前端，User_IO26/27，与 HC-SR04 取"或"融合避障冗余，
