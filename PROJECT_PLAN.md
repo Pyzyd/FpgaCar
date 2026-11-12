@@ -10,18 +10,32 @@ FpgaCar/
 ├── FpgaCar.peri.xml     ← Interface Designer 配置（已完成：管脚/电平全部锁定）
 ├── FpgaCar.sdc          ← 顶层时序约束（24 MHz 主时钟），与 .xml 同级
 ├── PROJECT_PLAN.md      ← 本文件
+├── CONTRIBUTING.md      ← 【提交 / 推送规则】入库边界、检查清单、回归门禁，必读
+├── .gitignore           ← 只提交「输入」不提交「输出」的规则（详见 CONTRIBUTING.md §2）
+├── .gitattributes       ← 统一 LF，消除 Windows CRLF 警告（见下文）
 ├── src/                 ← 设计文件（综合用），只放 .v / .sv
 │   └── FpgaCar.v        ← 顶层【骨架】，整车 I/O 与模块划分
-├── sim/                 ← 仿真文件（**不导入工程**）
+├── sim/                 ← 仿真文件（**不导入工程**），全部 *_tb.v 入库
 │   └── FpgaCar_tb.v     ← 顶层最小 testbench
-├── tools/               ← 上板/调试脚本（cap.py 抓包、grab_frame.py 抓缩略图、dl.bat 烧板 …）
+├── tools/               ← 上板/调试/回归脚本（cap.py 抓包、run_regression.sh 全量回归、dl.bat 烧板 …）
+│   └── hooks/pre-push   ← 推送门禁：回归不过不许 push（git config core.hooksPath tools/hooks 启用）
 ├── docs/                ← 硬件接口表等文档
 ├── data/                ← 抓包数据（_cap*.csv / _frame*.*），可随时重抓，不入库
 ├── .scratch/            ← 一次性探测脚本与仿真中间产物，可随时删，不入库
 ├── ip/                  ← IP Manager 生成的 IP（DDR / FIFO / PLL / Sapphire …）
-├── outflow/             ← 编译产物（FpgaCar.bit 已生成 / FpgaCar.hex / 报告）
-└── work_pnr/            ← 布局布线中间文件
+├── outflow/             ← 编译产物（FpgaCar.bit 已生成 / FpgaCar.hex / 报告），不入库
+└── work_pnr/            ← 布局布线中间文件，不入库
 ```
+
+**入库边界**：`sim/*_tb.v` 与 `tools/` 下正式脚本是源码、**必须入库**；被忽略的只是
+仿真产物（`*.vvp` / `.scratch/` / `_sim/`）、Efinity 产物（`outflow/` 等）、抓包数据（`data/`）和
+`_` 前缀的临时脚本。判据是「能否由仓库内文件重新生成 / 随时重抓」。完整对照表与提交推送流程见
+`CONTRIBUTING.md`。
+**引脚真源是 `FpgaCar.peri.xml`**：`outflow/` 里的 `.lpf` / `.pinout.csv` 是每次编译都会变的派生报告，
+不入库；改管脚后除提交 `.peri.xml` 外，必须同步更新本文的接线表（见 §OLED 四脚接线）。
+
+**换行符**：`.gitattributes` 统一 `* text=auto eol=lf`，覆盖 Windows 全局 `core.autocrlf=true`，
+消除每次提交刷屏的 `warning: LF will be replaced by CRLF`；不要靠改全局 git config 解决。
 
 **数据落点约定**：`tools/cap.py` 与 `tools/grab_frame.py` 只写文件名时，输出自动落到 `data/`；
 要放别处就传带目录的完整路径。`_jtag.jcf` 必须留在工程根（`dl.bat` / `flash.bat` 按 `%~dp0..\_jtag.jcf` 查找）。

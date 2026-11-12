@@ -1,0 +1,12 @@
+# 统一 LF：消除 Windows core.autocrlf=true 每次提交的
+# "warning: LF will be replaced by CRLF"，并保证跨平台克隆字节一致。
+# eol=lf 覆盖 core.autocrlf，不需要改全局 git config。
+* text=auto eol=lf
+
+# 明确标记为二进制，避免 git 做文本转换 / 无意义的 diff 统计。
+*.xlsx binary
+*.bit   binary
+*.hex   binary
+*.png   binary
+*.bmp   binary
+*.vvp   binary
