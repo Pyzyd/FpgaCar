@@ -27,6 +27,7 @@ module oled_driver_tb;
 
     reg        rst_n     = 1'b0;
     reg        seq_valid = 1'b0;
+    reg        k230_off = 1'b0;          // K230 掉线标志（0 = 在线）
     reg [2:0]  seq0 = 3'd1, seq1 = 3'd2, seq2 = 3'd3, seq3 = 3'd4;
 
     wire scl, sda_out, sda_oe, sda_in;
@@ -44,6 +45,7 @@ module oled_driver_tb;
         .FLASH_MS(1), .ALIVE_MARK(1)      // 仿真里白闪只保持 1 ms
     ) u_dut (
         .clk(clk), .rst_n(rst_n),
+        .k230_off(k230_off),
         .seq_valid(seq_valid), .seq0(seq0), .seq1(seq1), .seq2(seq2), .seq3(seq3),
         .scl(scl), .sda_in(sda_in), .sda_out(sda_out), .sda_oe(sda_oe),
         .busy(busy), .ack_err(ack_err), .frame_done(frame_done),
@@ -85,6 +87,7 @@ module oled_driver_tb;
 
     reg [7:0] cmd_log [0:255];
     reg [7:0] model_fb[0:1023];
+
 
     // slv_oe_r 由状态机在时钟上升沿驱动（见 always 块内的 ACK 处理）
 
@@ -139,12 +142,18 @@ module oled_driver_tb;
     reg [2:0] cols   [0:3];
     integer   mi, mg, mc, ms, mcol, mism;
     integer   tw;                      // 故障注入阶段的超时计数
+    integer   miso;                    // K230 OFF 叉号比对的不匹配计数
+
 
     task build_exp;
         integer i2, s2i, g2, c2, col2;
         begin
             for (i2 = 0; i2 < 1024; i2 = i2 + 1) exp_fb[i2] = 8'h00;
             for (i2 = 0; i2 < 8; i2 = i2 + 1) exp_fb[i2] = 8'hFF;   // 左上角 8x8 存活标记
+            if (k230_off) begin                                     // 右上角 K230 OFF 叉号
+                for (i2 = 0; i2 < 8; i2 = i2 + 1)
+                    exp_fb[120 + i2] = (8'h01 << i2) | (8'h80 >> i2);
+            end
             for (s2i = 0; s2i < 4; s2i = s2i + 1) begin
                 col2 = cols[s2i];
                 if (col2 != 0) begin
@@ -160,7 +169,7 @@ module oled_driver_tb;
         end
     endtask
 
-    task check_fb (input [127:0] tag);
+    task check_fb (input [255:0] tag);
         begin
             mism = 0;
             for (mi = 0; mi < 1024; mi = mi + 1)
@@ -190,6 +199,7 @@ module oled_driver_tb;
     // 主流程
     // ------------------------------------------------------------------
     integer i, found_ae, found_af, found_cp, found_21, found_22, ncmd_snapshot;
+
 
     initial begin
         for (i = 0; i < 1024; i = i + 1) model_fb[i] = 8'h00;
@@ -300,6 +310,35 @@ module oled_driver_tb;
         @(posedge frame_done);
         @(posedge clk);
         check_fb("frame3 (2 slots)");
+
+        // ---- 第 4 阶段：K230 掉线 → 右上角叉号出现；恢复 → 擦除 ----
+        // 验收判据（PROJECT_PLAN §3.18）：拔掉 K230 后屏上要能看出来。
+        // 这里只测驱动侧行为，link_alive 的 2 s 超时由 k230_link_tb 覆盖。
+        $display("PHASE: waiting OFF-cross frame at %0t", $time); $fflush(0);
+        k230_off = 1'b1;
+        @(posedge frame_done);
+        @(posedge clk);
+        $display("PHASE: OFF-cross frame arrived at %0t", $time); $fflush(0);
+        build_exp;
+        miso = 0;
+        for (mi = 120; mi < 128; mi = mi + 1)
+            if (model_fb[mi] !== ((8'h01 << (mi - 120)) | (8'h80 >> (mi - 120)))) miso = miso + 1;
+        if (miso == 0) $display("PASS: K230 OFF cross drawn at page0 col120..127");
+        else           $display("FAIL: K230 OFF cross wrong, %0d bad bytes", miso);
+        // 叉号不能波及左侧存活标记
+        miso = 0;
+        for (mi = 0; mi < 8; mi = mi + 1)
+            if (model_fb[mi] !== 8'hFF) miso = miso + 1;
+        if (miso == 0) $display("PASS: alive mark unaffected by OFF cross");
+        else           $display("FAIL: alive mark damaged, %0d bad bytes", miso);
+
+        $display("PHASE: waiting recover frame at %0t", $time); $fflush(0);
+        k230_off = 1'b0;
+        @(posedge frame_done);
+        @(posedge clk);
+        $display("PHASE: recover frame arrived at %0t", $time); $fflush(0);
+        build_exp;
+        check_fb("after K230 recover");
 
         if (nack !== 0) $display("FAIL: slave model saw %0d address NACKs", nack);
         else            $display("PASS: every transaction addressed 0x3C correctly");

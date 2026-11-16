@@ -42,6 +42,9 @@ _*.csv
 # 前缀 _ 表示临时；tools/ 下正式脚本（cap.py / run_regression.sh …）照常入库。
 tools/_*.py
 
+# 下划线前缀 = 一次性产物（如 tools/_tmp_pdf*.py 抽出的图纸页），可随时重抓。
+docs/_*/
+
 # --- 5. Python / 编辑器 / 操作系统垃圾 ---------------------------------------
 __pycache__/
 *.py[cod]

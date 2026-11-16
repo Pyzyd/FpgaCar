@@ -28,7 +28,9 @@ module car_fsm #(
     parameter integer LOST_HOLD_MS  = 300,    // 丢线先保持多久
     parameter integer SEARCH_MS     = 1500,   // 原地找线最长多久
     parameter integer SEARCH_DUTY   = 500,    // 找线时的占空比
-    parameter integer DIR_DEAD_MS   = 10      // 方向切换死区
+    parameter integer DIR_DEAD_MS   = 10,     // 方向切换死区
+    parameter integer TURN_MS       = 700,    // 交通牌强制转向持续时长
+    parameter integer TURN_DUTY     = 700     // 强制转向时的占空比
 ) (
     input  wire              clk,
     input  wire              rst_n,
@@ -37,6 +39,7 @@ module car_fsm #(
     input  wire              lost,
     input  wire              obstacle,
     input  wire signed [4:0] pos,
+input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直，单周期脉冲
     // 闭环输出
     input  wire [10:0]       pid_l,
     input  wire [10:0]       pid_r,
@@ -74,6 +77,12 @@ module car_fsm #(
     reg        last_pos_neg;        // 最后看到线时 pos<0（线在左）
     reg        saw_line;            // 是否曾经看到过线
 
+    // ---------------- 交通牌强制转向 ----------------
+    reg        turning;             // 1 = 正在按交通牌转向
+    reg [15:0] turn_cnt;            // 转向剩余 ms
+    reg        turn_left;           // 1 = 左转（左轮后退、右轮前进）
+    reg        turn_req;            // 已收到转向请求，等下一个 ms_tick 处理
+
     // ---------------- 方向死区 ----------------
     reg        dead;
     reg [15:0] dead_cnt;
@@ -97,6 +106,10 @@ module car_fsm #(
             duty_r      <= 11'd0;
             dead        <= 1'b0;
             dead_cnt    <= 16'd0;
+            turning     <= 1'b0;
+            turn_cnt    <= 16'd0;
+            turn_left   <= 1'b0;
+            turn_req    <= 1'b0;
         end else begin
             // ---- 记住线的方位 ----
             if (on_line && !lost) begin
@@ -121,6 +134,21 @@ module car_fsm #(
                 duty_r   <= 11'd0;
             end
 
+            // ---- 交通牌事件锁存 ----
+            // dir_evt 是单周期脉冲，而主状态机 1 ms 才走一步，直接在里面判会漏。
+            // 这里先记住请求，等 ms_tick 再消费；直行牌（3）用来取消尚未完成的转向。
+            if (dir_evt == 3'd1) begin
+                turn_req  <= 1'b1;
+                turn_left <= 1'b1;
+            end else if (dir_evt == 3'd2) begin
+                turn_req  <= 1'b1;
+                turn_left <= 1'b0;
+            end else if (dir_evt == 3'd3) begin
+                turn_req  <= 1'b0;
+                turning   <= 1'b0;
+                turn_cnt  <= 16'd0;
+            end
+
             // ---- 主状态机（1 ms 步进）----
             if (ms_tick) begin
                 case (state)
@@ -138,18 +166,45 @@ module car_fsm #(
                 end
 
                 S_RUN: begin
-                    dir_l_des <= 1'b1;
-                    dir_r_des <= 1'b1;
-                    if (!dead) begin
-                        duty_l <= pid_l;
-                        duty_r <= pid_r;
-                    end
-                    if (obstacle) begin
-                        ms_cnt <= 16'd0;
-                        state  <= S_STOP;
-                    end else if (lost) begin
-                        ms_cnt <= 16'd0;
-                        state  <= S_LOST;
+                    if (turning) begin
+                        // ---- 交通牌强制转向 ----
+                        // 期间车道线会先被甩开（本来就是有意离开），所以忽略 lost，
+                        // 否则一压离线就跳 S_LOST，转向走不完。障碍仍然优先停车。
+                        dir_l_des <= turn_left ? 1'b0 : 1'b1;   // 左转：左轮后退
+                        dir_r_des <= turn_left ? 1'b1 : 1'b0;   //       右轮前进
+                        if (!dead) begin
+                            duty_l <= TURN_DUTY[10:0];
+                            duty_r <= TURN_DUTY[10:0];
+                        end
+                        turn_cnt <= turn_cnt - 16'd1;
+                        if (turn_cnt <= 16'd1) begin
+                            turning <= 1'b0;
+                            ms_cnt  <= 16'd0;
+                        end
+                        if (obstacle) begin
+                            turning <= 1'b0;        // 撞上障碍就放弃这次转向
+                            ms_cnt  <= 16'd0;
+                            state   <= S_STOP;
+                        end
+                    end else begin
+                        dir_l_des <= 1'b1;
+                        dir_r_des <= 1'b1;
+                        if (!dead) begin
+                            duty_l <= pid_l;
+                            duty_r <= pid_r;
+                        end
+                        // 收到转向请求：转入强制转向
+                        if (turn_req) begin
+                            turn_req <= 1'b0;
+                            turning  <= 1'b1;
+                            turn_cnt <= TURN_MS[15:0];
+                        end else if (obstacle) begin
+                            ms_cnt <= 16'd0;
+                            state  <= S_STOP;
+                        end else if (lost) begin
+                            ms_cnt <= 16'd0;
+                            state  <= S_LOST;
+                        end
                     end
                 end
 

@@ -159,7 +159,13 @@
         <efxpt:comp_gpio name="mr_pwm" gpio_def="GPIOL_P_09" mode="output" bus_name="" io_standard="1.8 V LVCMOS">
             <efxpt:output_config name="mr_pwm" name_ddio_lo="" register_option="none" clock_name="" is_clock_inverted="false" is_slew_rate="false" tied_option="none" ddio_type="none" delay="0" is_serial="false" drive_strength="4" fastclk_name=""/>
         </efxpt:comp_gpio>
-        <efxpt:comp_gpio name="rst_n" gpio_def="GPIOT_P_11" mode="input" bus_name="" io_standard="1.8 V LVCMOS">
+        <!-- 2026-11-16 改绑：rst_n 原来是 GPIOT_P_11(User_IO35, P4 排针 pin 40)，
+             那是扩展排针，板上复位键根本没接过去，按键按下去 rst_n 一直保持弱上拉高电平，
+             所以 OLED 白闪自检只在真正上电时跑过一次、按键永远重触发不了。
+             现改为 GPIOL_P_02 = 核心板 KEY[0]（引脚定义表：N2 / GPIOL_P_02 / KEY[0] /
+             「和核心板复用了，Default 上拉了」）。按键按下接地 -> 低有效，与 RTL 一致。
+             注：GPIOL_P_02 同时是 P4 排针 pin 2 (User_IO1)，本项目不用那根针。 -->
+        <efxpt:comp_gpio name="rst_n" gpio_def="GPIOL_P_02" mode="input" bus_name="" io_standard="1.8 V LVCMOS">
             <efxpt:input_config name="rst_n" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="weak pullup" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="rst_n_PULL_UP_ENA" dyn_delay_en_name="rst_n_DLY_ENA" dyn_delay_reset_name="rst_n_DLY_RST" dyn_delay_ctrl_name="rst_n_DLY_CTRL" clkmux_buf_name=""/>
         </efxpt:comp_gpio>
         <efxpt:comp_gpio name="track[0]" gpio_def="GPIOL_N_06" mode="input" bus_name="track" io_standard="1.8 V LVCMOS">
@@ -242,10 +248,31 @@
                 <efxpt:comp_gpio name="cmos_ctl1" gpio_def="GPIOR_15" mode="output" bus_name="" io_standard="3.3 V LVCMOS">
             <efxpt:output_config name="cmos_ctl1" name_ddio_lo="" register_option="none" clock_name="" is_clock_inverted="false" is_slew_rate="false" tied_option="none" ddio_type="none" delay="0" is_serial="false" drive_strength="4" fastclk_name=""/>
         </efxpt:comp_gpio>
+        <!-- 2026-11-16 新增：K230 视觉模块 4 线并行口（PROJECT_PLAN §3.18）
+             管脚来源：核心板引脚定义表 + DC3-40 排针表。
+             全部落在 1B / 2B bank，均为 1.8 V，与 K230 侧电平一致，
+             中间过 TXS0108，所以 RTL 约束一律 LVCMOS18。
+             D0/D1/D2 只有在 STB 上升沿才被采样，K230 侧先写数据再拉 STB，
+             数据早已稳定，因此寄存器选项保持 none，靠 RTL 里的两级同步。
+             pull_option 用 none：板上按计划在本侧加 10 kΩ 下拉，
+             不依赖 FPGA 内部弱下拉（K230 掉电时也能保证不浮空）。 -->
+        <efxpt:comp_gpio name="k230_d[0]" gpio_def="GPIOL_P_14" mode="input" bus_name="k230_d" io_standard="1.8 V LVCMOS">
+            <efxpt:input_config name="k230_d[0]" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="none" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="k230_d_PULL_UP_ENA[0]" dyn_delay_en_name="k230_d_DLY_ENA[0]" dyn_delay_reset_name="k230_d_DLY_RST[0]" dyn_delay_ctrl_name="k230_d_DLY_CTRL[0]" clkmux_buf_name=""/>
+        </efxpt:comp_gpio>
+        <efxpt:comp_gpio name="k230_d[1]" gpio_def="GPIOL_N_16" mode="input" bus_name="k230_d" io_standard="1.8 V LVCMOS">
+            <efxpt:input_config name="k230_d[1]" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="none" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="k230_d_PULL_UP_ENA[1]" dyn_delay_en_name="k230_d_DLY_ENA[1]" dyn_delay_reset_name="k230_d_DLY_RST[1]" dyn_delay_ctrl_name="k230_d_DLY_CTRL[1]" clkmux_buf_name=""/>
+        </efxpt:comp_gpio>
+        <efxpt:comp_gpio name="k230_d[2]" gpio_def="GPIOL_P_16" mode="input" bus_name="k230_d" io_standard="1.8 V LVCMOS">
+            <efxpt:input_config name="k230_d[2]" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="none" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="k230_d_PULL_UP_ENA[2]" dyn_delay_en_name="k230_d_DLY_ENA[2]" dyn_delay_reset_name="k230_d_DLY_RST[2]" dyn_delay_ctrl_name="k230_d_DLY_CTRL[2]" clkmux_buf_name=""/>
+        </efxpt:comp_gpio>
+        <efxpt:comp_gpio name="k230_stb" gpio_def="GPIOT_N_11" mode="input" bus_name="" io_standard="1.8 V LVCMOS">
+            <efxpt:input_config name="k230_stb" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="none" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="k230_stb_PULL_UP_ENA" dyn_delay_en_name="k230_stb_DLY_ENA" dyn_delay_reset_name="k230_stb_DLY_RST" dyn_delay_ctrl_name="k230_stb_DLY_CTRL" clkmux_buf_name=""/>
+        </efxpt:comp_gpio>
         <efxpt:global_unused_config state="input with weak pullup"/>
         <efxpt:bus name="track" mode="input" msb="7" lsb="0"/>
         <efxpt:bus name="led" mode="output" msb="5" lsb="0"/>
         <efxpt:bus name="cmos_data" mode="input" msb="7" lsb="0"/>
+        <efxpt:bus name="k230_d" mode="input" msb="2" lsb="0"/>
     </efxpt:gpio_info>
     <efxpt:pll_info/>
     <efxpt:osc_info/>

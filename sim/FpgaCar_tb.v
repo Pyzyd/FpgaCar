@@ -48,6 +48,8 @@ module FpgaCar_tb;
     wire [5:0]  led;                // LED0~LED5（LED6/7 球让给 CMOS_D0/D1）
     reg         uart_rx;
     wire        uart_tx;
+    reg  [2:0]  k230_d;             // K230 并行数据，未接模块时保持 0
+    reg         k230_stb;           // K230 选通，空闲为低
 
     // 24 MHz -> 周期 41.667 ns
     always #20.833 clk = ~clk;
@@ -71,6 +73,8 @@ module FpgaCar_tb;
         uart_rx    = 1'b1;                  // UART 空闲
         cmos_sdat_IN = 1'b1;                // SCCB 总线释放（外部上拉）
         ir_l       = 1'b1;  ir_r = 1'b1;     // 红外无遮挡
+        k230_d     = 3'd0;                   // K230 未发数据
+        k230_stb   = 1'b0;                   // 选通空闲
     end
 
     // ---- 模拟 Interface Designer 的 inout GPIO 块 + 外部上拉 ----
@@ -114,7 +118,9 @@ module FpgaCar_tb;
         .enc_rb       (enc_rb),
         .led          (led),
         .uart_rx      (uart_rx),
-        .uart_tx      (uart_tx)
+        .uart_tx      (uart_tx),
+        .k230_d       (k230_d),
+        .k230_stb     (k230_stb)
     );
 
     // ------------------------------------------------------------------
@@ -134,12 +140,27 @@ module FpgaCar_tb;
         if (i2c_scl !== 1'b1)     $display("FAIL: I2C SCL should idle high");
         if (u_dut.heartbeat === 24'd0) $display("FAIL: heartbeat counter not running");
 
-        // 循迹通道要等消抖稳定（1 kHz x 4 次 = 4 ms）之后再看 LED
+        // 循迹通道要等消抖稳定（1 kHz x 4 次 = 4 ms）之后再看状态
+        // 【LED 新映射】led = ~{heartbeat[23], car_state[2:0], obstacle, line_lost}
+        //   led[5]=心跳  led[4:2]=状态机  led[1]=障碍  led[0]=丢线（低电平点亮）
         #6_000_000;
-        if (led[4:1] !== 4'hF)    $display("FAIL: LEDs[4:1] should be off (no line under sensors)");
-        else                      $display("PASS: track channels settled, LEDs[4:1] off");
         if (u_dut.line_lost !== 1'b1) $display("FAIL: line_lost should be 1 when all white");
         else                          $display("PASS: line_lost=1 on all-white");
+        // 低电平点亮：丢线 -> led[0]=0 点亮；无障碍 -> led[1]=1 熄灭
+        if (led[0] !== 1'b0)      $display("FAIL: led[0] should be lit (0) when all-white");
+        else                      $display("PASS: led[0] lit on line lost");
+        if (led[1] !== 1'b1)      $display("FAIL: led[1] (obstacle) should be off when no obstacle");
+        if (led[4:2] !== 3'b111)  $display("FAIL: led[4:2] should show IDLE(000) -> 3b111, got %b", led[4:2]);
+        else                      $display("PASS: LEDs show IDLE + no obstacle + line lost");
+
+        // 【摄像头停用】USE_CAMERA=0：DVP/SCCB 输出必须是确定电平，不是悬空
+        if (cmos_sclk !== 1'b0)   $display("FAIL: cmos_sclk should be 0 when camera disabled");
+        if (cmos_sdat_OE !== 1'b0) $display("FAIL: cmos_sdat_OE should be 0 (bus released)");
+        if (cmos_ctl1 !== 1'b0 || cmos_rst_n !== 1'b0 || cmos_pwdn !== 1'b0)
+            $display("FAIL: cmos CTL pins should all be 0");
+        else                      $display("PASS: camera disabled -> all cmos outputs deterministic");
+        if (u_dut.cam_color !== 3'd0 || u_dut.cam_color_evt !== 1'b0)
+            $display("FAIL: cam_color should be neutral 0 with no event");
 
         // IDLE 期间 PWM 必须恒低（量一个完整 PWM 周期）
         high_cnt = 0;

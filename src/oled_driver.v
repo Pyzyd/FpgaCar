@@ -41,11 +41,13 @@ module oled_driver #(
     parameter [6:0]   DEV_ADDR = 7'h3C,
     parameter integer BOOT_MS  = 20,         // 上电后等屏内电荷泵稳定
     parameter integer FLASH_MS = 600,        // 上电全白自检保持时长（0 = 关闭）
-    parameter integer ALIVE_MARK = 1         // 1 = 左上角常亮 8x8 存活标记
+    parameter integer ALIVE_MARK = 1,        // 1 = 左上角常亮 8x8 存活标记
+    parameter integer OFF_MARK   = 1         // 1 = K230 掉线时画右上角 8x8 叉号
 ) (
     input  wire       clk,
     input  wire       rst_n,
     // ---- 颜色顺序输入 ----
+    input  wire       k230_off,    // 1 = K230 掉线（link_alive=0），右上角画叉
     input  wire       seq_valid,   // 1 clk 脉冲：seq0~3 已更新
     input  wire [2:0] seq0,        // 第 1 个出现的颜色（最左）
     input  wire [2:0] seq1,
@@ -346,7 +348,9 @@ module oled_driver #(
     reg        boot_flash;    // 1 = 仍在上电白闪阶段
     reg        need_render;   // 1 = 显存刚清完、还没画色块
     reg [25:0] flash_cnt;     // 白闪保持计时
-    reg [3:0]  mk;            // 存活标记列计数 0..7
+    // mk 必须 >= 5 位：4 位时 `mk <= 4'd15` 永真，15+1 回绕成 0 → S_MARK 死循环。
+    reg [4:0]  mk;            // page0 标记计数：0..7 存活标记，8..15 K230 OFF 叉号，16 = 结束
+    reg        off_lat;       // K230 掉线状态锁存（决定叉号画不画）
     reg [2:0]  rs;            // 渲染槽 0..3
     reg [1:0]  gp;            // 字形内 page 0..3
     reg [4:0]  rc;            // col 0..31
@@ -373,13 +377,14 @@ module oled_driver #(
             seq1_r      <= 3'd0;
             seq2_r      <= 3'd0;
             seq3_r      <= 3'd0;
+            off_lat     <= 1'b0;
             dirty       <= 1'b1;
             clr         <= 10'd0;
             clr_val     <= (FLASH_MS > 0) ? 8'hFF : 8'h00;
             boot_flash  <= (FLASH_MS > 0) ? 1'b1 : 1'b0;
             need_render <= 1'b1;
             flash_cnt   <= 26'd0;
-            mk          <= 4'd0;
+            mk          <= 5'd0;
             rs          <= 3'd0;
             gp          <= 2'd0;
             rc          <= 5'd0;
@@ -407,6 +412,13 @@ module oled_driver #(
                 refresh_cnt <= 26'd0;
             end else if (refresh_cnt != 26'h3FFFFFF) begin
                 refresh_cnt <= refresh_cnt + 26'd1;
+            end
+
+            // ---- K230 掉线状态：变化时立刻重绘，否则等 2 s 定时刷新兜底 ----
+            if (k230_off != off_lat) begin
+                off_lat     <= k230_off;
+                dirty       <= 1'b1;
+                refresh_cnt <= 26'd0;
             end
 
             // ---- 2 s 定时重推 ----
@@ -465,7 +477,7 @@ module oled_driver #(
                     gp          <= 2'd0;
                     rc          <= 5'd0;
                     pk          <= 2'd0;
-                    mk          <= 4'd0;
+                    mk          <= 5'd0;
                     need_render <= 1'b1;      // 显存是干净的，色块还没画
                     state       <= S_PUSH;    // 先把这一屏（白或黑）推出去
                 end else begin
@@ -495,7 +507,7 @@ module oled_driver #(
                     gp          <= 2'd0;
                     rc          <= 5'd0;
                     pk          <= 2'd0;
-                    mk          <= 4'd0;
+                    mk          <= 5'd0;
                     need_render <= 1'b0;      // 色块已写进显存
                     state       <= (ALIVE_MARK != 0) ? S_MARK : S_PUSH;
                 end
@@ -566,13 +578,25 @@ module oled_driver #(
                 end
             end
 
-            // -------- 左上角存活标记：page 0, col 0..7 写 0xFF（8x8 实心）----
+            // -------- page 0 的两个 8x8 标记 --------
+            //   mk 0..7  : col 0..7   存活标记（ALIVE_MARK=1 时 8x8 实心方块）
+            //   mk 8..15 : col 120..127 K230 OFF 叉号（OFF_MARK=1 且 k230_off=1）
+            // 两个标记共用同一个状态和计数器，省掉一套定序逻辑。
+            // 叉号位图：第 c 列的 bit b 对应像素(行 b, 列 c)，两条对角线上的点置位
+            //   byte = (1<<c) | (1<<(7-c))，即 c=0 → 10000001，c=3 → 00011000
+            // page 0 在颜色渲染（page 2~5）之外，不会被色块覆盖。
             S_MARK: begin
-                if (mk <= 4'd7) begin
-                    fb[{7'd0, mk[2:0]}] <= 8'hFF;
-                    mk <= mk + 4'd1;
+                if (mk < 5'd8) begin
+                    fb[{7'd0, mk[2:0]}] <= (ALIVE_MARK != 0) ? 8'hFF : 8'h00;
+                    mk <= mk + 5'd1;
+                end else if (mk < 5'd16) begin
+                    fb[{7'd0, (7'd120 + {4'd0, mk[2:0]})}]
+                        <= (OFF_MARK != 0 && off_lat)     // 掉线才画，恢复后擦成黑
+                           ? ((8'h01 << mk[2:0]) | (8'h80 >> mk[2:0]))
+                           : 8'h00;
+                    mk <= mk + 5'd1;
                 end else begin
-                    mk    <= 4'd0;
+                    mk    <= 5'd0;
                     state <= S_PUSH;
                 end
             end

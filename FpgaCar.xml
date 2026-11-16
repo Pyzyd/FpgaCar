@@ -25,6 +25,7 @@
         <efx:design_file name="src/speed_meter.v" version="default" library="default" />
         <efx:design_file name="src/frame_snap.v" version="default" library="default" />
         <efx:design_file name="src/color_seq.v" version="default" library="default" />
+        <efx:design_file name="src/k230_link.v" version="default" library="default" />
         <efx:design_file name="src/oled_font.v" version="default" library="default" />
         <efx:design_file name="src/oled_driver.v" version="default" library="default" />
         <efx:top_vhdl_arch name="" />
