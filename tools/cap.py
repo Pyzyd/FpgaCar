@@ -1,7 +1,28 @@
-"""Capture the two debug-UART lines per frame into a CSV and summarise them.
+"""Capture the debug-UART telemetry into a CSV for offline analysis.
 
-Line 1 (decimal):  D=---cm T=00000000 P=+00 O=0 V=03 C=1 W=2560 H=720 Q=0 XY=0882
-Line 2 (hex):      R=00000 G=00000 B=00065 Y=00000 S=14 SB=6C17 LB=CF3E
+FpgaCar emits two ASCII lines per HC-SR04 frame (every 60 ms):
+
+    D=123cm T=00011000 P=+02 O=0 M=01          (35 bytes)
+    L=00000123 R=FFFFFFF0 VL=0005 VR=FFF0      (39 bytes)
+
+  D   ultrasonic distance in cm, "---" when no echo / out of range
+  T   track_line 8-channel bitmap, bit7..bit0 = track[7]..track[0], 1 = on tape
+  P   weighted line position, -16..+16, positive = line is to the right
+  O   obstacle flag (ultrasonic too close OR either E18-D80NK triggered)
+  M   car_fsm state: 00 IDLE 01 RUN 02 LOST 03 SEARCH 04 STOP
+  L/R left/right encoder position, 8 hex digits, two's complement
+  VL/VR left/right speed, net steps per 50 ms window, 4 hex digits, two's
+        complement
+
+【这个脚本现在的用途】
+原来是"抓两行、解 RGB565、看镜头对着什么颜色"。OV5640 停用后那部分没有数据源，
+改成纯遥测记录器，正好服务于两件必须靠数据的事：
+
+  1. 标定每米脉冲数  —— L/R 累积里程差 / 卷尺量的实际距离
+  2. 复盘状态机与 PID —— M 什么时候从 RUN 掉到 LOST、VL/VR 差多少才纠回来
+
+CSV 列：t, D, T, P, O, M, L, R, VL, VR
+  t 是相对第一个配对的秒数（主机时钟），不是板载时间戳。
 
 Usage:  python cap.py [PORT] [SECONDS] [OUT.csv]
 """
@@ -15,10 +36,12 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data"
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-RE1 = re.compile(r"D=(-{0,3}|\d+)cm .*?Q=(\d) XY=([0-9A-Fa-f]{4})")
-RE2 = re.compile(r"R=([0-9A-Fa-f]{5}) G=([0-9A-Fa-f]{5}) B=([0-9A-Fa-f]{5})"
-                 r" Y=([0-9A-Fa-f]{5}) S=([0-9A-Fa-f]{2}) SB=([0-9A-Fa-f]{4})"
-                 r" LB=([0-9A-Fa-f]{4})")
+RE1 = re.compile(r"D=(-{3}|\d+)cm T=([01]{8}) P=([+-]\d+) O=(\d) M=(\d{2})")
+# 前面锚 \s，否则 "VR=FFF0" 里的 "R=" 会被当成里程 R=
+RE2 = re.compile(r"(?:^|\s)L=([0-9A-Fa-f]{8}) R=([0-9A-Fa-f]{8})"
+                 r" VL=([0-9A-Fa-f]{4}) VR=([0-9A-Fa-f]{4})")
+
+STATE_NAME = {0: "IDLE", 1: "RUN", 2: "LOST", 3: "SEARCH", 4: "STOP"}
 
 
 def find_port():
@@ -39,12 +62,14 @@ def find_port():
     return next(iter(ports.values()), None)
 
 
-def rgb565(hb, lb):
-    """Two raw DVP bytes -> 6-bit R/G/B, same arithmetic as color_detect.v."""
-    r = (hb >> 3) << 1
-    g = ((hb & 0x07) << 3) | (lb >> 5)
-    b = (lb & 0x1F) << 1
-    return r, g, b
+def s32(text):
+    v = int(text, 16)
+    return v - (1 << 32) if v >= (1 << 31) else v
+
+
+def s16(text):
+    v = int(text, 16)
+    return v - (1 << 16) if v >= (1 << 15) else v
 
 
 def main():
@@ -72,7 +97,7 @@ def main():
     ser.close()
 
     text = buf.decode("utf-8", errors="replace").replace("\r", "\n")
-    rows, q_seen, pending1 = [], [], None
+    rows, pending1, t0 = [], None, None
     for ln in text.split("\n"):
         ln = ln.strip()
         m1 = RE1.search(ln)
@@ -81,12 +106,14 @@ def main():
             continue
         m2 = RE2.search(ln)
         if m2 and pending1:
-            r, g, b, y = (int(m2.group(i), 16) for i in (1, 2, 3, 4))
-            s = int(m2.group(5), 16)
-            rows.append((pending1.group(1), int(pending1.group(2)),
-                         pending1.group(3), r, g, b, y, s,
-                         m2.group(6), m2.group(7)))
-            q_seen.append(int(pending1.group(2)))
+            now = time.time()
+            if t0 is None:
+                t0 = now
+            rows.append((now - t0,
+                         pending1.group(1), pending1.group(2), pending1.group(3),
+                         int(pending1.group(4)), int(pending1.group(5)),
+                         s32(m2.group(1)), s32(m2.group(2)),
+                         s16(m2.group(3)), s16(m2.group(4))))
             pending1 = None
 
     if not rows:
@@ -95,41 +122,44 @@ def main():
         return 4
 
     print("--- %d frames ---" % len(rows))
-    print("  D       Q   R     G     B     Y     S   SB    LB")
-    for row in rows[-12:]:
-        print("  %-6s  %d  %-5d %-5d %-5d %-5d %-3d %s %s"
-              % (row[0], row[1], row[3], row[4], row[5], row[6], row[7], row[8], row[9]))
+    print("    t      D        T        P    O  M        L          R       VL    VR")
+    for r in rows[-12:]:
+        print("  %5.2f  %-6s  %s  %+3s  %d  %s  %+9d  %+9d  %+5d %+5d"
+              % (r[0], r[1], r[2], r[3], r[4],
+                 "%02d %-6s" % (r[5], STATE_NAME.get(r[5], "?")),
+                 r[6], r[7], r[8], r[9]))
 
-    print("--- max over window ---")
-    for i, name in ((3, "R"), (4, "G"), (5, "B"), (6, "Y")):
-        vals = [r[i] for r in rows]
-        print("  %s max = %d px (threshold 200)  mean = %.1f"
-              % (name, max(vals), sum(vals) / len(vals)))
-    smax = max(r[7] for r in rows)
-    print("  S max = %d / 63  (SAT_MIN = 16)  -> %s"
-          % (smax, "有饱和像素" if smax >= 16 else "整帧几乎无饱和色"))
-    print("  Q values seen = %s" % sorted(set(q_seen)))
+    print("--- summary ---")
+    states = sorted({r[5] for r in rows})
+    print("  M values seen = %s"
+          % " ".join("%02d %s" % (s, STATE_NAME.get(s, "?")) for s in states))
+    if len(states) > 1:
+        # 状态跳变序列是复盘"为什么停了"的第一手材料
+        trans = [(i, rows[i - 1][5], rows[i][5])
+                 for i in range(1, len(rows)) if rows[i][5] != rows[i - 1][5]]
+        print("  跳变 %d 次：" % len(trans))
+        for i, a, b in trans[:10]:
+            print("    第 %d 帧  %s -> %s" % (i, STATE_NAME.get(a, a), STATE_NAME.get(b, b)))
+    o_cnt = sum(1 for r in rows if r[4])
+    print("  O=1 占比 %.0f%% (%d/%d)  —— 若远高于实际障碍时间，查红外阈值/超声抖动"
+          % (100.0 * o_cnt / len(rows), o_cnt, len(rows)))
 
-    # 中心像素 XY 是原始 DVP 两字节，直接解出来看"镜头正对着什么颜色"
-    xy_last = rows[-1][2]
-    hb, lb = int(xy_last[0:2], 16), int(xy_last[2:4], 16)
-    print("  last XY %s -> R=%d G=%d B=%d (center pixel)"
-          % (xy_last, *rgb565(hb, lb)))
-
-    # SB/LB 两字节按 RGB565 解出来，看"最饱和/最亮"的像素到底是什么颜色
-    for idx, tag in ((8, "SB"), (9, "LB")):
-        hb, lb = int(rows[-1][idx][0:2], 16), int(rows[-1][idx][2:4], 16)
-        print("  last %s %s -> R=%d G=%d B=%d" % (tag, rows[-1][idx], *rgb565(hb, lb)))
+    dl = rows[-1][6] - rows[0][6]
+    dr = rows[-1][7] - rows[0][7]
+    span = rows[-1][0] - rows[0][0]
+    print("  里程变化  L=%+d  R=%+d  (差 %+d 步)" % (dl, dr, dl - dr))
+    if span > 0.2:
+        print("  平均速度  L=%+.1f  R=%+.1f 步/秒（%d 帧 / %.2f s）"
+              % (dl / span, dr / span, len(rows), span))
+    print("  标定提示：让车直行已知距离 S 米，取 |L| 或 |R|，每米脉冲数 = 步数 / S。")
 
     if csv_path and not os.path.isabs(csv_path) and os.sep not in csv_path and "/" not in csv_path:
         csv_path = os.path.join(DATA_DIR, csv_path)   # 只给文件名 -> 落到 data/
     if csv_path:
         with open(csv_path, "w", encoding="utf-8") as fp:
-            fp.write("D,Q,R,G,B,Y,S,SB,LB\n")
-            for row in rows:
-                fp.write("%s,%d,%d,%d,%d,%d,%d,%s,%s\n"
-                         % (row[0], row[1], row[3], row[4], row[5], row[6], row[7],
-                            row[8], row[9]))
+            fp.write("t,D,T,P,O,M,L,R,VL,VR\n")
+            for r in rows:
+                fp.write("%.3f,%s,%s,%s,%d,%d,%d,%d,%d,%d\n" % r)
         print("CSV -> %s" % csv_path)
     return 0
 

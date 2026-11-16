@@ -1,42 +1,53 @@
-"""Read the board debug UART and optionally summarise the telemetry fields.
+"""Read the board debug UART and summarise the telemetry fields.
 
-The FpgaCar top level emits one ASCII line per 60 ms:
+FpgaCar top level emits two ASCII lines per HC-SR04 frame (every 60 ms):
 
-    D=123cm T=00011000 P=+02 O=0 V=03 C=1 W=2560 H=720 Q=1 XY=0861\\r\\n
+    D=123cm T=00011000 P=+02 O=0 M=01          (35 bytes)
+    L=00000123 R=FFFFFFF0 VL=0005 VR=FFF0      (39 bytes)
 
-  D  HC-SR04 distance, "---" when no echo
-  T  track_line 8-channel bitmap, left..right
-  P  line position, -16..+16
-  O  obstacle flag (ultrasonic near OR either E18-D80NK triggered)
-  V  VSYNC count observed in the last 100 ms window (proves XCLK/DVP alive)
-  C  SCCB (OV5640 register load) done flag
-  W  measured frame width in PCLK (16-bit-per-pixel -> expect 2*active_width)
-  H  measured frame height in HREF rows
-  Q  dominant colour class: 0 neutral, 1 red, 2 green, 3 blue, 4 yellow
-  XY two raw centre bytes from the DVP bus (debug only)
+  D   ultrasonic distance in cm, "---" when no echo / out of range
+  T   track_line 8-channel bitmap, bit7..bit0 = track[7]..track[0], 1 = on tape
+  P   weighted line position, -16..+16, positive = line is to the right
+  O   obstacle flag (ultrasonic too close OR either E18-D80NK triggered)
+  M   car_fsm state, two decimal digits:
+        00 IDLE  01 RUN  02 LOST  03 SEARCH  04 STOP
+  L/R left/right encoder accumulated position, 8 hex digits, two's complement
+  VL/VR left/right speed = net steps in the last 50 ms window, 4 hex digits,
+        two's complement
 
-followed immediately by a second, shorter hex line (v4 frame statistics):
-
-    R=00300 G=00000 B=00000 Y=00000 S=3F SB=F800 LB=F800\r\n
-
-  R/G/B/Y  pixels classified as red/green/blue/yellow in the frame just ended
-           (hex, 0..4B000). MNI_PIX is 200, so anything below 200 (C8) never
-           wins the election -> Q stays 0.
-  S        largest saturation (max-min) seen anywhere in that frame, 6 bit hex
-  SB       the two raw DVP bytes of the most saturated pixel
-  LB       the two raw DVP bytes of the brightest pixel (by green)
+Both of the last two groups are hex on purpose: a 32-bit signed value would
+need eight cascaded div10 stages in fabric, which costs far more than the
+convenience is worth. Decode them here instead.
 
 Usage:
     python uart_mon.py [PORT] [SECONDS]
 
-PORT may be omitted, in which case the first CH340 (VID_1A86/PID_7523) port from
-the registry is used.
+PORT may be omitted, in which case the first CH340 (VID_1A86/PID_7523) port
+from the registry is used.
 """
 import re
 import sys
 import time
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+STATE_NAME = {0: "IDLE", 1: "RUN", 2: "LOST", 3: "SEARCH", 4: "STOP"}
+
+# line 1 全是十进制；line 2 全是十六进制二补码
+FIELDS1 = (
+    ("D", re.compile(r"D=(-{3}|\d+)cm")),
+    ("T", re.compile(r"T=([01]{8})")),
+    ("P", re.compile(r"P=([+-]\d+)")),
+    ("O", re.compile(r"O=(\d)")),
+    ("M", re.compile(r"M=(\d{2})")),
+)
+# 前面用 (?:^|\s) 锚住，否则 "VR=FFF0" 里的 "R=" 会被误当成里程 R=
+FIELDS2 = (
+    ("L", re.compile(r"(?:^|\s)L=([0-9A-Fa-f]{8})")),
+    ("R", re.compile(r"(?:^|\s)R=([0-9A-Fa-f]{8})")),
+    ("VL", re.compile(r"(?:^|\s)VL=([0-9A-Fa-f]{4})")),
+    ("VR", re.compile(r"(?:^|\s)VR=([0-9A-Fa-f]{4})")),
+)
 
 
 def find_port():
@@ -62,6 +73,36 @@ def find_port():
         if "VCP" in name or "USBSER" in name:
             return value
     return next(iter(ports.values()), None)
+
+
+def s32(text):
+    """8 位十六进制 -> 有符号 32 位整数。"""
+    v = int(text, 16)
+    return v - (1 << 32) if v >= (1 << 31) else v
+
+
+def s16(text):
+    """4 位十六进制 -> 有符号 16 位整数。"""
+    v = int(text, 16)
+    return v - (1 << 16) if v >= (1 << 15) else v
+
+
+def collect(lines, patterns):
+    """返回 {字段: [出现过的值]}，保持首次出现顺序。"""
+    seen = {}
+    for ln in lines:
+        for key, pat in patterns:
+            m = pat.search(ln)
+            if m:
+                seen.setdefault(key, []).append(m.group(1))
+    return seen
+
+
+def show_uniq(key, vals):
+    uniq = sorted(set(vals))
+    shown = uniq if len(uniq) <= 6 else uniq[:6] + ["..."]
+    print("  %-3s = %s" % (key, " ".join(shown)))
+    return uniq
 
 
 def main():
@@ -112,44 +153,54 @@ def main():
         print(ln)
 
     line1 = [ln for ln in lines if ln.startswith("D=")]
-    line2 = [ln for ln in lines if ln.startswith("R=")]
-    fields = {"D": r"D=(-{0,3}|\d+)cm", "T": r"T=([01]{8})", "P": r"P=([+-]\d+)",
-              "O": r"O=(\d)", "V": r"V=(\d+)", "C": r"C=(\d)", "W": r"W=(\d+)",
-              "H": r"H=(\d+)", "Q": r"Q=(\d)", "XY": r"XY=([0-9A-Fa-f]{4})"}
-    print("--- line 1 summary (last value seen) ---")
-    for key, pat in fields.items():
-        vals = [m.group(1) for m in (re.search(pat, ln) for ln in line1) if m]
-        if vals:
-            uniq = sorted(set(vals))
-            shown = uniq if len(uniq) <= 4 else uniq[:4] + ["..."]
-            print("  %-2s = %s" % (key, " ".join(shown)))
+    line2 = [ln for ln in lines if re.search(r"(?:^|\s)L=[0-9A-Fa-f]{8}", ln)]
+    if not line1:
+        print("--- no line 1 (D=...) seen; bitstream too old or REPORT_EN=0 ? ---")
+        return 5
+
+    f1 = collect(line1, FIELDS1)
+    print("--- line 1 summary (values seen, %d lines) ---" % len(line1))
+    for key, _ in FIELDS1:
+        vals = f1.get(key)
+        if not vals:
+            print("  %-3s = (field missing)" % key)
+            continue
+        uniq = show_uniq(key, vals)
+        if key == "M":
+            names = [STATE_NAME.get(int(v), "?") for v in uniq]
+            print("        -> %s" % " ".join("%s %s" % (v, n) for v, n in zip(uniq, names)))
+        elif key == "T":
+            ones = [sum(b == "1" for b in v) for v in uniq]
+            print("        -> 压线数 %s" % ones)
 
     if line2:
-        print("--- line 2 frame statistics (hex) ---")
-        fields2 = {"R": r"R=([0-9A-Fa-f]{5})", "G": r"G=([0-9A-Fa-f]{5})",
-                   "B": r"B=([0-9A-Fa-f]{5})", "Y": r"Y=([0-9A-Fa-f]{5})",
-                   "S": r"S=([0-9A-Fa-f]{2})", "SB": r"SB=([0-9A-Fa-f]{4})",
-                   "LB": r"LB=([0-9A-Fa-f]{4})"}
-        for key, pat in fields2.items():
-            vals = [m.group(1) for m in (re.search(pat, ln) for ln in line2) if m]
+        f2 = collect(line2, FIELDS2)
+        print("--- line 2 summary (hex -> signed) ---")
+        for key, _ in FIELDS2:
+            vals = f2.get(key)
             if not vals:
+                print("  %-3s = (field missing)" % key)
                 continue
-            count = {"R": 0, "G": 1, "B": 2, "Y": 3}.get(key)
-            if count is None:
-                uniq = sorted(set(vals))
-                shown = uniq if len(uniq) <= 4 else uniq[:4] + ["..."]
-                print("  %-2s = %s" % (key, " ".join(shown)))
-            else:
-                # 计数是十六进制，但"有没有超过 200 像素门槛"看十进制才直观
-                dec = [int(v, 16) for v in vals]
-                print("  %-2s = %s   (%d..%d dec, max %s = %d)"
-                      % (key, " ".join(sorted(set(vals))), min(dec), max(dec),
-                         hex(max(dec)), max(dec)))
-        # 四色计数全为 0 而 S 却很高 -> 分类/阈值问题；S 也低 -> 画面本来就没饱和色
-        print("  verdict: 若 S 明显 >0（例如 >=16）且四色都 <200，说明饱和色存在但"
-              "分类或 MIN_PIX 门槛卡住了；若 S 只有个位数，是镜头/曝光/数据位序问题。")
+            uniq = show_uniq(key, vals)
+            dec = [s32(v) if key in ("L", "R") else s16(v) for v in uniq]
+            print("        -> %s" % dec)
+        # 左右里程差是循迹跑偏的直接证据；速度差则是 PID 是否在修的直接证据
+        if f2.get("L") and f2.get("R"):
+            dl = s32(f2["L"][-1]) - s32(f2["L"][0])
+            dr = s32(f2["R"][-1]) - s32(f2["R"][0])
+            print("  window delta  L=%+d  R=%+d  (差 %+d 步)" % (dl, dr, dl - dr))
+            if dl or dr:
+                print("  注意：这里只说明左右走了多少步；换算成距离要先标定每米脉冲数。")
+        if f2.get("VL") and f2.get("VR"):
+            vl = [s16(v) for v in f2["VL"]]
+            vr = [s16(v) for v in f2["VR"]]
+            print("  speed window  VL %d..%d  VR %d..%d  (每 50 ms 净步数)"
+                  % (min(vl), max(vl), min(vr), max(vr)))
     else:
-        print("--- no line-2 telemetry yet (bitstream too old?) ---")
+        print("--- no line 2 (L=/R=/VL=/VR=) yet; bitstream too old? ---")
+
+    if "---" in f1.get("D", []):
+        print("  D=--- 出现过：超声波没收到回波（超量程或探头坏了），不是 0 cm。")
     return 0
 
 

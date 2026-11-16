@@ -1,23 +1,27 @@
 // =============================================================================
 // uart_report_tb.v —— uart_report 自测（两行报文整体比对）
-// iverilog -g2012 -Wall -s uart_report_tb -o uart_report_tb.vvp \
-//          src/uart_tx.v src/uart_report.v sim/uart_report_tb.v && vvp uart_report_tb.vvp
+// iverilog -g2012 -Wall -s uart_report_tb -o _sim/urt.vvp \
+//          src/uart_tx.v src/uart_report.v sim/uart_report_tb.v && vvp _sim/urt.vvp
 // -----------------------------------------------------------------------------
-// 每个 dist_valid 打两行：
-//   第 1 行（64 字节）D=123cm T=00011000 P=+02 O=0 V=03 C=1 W=1280 H=720 Q=1 XY=F800 CR LF
-//   第 2 行（54 字节）R=00000 G=00000 B=00000 Y=00000 S=00 SB=0000 LB=0000 CR LF
+// 每个 dist_valid 打两行，共 35 + 39 = 74 字节：
+//   第 1 行 D=123cm T=00011000 P=+02 O=0 M=01 CR LF
+//   第 2 行 L=0000007B R=FFFFFFF0 VL=0005 VR=FFF0 CR LF
 // 验收：
-//   1) 123cm / 中间两路 / pos=+2 / 无障碍 / 有帧统计
-//   2) 无效距离 --- / 两端各一路 / pos=-7 / 有障碍 / 统计全 0
-//   3) 7cm / 全丢线 / pos=0 / 无障碍 / 计数饱和 0xFFFFF
+//   1) 123cm / 中间两路 / pos=+2 / 无障碍 / RUN / 里程 123 与 -16
+//   2) 无效距离 --- / 两端各一路 / pos=-7 / 有障碍 / STOP / 里程 0
+//   3) 7cm / 全丢线 / pos=0 / IDLE / 里程 0x0000ABCD 与 -1 / 速度 1200 与 -1
+//   4) 999cm / 全压线 / pos=+16 / 两位位置与三位距离的边界
+//   5) pos=-16 的符号位与 "50cm" 前导零
+// 【注意】期望串里不要写 \r\n 转义，直接用 set_exp 补 CR LF 两个字节，
+//   避免模板串被还原成真实换行。
 // =============================================================================
 `timescale 1ns/1ps
 
 module uart_report_tb;
 
-    localparam real BIT_NS = 1.0e9 / 115200.0;
-    localparam integer MSG_LEN  = 64;
-    localparam integer MSG2_LEN = 54;
+    localparam real    BIT_NS   = 1.0e9 / 115200.0;
+    localparam integer MSG_LEN  = 35;
+    localparam integer MSG2_LEN = 39;
 
     reg         clk = 1'b0;
     reg         rst_n = 1'b0;
@@ -28,144 +32,147 @@ module uart_report_tb;
     reg  [7:0]  line = 8'h00;
     reg  signed [4:0] pos = 5'sd0;
     reg         obstacle = 1'b0;
-    reg  [7:0]  vs_cnt = 8'd0;
-    reg         cam_done = 1'b0;
-    reg  [15:0] cam_width  = 16'd0;
-    reg  [15:0] cam_height = 16'd0;
-    reg  [2:0]  cam_color  = 3'd0;
-    reg  [7:0]  cam_b0     = 8'hF8;
-    reg  [7:0]  cam_b1     = 8'h00;
-    reg  [19:0] cam_cnt_r  = 20'd0;
-    reg  [19:0] cam_cnt_g  = 20'd0;
-    reg  [19:0] cam_cnt_b  = 20'd0;
-    reg  [19:0] cam_cnt_y  = 20'd0;
-    reg  [6:0]  cam_sat    = 7'd0;
-    reg  [7:0]  cam_sb0    = 8'h00;
-    reg  [7:0]  cam_sb1    = 8'h00;
-    reg  [7:0]  cam_lb0    = 8'h00;
-    reg  [7:0]  cam_lb1    = 8'h00;
+    reg  [2:0]  state = 3'd0;
+    reg  [31:0] enc_l = 32'd0;
+    reg  [31:0] enc_r = 32'd0;
+    reg  signed [15:0] spd_l = 16'sd0;
+    reg  signed [15:0] spd_r = 16'sd0;
     wire        tx;
 
     uart_report #(.CLK_FREQ(24_000_000), .BAUD(115_200), .REPORT_EN(1)) u_dut (
         .clk(clk), .rst_n(rst_n),
         .dist_cm(dist_cm), .dist_valid(dist_valid),
-        .line(line), .pos(pos), .obstacle(obstacle), .vs_cnt(vs_cnt), .cam_done(cam_done), .cam_width(cam_width), .cam_height(cam_height), .cam_color(cam_color), .cam_b0(cam_b0), .cam_b1(cam_b1),
-        .cam_cnt_r(cam_cnt_r), .cam_cnt_g(cam_cnt_g), .cam_cnt_b(cam_cnt_b), .cam_cnt_y(cam_cnt_y),
-        .cam_sat(cam_sat), .cam_sb0(cam_sb0), .cam_sb1(cam_sb1), .cam_lb0(cam_lb0), .cam_lb1(cam_lb1),
+        .line(line), .pos(pos), .obstacle(obstacle),
+        .state(state), .enc_l(enc_l), .enc_r(enc_r),
+        .spd_l(spd_l), .spd_r(spd_r),
         .tx(tx)
     );
 
     integer fails = 0;
+    reg [7:0] exp [0:63];       // 模块级：set_exp 写、check_line 读，只此一份
 
     task rx_byte (output [7:0] b);
         integer k;
         begin
-            @(negedge tx);
-            #(BIT_NS * 1.5);
+            @(negedge tx);                  // 起始位下降沿
+            #(BIT_NS * 1.5);                // 到 bit0 中心
             for (k = 0; k < 8; k = k + 1) begin
                 b[k] = tx;
-                if (k < 7) #(BIT_NS);
+                if (k != 7) #(BIT_NS);
             end
-            #(BIT_NS * 0.5);          // 停在停止位中点
+            #(BIT_NS * 0.5);                // 停在停止位中间
         end
     endtask
 
-    // 收 n 字节拼成字符串（右对齐：第 0 个字节落在最高有效位置，低位留 0）
-    // 注意必须右对齐再按 8*n-1:0 切片比对，否则 54 字节的第二行和 64 字节的
-    // 期望值宽度不同，整向量比较会"看起来相等"而漏掉错位。
-    task rx_line (input integer n, output [8*MSG_LEN-1:0] got);
+    // 期望串正文（不含 CR LF）摊进 exp[0..n-1]，再在末尾补 CR LF
+    task set_exp (input integer n, input [8*64-1:0] s);
+        integer i;
+        begin
+            for (i = 0; i < n; i = i + 1)
+                exp[i] = s[(n-1-i)*8 +: 8];   // Verilog 串右对齐：最左字符在高位
+            exp[n]   = 8'h0D;
+            exp[n+1] = 8'h0A;
+        end
+    endtask
+
+    task check_line (input integer n, input [8*32-1:0] tag);
+        integer i;
         reg [7:0] b;
-        integer k;
         begin
-            got = 0;
-            for (k = 0; k < n; k = k + 1) begin
+            for (i = 0; i < n; i = i + 1) begin
                 rx_byte(b);
-                got = (got << 8) | {504'd0, b};
+                if (b !== exp[i]) begin
+                    $display("FAIL: %0s byte %0d = %02h, expect %02h", tag, i, b, exp[i]);
+                    fails = fails + 1;
+                end
             end
-            // 拼接时每来一个字节就 <<8，所以报文自然落在低位、顺序正确，
-            // 与 "..." 字面量（同样低位对齐）可直接比较，不需要再移位。
         end
     endtask
 
-    // 送一帧并比对两行
-    task check_frame (
-        input [15:0] d,
-        input [7:0]  l,
-        input signed [4:0] p,
-        input        o,
-        input [7:0]  v,
-        input        c,
-        input [15:0] w,
-        input [15:0] h,
-        input [2:0]  q,
-        input [19:0] sr, sg, sb, sy,
-        input [6:0]  ssat,
-        input [8*MSG2_LEN-1:0] exp_str2,
-        input [8*MSG_LEN-1:0] exp_str
-    );
-        reg [8*MSG_LEN-1:0] got, got2;
+    task fire;   // 打一拍 dist_valid，走完整两行
         begin
-            @(posedge clk); #1;
-            dist_cm = d; line = l; pos = p; obstacle = o; vs_cnt = v; cam_done = c;
-            cam_width = w; cam_height = h; cam_color = q;
-            cam_cnt_r = sr; cam_cnt_g = sg; cam_cnt_b = sb; cam_cnt_y = sy;
-            cam_sat = ssat;
+            @(posedge clk);
             dist_valid = 1'b1;
-            @(posedge clk); #1;
+            @(posedge clk);
             dist_valid = 1'b0;
-
-            rx_line(MSG_LEN, got);
-            if (got !== exp_str) begin
-                $display("FAIL line1: dist=%0d line=%b pos=%0d o=%b v=%0d\n      got \"%s\"\n      exp \"%s\"",
-                         d, l, p, o, v, got, exp_str);
-                fails = fails + 1;
-            end else
-                $display("PASS line1: \"%s\"", got);
-
-            rx_line(MSG2_LEN, got2);
-            if (got2[8*MSG2_LEN-1:0] !== exp_str2) begin
-                $display("FAIL line2:\n      got \"%s\"\n      exp \"%s\"",
-                         got2[8*MSG2_LEN-1:0], exp_str2);
-                fails = fails + 1;
-            end else
-                $display("PASS line2: \"%s\"", got2[8*MSG2_LEN-1:0]);
         end
     endtask
 
-    // 看门狗
     initial begin
-        #60_000_000;
-        $display("TIMEOUT: uart_report_tb hung");
+        #500;
+        rst_n = 1'b1;
+        #2000;
+
+        // ---------- 用例 1：正常一帧 ----------
+        dist_cm = 16'd123; line = 8'b00011000; pos = 5'sd2;
+        obstacle = 1'b0; state = 3'd1;
+        enc_l = 32'd123; enc_r = 32'hFFFFFFF0;
+        spd_l = 16'sd5;  spd_r = -16'sd16;
+        fire;
+        set_exp(MSG_LEN-2, "D=123cm T=00011000 P=+02 O=0 M=01");
+        check_line(MSG_LEN, "L1 ");
+        set_exp(MSG2_LEN-2, "L=0000007B R=FFFFFFF0 VL=0005 VR=FFF0");
+        check_line(MSG2_LEN, "L2 ");
+        #5000;
+
+        // ---------- 用例 2：无效距离 + 障碍 + 永久停车 ----------
+        dist_cm = 16'hFFFF; line = 8'b10000001; pos = -5'sd7;
+        obstacle = 1'b1; state = 3'd4;
+        enc_l = 32'd0; enc_r = 32'd0;
+        spd_l = 16'sd0; spd_r = 16'sd0;
+        fire;
+        set_exp(MSG_LEN-2, "D=---cm T=10000001 P=-07 O=1 M=04");
+        check_line(MSG_LEN, "L1b");
+        set_exp(MSG2_LEN-2, "L=00000000 R=00000000 VL=0000 VR=0000");
+        check_line(MSG2_LEN, "L2b");
+        #5000;
+
+        // ---------- 用例 3：IDLE + 全丢线 + 负里程与负速度 ----------
+        dist_cm = 16'd7; line = 8'h00; pos = 5'sd0;
+        obstacle = 1'b0; state = 3'd0;
+        enc_l = 32'h0000ABCD; enc_r = 32'hFFFFFFFF;
+        spd_l = 16'sd1200;    spd_r = -16'sd1;
+        fire;
+        set_exp(MSG_LEN-2, "D=007cm T=00000000 P=+00 O=0 M=00");
+        check_line(MSG_LEN, "L1c");
+        set_exp(MSG2_LEN-2, "L=0000ABCD R=FFFFFFFF VL=04B0 VR=FFFF");
+        check_line(MSG2_LEN, "L2c");
+        #5000;
+
+        // ---------- 用例 4：两位位置与三位距离的边界 ----------
+        // 注意 5 位有符号的范围是 -16..+15，写 5'sd16 会被当成 -16
+        dist_cm = 16'd999; line = 8'hFF; pos = 5'sd15;
+        obstacle = 1'b0; state = 3'd3;
+        enc_l = 32'h7FFFFFFF; enc_r = 32'h80000000;
+        spd_l = 16'sd32767;   spd_r = -16'sd32768;
+        fire;
+        set_exp(MSG_LEN-2, "D=999cm T=11111111 P=+15 O=0 M=03");
+        check_line(MSG_LEN, "L1d");
+        set_exp(MSG2_LEN-2, "L=7FFFFFFF R=80000000 VL=7FFF VR=8000");
+        check_line(MSG2_LEN, "L2d");
+        #5000;
+
+        // ---------- 用例 5：pos=-16 与 "50cm" 前导零 ----------
+        dist_cm = 16'd50; line = 8'b00000001; pos = -5'sd16;
+        obstacle = 1'b0; state = 3'd2;
+        enc_l = 32'd0; enc_r = 32'd0;
+        spd_l = 16'sd0; spd_r = 16'sd0;
+        fire;
+        set_exp(MSG_LEN-2, "D=050cm T=00000001 P=-16 O=0 M=02");
+        check_line(MSG_LEN, "L1e");
+        set_exp(MSG2_LEN-2, "L=00000000 R=00000000 VL=0000 VR=0000");
+        check_line(MSG2_LEN, "L2e");
+
+        if (fails == 0) $display("INFO: uart_report_tb ALL PASS");
+        else            $display("INFO: uart_report_tb %0d FAIL(S)", fails);
         $finish;
     end
 
+    // 超时兜底：5 帧共 370 字节，115200 下一帧（两行）约 6.5 ms
     initial begin
-        #200 rst_n = 1'b1;
-        #500;
-
-        // 1) 正常：红的 300 个像素，最大饱和度 0x3F，最亮/最饱和像素都是 F800
-        cam_sb0 = 8'hF8; cam_sb1 = 8'h00; cam_lb0 = 8'hF8; cam_lb1 = 8'h00;
-        check_frame(16'd123, 8'b0001_1000, 5'sd2, 1'b0, 8'd3, 1'b1, 16'd1280, 16'd720, 3'd1,
-                    20'h00300, 20'd0, 20'd0, 20'd0, 7'h3F,
-                    {"R=00300 G=00000 B=00000 Y=00000 S=3F SB=F800 LB=F800", 8'h0D, 8'h0A},
-                    {"D=123cm T=00011000 P=+02 O=0 V=03 C=1 W=1280 H=720 Q=1 XY=F800", 8'h0D, 8'h0A});
-
-        // 2) 无效距离：统计全 0（SB/LB 也回到 0000）
-        cam_sb0 = 8'h00; cam_sb1 = 8'h00; cam_lb0 = 8'h00; cam_lb1 = 8'h00;
-        check_frame(16'hFFFF, 8'b1000_0001, -5'sd7, 1'b1, 8'd0, 1'b0, 16'd0, 16'd0, 3'd0,
-                    20'd0, 20'd0, 20'd0, 20'd0, 7'd0,
-                    {"R=00000 G=00000 B=00000 Y=00000 S=00 SB=0000 LB=0000", 8'h0D, 8'h0A},
-                    {"D=---cm T=10000001 P=-07 O=1 V=00 C=0 W=0000 H=000 Q=0 XY=F800", 8'h0D, 8'h0A});
-
-        // 3) 计数饱和：0xFFFFF 要打出 FFFFF（验证 hexd 高位）
-        cam_sb0 = 8'h1F; cam_sb1 = 8'h2E; cam_lb0 = 8'h7F; cam_lb1 = 8'h00;
-        check_frame(16'd7, 8'b0000_0000, 5'sd0, 1'b0, 8'd42, 1'b1, 16'd9999, 16'd999, 3'd3,
-                    20'hFFFFF, 20'd5, 20'd11, 20'h0ABCD, 7'h16,
-                    {"R=FFFFF G=00005 B=0000B Y=0ABCD S=16 SB=1F2E LB=7F00", 8'h0D, 8'h0A},
-                    {"D=007cm T=00000000 P=+00 O=0 V=42 C=1 W=9999 H=999 Q=3 XY=F800", 8'h0D, 8'h0A});
-
-        if (fails == 0) $display("INFO: uart_report_tb ALL PASS");
-        else            $display("INFO: uart_report_tb FAILURES=%0d", fails);
+        #60_000_000;
+        $display("TIMEOUT: uart_report_tb hung (rstate=%0d idx=%0d idx2=%0d)",
+                 u_dut.rstate, u_dut.idx, u_dut.idx2);
         $finish;
     end
 
