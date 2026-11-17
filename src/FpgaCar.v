@@ -584,7 +584,15 @@ module FpgaCar (
             .busy       (oled_busy),
             .ack_err    (oled_ack_err),
             .frame_done (oled_frame_done),
-            .nack_seen  (oled_nack_seen)
+            .nack_seen  (oled_nack_seen),
+            // ---- 屏幕调试区（page1 循迹条 / page6-7 距离+状态+标志）----
+            .dbg_dist   (dist_cm),      // 16'hFFFF = 无回波，屏上显示 ---
+            .dbg_line   (line_bits),    // bit0 = 车体最左 X1
+            .dbg_state  (car_state),
+            .dbg_obs    (obstacle),
+            .dbg_irl    (ir_l_det),
+            .dbg_irr    (ir_r_det),
+            .dbg_lost   (line_lost)
         );
     end else begin : g_no_oled
         assign i2c_scl     = 1'b1;      // 空闲高

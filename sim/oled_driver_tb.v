@@ -33,6 +33,15 @@ module oled_driver_tb;
     wire scl, sda_out, sda_oe, sda_in;
     wire busy, ack_err, frame_done, nack_seen;
 
+    // ---- 调试输入（本次新增）：距离 / 八路循迹 / 车状态 / 四个标志位 ----
+    reg [15:0] dbg_dist  = 16'hFFFF;     // 16'hFFFF = 无回波，屏上显示 "---"
+    reg [7:0]  dbg_line  = 8'h00;
+    reg [2:0]  dbg_state = 3'd0;
+    reg        dbg_obs   = 1'b0;
+    reg        dbg_irl   = 1'b0;
+    reg        dbg_irr   = 1'b0;
+    reg        dbg_lost  = 1'b0;
+
     // 物理 SDA：主机与从机共用一条线，外部上拉
     wire sda_line;
     reg  slv_oe_r = 1'b0;
@@ -49,13 +58,21 @@ module oled_driver_tb;
         .seq_valid(seq_valid), .seq0(seq0), .seq1(seq1), .seq2(seq2), .seq3(seq3),
         .scl(scl), .sda_in(sda_in), .sda_out(sda_out), .sda_oe(sda_oe),
         .busy(busy), .ack_err(ack_err), .frame_done(frame_done),
-        .nack_seen(nack_seen)
+        .nack_seen(nack_seen),
+        .dbg_dist(dbg_dist), .dbg_line(dbg_line), .dbg_state(dbg_state),
+        .dbg_obs(dbg_obs), .dbg_irl(dbg_irl), .dbg_irr(dbg_irr),
+        .dbg_lost(dbg_lost)
     );
 
     // 期望值参考：同一份字形 ROM
     reg  [8:0] eaddr;
     wire [7:0] eq;
     oled_font u_ref (.addr(eaddr), .q(eq));
+
+    // 数字点阵参照 ROM（调试区期望值靠它逐字节取）
+    reg  [9:0] daddr;
+    wire [7:0] dq;
+    oled_digits u_ref2 (.addr(daddr), .q(dq));
 
     // ------------------------------------------------------------------
     // 从机模型：时钟采样 + 事件检测（比沿触发稳，避免 SCL/SDA 同拍改值的竞争）
@@ -166,6 +183,74 @@ module oled_driver_tb;
                     end
                 end
             end
+            build_exp_dbg;
+        end
+    endtask
+
+    // 调试区期望值：与 oled_driver 的组合绘制逻辑一一对应
+    //   page1      col0..127  八路循迹条，line[0] 在最左，每路 16 列
+    //   page6/7    col0..47   三位 16x16 距离数字，无回波显示 "---"
+    //   page7      col48..63  'cm'
+    //   page6/7    col64..79  车状态号
+    //   page6/7    col80..127 四个标志格，每格 12 列
+    task build_exp_dbg;
+        integer b, ln, seg, pg, cl, gi, flg, cxl;
+        reg [15:0] dv;
+        reg [3:0]  d2, d1, d0;
+        reg        sv;
+        begin
+            // ---- page 1：循迹条 ----
+            for (ln = 0; ln < 8; ln = ln + 1)
+                for (cl = 0; cl < 16; cl = cl + 1)
+                    exp_fb[128 + ln * 16 + cl] =
+                        dbg_line[ln] ? 8'hFF : 8'h80;
+
+            // ---- 距离数字 ----
+            dv = (dbg_dist > 16'd999) ? 16'd999 : dbg_dist;
+            d2 = dv / 100; d1 = (dv % 100) / 10; d0 = dv % 10;
+            for (seg = 0; seg < 3; seg = seg + 1)
+                for (pg = 0; pg < 2; pg = pg + 1)
+                    for (cl = 0; cl < 16; cl = cl + 1) begin
+                        if (dbg_dist == 16'hFFFF)
+                            daddr = 10'd320 + pg * 16 + cl;   // glyph 10 = '-'
+                        else begin
+                            gi = (seg == 0) ? d2 : ((seg == 1) ? d1 : d0);
+                            daddr = gi * 32 + pg * 16 + cl;
+                        end
+                        #1;
+                        exp_fb[(6 + pg) * 128 + seg * 16 + cl] = dq;
+                    end
+
+            // ---- 'cm'：page7 col48..63 ----
+            for (cl = 0; cl < 16; cl = cl + 1) begin
+                daddr = 10'd384 + cl;
+                #1;
+                exp_fb[7 * 128 + 48 + cl] = dq;
+            end
+
+            // ---- 车状态号：page6/7 col64..79 ----
+            for (pg = 0; pg < 2; pg = pg + 1)
+                for (cl = 0; cl < 16; cl = cl + 1) begin
+                    daddr = dbg_state * 32 + pg * 16 + cl;
+                    #1;
+                    exp_fb[(6 + pg) * 128 + 64 + cl] = dq;
+                end
+
+            // ---- 四个标志格：page6/7 col80..127 ----
+            for (pg = 0; pg < 2; pg = pg + 1)
+                for (cl = 0; cl < 48; cl = cl + 1) begin
+                    flg = cl / 12;
+                    cxl = cl % 12;
+                    case (flg)
+                    0:       sv = dbg_obs;
+                    1:       sv = dbg_irl;
+                    2:       sv = dbg_irr;
+                    default: sv = dbg_lost;
+                    endcase
+                    if (cxl == 0 || cxl == 11)     exp_fb[(6 + pg) * 128 + 80 + cl] = 8'hFF;
+                    else if (pg == 0)              exp_fb[(6 + pg) * 128 + 80 + cl] = sv ? 8'hFF : 8'h01;
+                    else                            exp_fb[(6 + pg) * 128 + 80 + cl] = sv ? 8'hFF : 8'h80;
+                end
         end
     endtask
 

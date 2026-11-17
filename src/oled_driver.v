@@ -30,6 +30,24 @@
 //         只剩左上角小方块 = 通，只是还没有颜色顺序要显示；
 //         连白闪都没有 = 初始化 / 接线 / 地址问题（见 PROJECT_PLAN 3.16）。
 //
+// 调试信息区（2026-11-17 增加：屏上要能看到"所有可见的调试数据"）：
+//   色块必须占 page 2~5（细则 4.3.3 / 5.1），所以调试信息只能放空闲的
+//   page 1 与 page 6/7，三块区域互不重叠，色块永远不被覆盖：
+//     page 1            : 八路循迹条 —— 8 格 x 16 列，格 i 对应 line[i]，
+//                         line[0] 在最左（与实物 X1 同侧）。整格实心 = 压线，
+//                         只剩底边一条线 = 未压线。
+//                         注意：与串口 T= 的字符序正好相反（串口 bit7 在前），
+//                         屏上按车体左右排，看实物对得上比抄串口更重要。
+//     page 6/7 col0..47 : 超声距离，三位 16x16 数字（col 0/16/32）；
+//                         无回波（16'hFFFF）显示 "---"，超过 999 饱和成 999。
+//     page 7 col48..63  : 小字 "cm"（8x8）。
+//     page 6/7 col64..79: 车状态号 0=IDLE 1=RUN 2=LOST 3=SEARCH 4=STOP。
+//     page 6/7 col80..127: 四个标志格，每格 12 px（实心 10 px），
+//                         自左向右 = 障碍 / 左红外 / 右红外 / 丢线；
+//                         实心 = 置位，只留底边 = 复位（与循迹条同一套读法）。
+//   刷新：调试输入每 DBG_SAMPLE_MS（默认 100 ms）采样一次，值一变就整屏重推。
+//   超声 16 Hz、屏 10 Hz，够用；一次全屏约 23 ms，I2C 占空比约 23%。
+//
 // 【SDA 三根线】Efinix Titanium 顶层不允许 inout/1'bz（EFX-0410），
 //   sda_in / sda_out / sda_oe 三根分开，物理三态由 Interface Designer 合成。
 // =============================================================================
@@ -42,7 +60,8 @@ module oled_driver #(
     parameter integer BOOT_MS  = 20,         // 上电后等屏内电荷泵稳定
     parameter integer FLASH_MS = 600,        // 上电全白自检保持时长（0 = 关闭）
     parameter integer ALIVE_MARK = 1,        // 1 = 左上角常亮 8x8 存活标记
-    parameter integer OFF_MARK   = 1         // 1 = K230 掉线时画右上角 8x8 叉号
+    parameter integer OFF_MARK   = 1,        // 1 = K230 掉线时画右上角 8x8 叉号
+    parameter integer DBG_SAMPLE_MS = 100    // 调试输入采样周期（ms），0 = 每 clk
 ) (
     input  wire       clk,
     input  wire       rst_n,
@@ -53,6 +72,14 @@ module oled_driver #(
     input  wire [2:0] seq1,
     input  wire [2:0] seq2,
     input  wire [2:0] seq3,        // 第 4 个（最右）
+    // ---- 调试区输入（画在空闲的 page 1 与 page 6/7）----
+    input  wire [15:0] dbg_dist,   // 超声距离 cm，16'hFFFF = 无回波
+    input  wire [7:0]  dbg_line,   // 八路循迹，bit0 = 车体最左（X1）
+    input  wire [2:0]  dbg_state,  // 车状态 0..4
+    input  wire        dbg_obs,    // 障碍：1 = 有（超声近距 或 任一路红外）
+    input  wire        dbg_irl,    // 左红外检测到障碍（1 = 有，已取反成高有效）
+    input  wire        dbg_irr,    // 右红外
+    input  wire        dbg_lost,   // 丢线
     // ---- I2C 物理层（三态拆线）----
     output reg        scl,
     input  wire       sda_in,
@@ -109,6 +136,11 @@ module oled_driver #(
     wire [8:0] font_addr;
     wire [7:0] font_q;
     oled_font u_font (.addr(font_addr), .q(font_q));
+
+    // 16x16 数字点阵 ROM（async 读），地址由 S_DBG 分区给出
+    wire [9:0] dg_addr;
+    wire [7:0] dg_q;
+    oled_digits u_digits (.addr(dg_addr), .q(dg_q));
 
     // ------------------------------------------------------------------
     // 事务请求（调度器驱动，引擎在 E_IDLE 且 x_req 时锁存）
@@ -331,11 +363,11 @@ module oled_driver #(
     // ------------------------------------------------------------------
     // 顶层调度
     // ------------------------------------------------------------------
-    localparam [2:0] S_BOOT = 3'd0, S_INIT = 3'd1, S_CLEAR = 3'd2,
-                     S_RENDER = 3'd3, S_PUSH = 3'd4, S_WAIT = 3'd5,
-                     S_FLASH_WAIT = 3'd6, S_MARK = 3'd7;
+    localparam [3:0] S_BOOT = 4'd0, S_INIT = 4'd1, S_CLEAR = 4'd2,
+                     S_RENDER = 4'd3, S_PUSH = 4'd4, S_WAIT = 4'd5,
+                     S_FLASH_WAIT = 4'd6, S_MARK = 4'd7, S_DBG = 4'd8;
 
-    reg [2:0]  state;
+    reg [3:0]  state;
     reg [20:0] boot_cnt;
     reg [25:0] refresh_cnt;
     reg        pend;          // 已发请求、等 e_done
@@ -355,6 +387,21 @@ module oled_driver #(
     reg [1:0]  gp;            // 字形内 page 0..3
     reg [4:0]  rc;            // col 0..31
     reg [1:0]  pk;            // 推送步进：0=列窗 1=页窗 2=数据流
+
+    // 调试区：dk 是绘制步进（0..367），dbg_*_r 是采样锁存值
+    // 绘制分四段，边界必须写在状态机之前（S_DBG 用 DK_END 判结束）
+    localparam [8:0] DK_SEG2 = 9'd128,   // page1 循迹条 128 字节
+                     DK_SEG3 = 9'd224,   // page6/7 三位距离数字 96 字节
+                     DK_SEG4 = 9'd272,   // 'cm' 16 + 状态号 32 = 48 字节
+                     DK_END  = 9'd368;   // 四标志格 96 字节
+    reg [8:0]  dk;
+    reg [9:0]  dbg_addr;      // 调试区显存地址（组合）
+    reg [7:0]  dbg_data;      // 调试区字节（组合）
+    reg [15:0] dbg_dist_r;
+    reg [7:0]  dbg_line_r;
+    reg [2:0]  dbg_state_r;
+    reg        dbg_obs_r, dbg_irl_r, dbg_irr_r, dbg_lost_r;
+    reg [25:0] dbg_cnt;
 
     // 当前槽颜色（供显存写入与 ROM 地址共用）
     always @(*) begin
@@ -389,6 +436,15 @@ module oled_driver #(
             gp          <= 2'd0;
             rc          <= 5'd0;
             pk          <= 2'd0;
+            dk          <= 9'd0;
+            dbg_dist_r  <= 16'hFFFF;
+            dbg_line_r  <= 8'h00;
+            dbg_state_r <= 3'd0;
+            dbg_obs_r   <= 1'b0;
+            dbg_irl_r   <= 1'b0;
+            dbg_irr_r   <= 1'b0;
+            dbg_lost_r  <= 1'b0;
+            dbg_cnt     <= 26'd0;
             frame_done  <= 1'b0;
             frame_pend  <= 1'b0;
             x_req       <= 1'b0;
@@ -419,6 +475,30 @@ module oled_driver #(
                 off_lat     <= k230_off;
                 dirty       <= 1'b1;
                 refresh_cnt <= 26'd0;
+            end
+
+            // ---- 调试输入采样：每 DBG_SAMPLE_MS 采一次，变了就重画 ----
+            // 不逐 clk 比较：超声每 60 ms 更新、按键/循迹更慢，10 Hz 足够；
+            // 若每 clk 比，跳变沿抖动会让屏一直处在该重画的状态，把 I2C 占满。
+            if (dbg_cnt >= ((DBG_SAMPLE_MS <= 0) ? 26'd0
+                             : CLK_FREQ / 1000 * DBG_SAMPLE_MS - 1)) begin
+                dbg_cnt <= 26'd0;
+                if (dbg_dist_r != dbg_dist || dbg_line_r != dbg_line ||
+                    dbg_state_r != dbg_state || dbg_obs_r != dbg_obs ||
+                    dbg_irl_r != dbg_irl || dbg_irr_r != dbg_irr ||
+                    dbg_lost_r != dbg_lost) begin
+                    dbg_dist_r  <= dbg_dist;
+                    dbg_line_r  <= dbg_line;
+                    dbg_state_r <= dbg_state;
+                    dbg_obs_r   <= dbg_obs;
+                    dbg_irl_r   <= dbg_irl;
+                    dbg_irr_r   <= dbg_irr;
+                    dbg_lost_r  <= dbg_lost;
+                    dirty       <= 1'b1;
+                    refresh_cnt <= 26'd0;
+                end
+            end else begin
+                dbg_cnt <= dbg_cnt + 26'd1;
             end
 
             // ---- 2 s 定时重推 ----
@@ -478,6 +558,7 @@ module oled_driver #(
                     rc          <= 5'd0;
                     pk          <= 2'd0;
                     mk          <= 5'd0;
+                    dk          <= 9'd0;
                     need_render <= 1'b1;      // 显存是干净的，色块还没画
                     state       <= S_PUSH;    // 先把这一屏（白或黑）推出去
                 end else begin
@@ -508,8 +589,10 @@ module oled_driver #(
                     rc          <= 5'd0;
                     pk          <= 2'd0;
                     mk          <= 5'd0;
+                    dk          <= 9'd0;
                     need_render <= 1'b0;      // 色块已写进显存
-                    state       <= (ALIVE_MARK != 0) ? S_MARK : S_PUSH;
+                    // 顺序：色块 → 标记(page0) → 调试区(page1/6/7) → 推屏
+                    state       <= (ALIVE_MARK != 0 || OFF_MARK != 0) ? S_MARK : S_DBG;
                 end
             end
 
@@ -597,6 +680,19 @@ module oled_driver #(
                     mk <= mk + 5'd1;
                 end else begin
                     mk    <= 5'd0;
+                    dk    <= 9'd0;
+                    state <= S_DBG;
+                end
+            end
+
+            // -------- 调试区：page1 循迹条 + page6/7 距离/状态/标志 --------
+            // 368 个字节每拍写一个，@24 MHz 约 15 us；相对 60 ms 的推送周期可忽略。
+            S_DBG: begin
+                if (dk < DK_END) begin
+                    fb[dbg_addr] <= dbg_data;
+                    dk <= dk + 9'd1;
+                end else begin
+                    dk    <= 9'd0;
                     state <= S_PUSH;
                 end
             end
@@ -614,5 +710,116 @@ module oled_driver #(
 
     // 字形地址：(color-1)*128 + gp*32 + rc
     assign font_addr = ((cur_color - 3'd1) << 7) + (gp << 5) + rc;
+
+    // ------------------------------------------------------------------
+    // 调试区绘制：dk 组合出显存地址与字节（S_DBG 每拍写一个字节）
+    //   dk   0..127  page 1   八路循迹条，每路 16 列，col[6:4] 选路并排
+    //   dk 128..223  page 6/7 三位距离数字，s = k[6:5] 选百/十/个位
+    //   dk 224..271  page 7 'cm' 16 列 + page 6/7 车状态号 32 列
+    //   dk 272..367  page 6/7 四个标志格，每格 12 列（实心 10 列 + 两侧边框）
+    // 全部 368 个字节每次无条件重写，不依赖旧显存，改布局不会留残影。
+    // ------------------------------------------------------------------
+    reg [9:0] dga;          // oled_digits 地址（异步读，组合给出）
+    reg [6:0] kk;           // 段内偏移
+    reg [6:0] ci;           // 标志段：页内列号 0..47
+    reg [6:0] cix;          // 标志段：格内列号 0..11
+    reg [5:0] k2;           // 状态号段：段内偏移 0..31
+    reg [1:0] fl;           // 标志序号 0=障碍 1=左红外 2=右红外 3=丢线
+    reg       pgh;          // 目标页：0 = page 6，1 = page 7
+    reg       setv;         // 该标志是否置位
+
+    // 距离拆分：0..999 逐位减十/减百，不用除法器（会例化 16 位除法）
+    reg [15:0] dist_tmp;
+    reg [3:0]  dgt2, dgt1, dgt0;
+    integer    di;
+    always @(*) begin
+        dist_tmp = (dbg_dist_r > 16'd999) ? 16'd999 : dbg_dist_r;
+        dgt2 = 4'd0; dgt1 = 4'd0; dgt0 = 4'd0;
+        for (di = 0; di < 10; di = di + 1)
+            if (dist_tmp >= 16'd100) begin
+                dist_tmp = dist_tmp - 16'd100;
+                dgt2 = dgt2 + 4'd1;
+            end
+        for (di = 0; di < 10; di = di + 1)
+            if (dist_tmp >= 16'd10) begin
+                dist_tmp = dist_tmp - 16'd10;
+                dgt1 = dgt1 + 4'd1;
+            end
+        dgt0 = dist_tmp[3:0];
+    end
+
+    always @(*) begin
+        dbg_addr = 10'd0;
+        dbg_data = 8'h00;
+        dga      = 10'd0;
+        kk       = 7'd0;
+        ci       = 7'd0;
+        cix      = 7'd0;
+        k2       = 6'd0;
+        fl       = 2'd0;
+        pgh      = 1'b0;
+        setv     = 1'b0;
+
+        if (dk < DK_SEG2) begin
+            // ---- page 1：八路循迹条。line[0] = 车体最左（X1），与串口 T= 字符序相反 ----
+            dbg_addr = 10'd128 + {3'd0, dk[6:0]};
+            dbg_data = dbg_line_r[dk[6:4]] ? 8'hFF : 8'h80;
+        end else if (dk < DK_SEG3) begin
+            // ---- page 6/7：三位距离数字，无回波显示 "---"，>999 饱和 999 ----
+            kk  = dk[6:0];                       // 0..95
+            pgh = kk[4];                         // 0 = 字形上半(page6)，1 = 下半(page7)
+            if (dbg_dist_r == 16'hFFFF) begin
+                dga = {1'd0, 4'd10, 5'd0};       // glyph 10 = '-'
+            end else begin
+                case (kk[6:5])
+                2'd0:    dga = {1'd0, dgt2, 5'd0};
+                2'd1:    dga = {1'd0, dgt1, 5'd0};
+                default: dga = {1'd0, dgt0, 5'd0};
+                endcase
+            end
+            dga      = dga + (pgh ? 10'd16 : 10'd0) + {6'd0, kk[3:0]};
+            dbg_addr = 10'd768 + (pgh ? 10'd128 : 10'd0)
+                       + ({6'd0, kk[6:5]} << 4) + {6'd0, kk[3:0]};
+            dbg_data = dg_q;
+        end else if (dk < DK_SEG4) begin
+            // ---- 先 'cm'（page7 col48..63），再车状态号（page6/7 col64..79）----
+            kk = dk - DK_SEG3;                   // 0..47
+            if (kk < 7'd16) begin
+                dbg_addr = 10'd944 + {3'd0, kk};                       // 7*128 + 48
+                dga      = 10'd384 + {3'd0, kk};   // 'c'=384..391, 'm'=392..399，共 16 列
+                dbg_data = dg_q;
+            end else begin
+                k2  = kk[5:0] - 6'd16;           // 0..31
+                pgh = k2[4];
+                dga = {2'd0, dbg_state_r, 5'd0} + (pgh ? 10'd16 : 10'd0)
+                      + {6'd0, k2[3:0]};
+                dbg_addr = 10'd768 + (pgh ? 10'd128 : 10'd0) + 10'd64
+                           + {6'd0, k2[3:0]};
+                dbg_data = dg_q;
+            end
+        end else begin
+            // ---- page 6/7 col80..127：四个标志格，自左向右 障碍/左红外/右红外/丢线 ----
+            kk = dk - DK_SEG4;                   // 0..95
+            pgh = (kk >= 7'd48);
+            ci  = pgh ? (kk - 7'd48) : kk;       // 0..47
+            if (ci >= 7'd36)      begin fl = 2'd3; cix = ci - 7'd36; end
+            else if (ci >= 7'd24) begin fl = 2'd2; cix = ci - 7'd24; end
+            else if (ci >= 7'd12) begin fl = 2'd1; cix = ci - 7'd12; end
+            else                  begin fl = 2'd0; cix = ci;          end
+            case (fl)
+            2'd0:    setv = dbg_obs_r;
+            2'd1:    setv = dbg_irl_r;
+            2'd2:    setv = dbg_irr_r;
+            default: setv = dbg_lost_r;
+            endcase
+            dbg_addr = 10'd768 + (pgh ? 10'd128 : 10'd0) + 10'd80 + {3'd0, ci};
+            // 列 0 与 11 是边框（常亮），中间 10 列置位时整格实心、清零时只留上下沿
+            if (cix == 7'd0 || cix == 7'd11) dbg_data = 8'hFF;
+            else if (pgh == 1'b0)            dbg_data = setv ? 8'hFF : 8'h01;
+            else                             dbg_data = setv ? 8'hFF : 8'h80;
+        end
+    end
+
+    assign dg_addr = dga;
 
 endmodule
