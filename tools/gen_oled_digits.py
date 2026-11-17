@@ -5,7 +5,8 @@
 布局: 16x16 点阵，每个字形 2 page x 16 col = 32 字节
   addr = glyph*32 + page*16 + col,  byte 的 bit b = 像素(行 page*8+b, 列 col)
 字形 0..9 = 数字 '0'-'9'，10 = '-'，11 = 空白
-另附两个 8x8 小字形 'c'/'m'，从 addr 384 起，每个 8 字节。
+另附 8x8 小字形 'c'/'m'/'0'/'1'，从 addr 384 起，每个 8 字节
+（'0'/'1' 用于 page 1 右侧的八位二进制串）。
 """
 from PIL import Image, ImageDraw, ImageFont
 
@@ -51,7 +52,7 @@ def small(ch):
     return out
 
 big = [bytes_of(render(c)) for c in GLYPHS]
-sml = [small("c"), small("m")]
+sml = [small("c"), small("m"), small("0"), small("1")]
 
 names = {"0":"数字 0","1":"1","2":"2","3":"3","4":"4","5":"5","6":"6","7":"7",
          "8":"8","9":"9","-":"负号/无数据"," ":"空白"}
@@ -65,7 +66,7 @@ L.append("// 布局: 16x16，每字形 2 page x 16 col = 32 字节")
 L.append("//   addr = glyph*32 + page*16 + col")
 L.append("//   byte 的 bit b = 像素(行 page*8+b, 列 col)")
 L.append("// 字形 0..9 = '0'..'9'，10 = '-'，11 = 空白")
-L.append("// addr 384..391 = 'c'，392..399 = 'm'（8x8 小字）")
+L.append("// addr 384..391 = 'c'，392..399 = 'm'，400..407 = '0'，408..415 = '1'（8x8 小字）")
 L.append("// =============================================================================")
 L.append("BTIMES")
 L.append("")
@@ -82,7 +83,7 @@ for gi, name in enumerate(GLYPHS):
 for si, s in enumerate(sml):
     for k, v in enumerate(s):
         L.append("        10'd%-4d: q = 8'h%02X;%s" % (384+si*8+k, v,
-                 "" if k else "   // '" + "cm"[si] + "'"))
+                 "" if k else "   // '" + "cm01"[si] + "'"))
 L.append("        default: q = 8'h00;")
 L.append("        endcase")
 L.append("    end")
@@ -93,7 +94,9 @@ open("FpgaCar/src/oled_digits.v", "w", encoding="utf-8", newline="\n").write(txt
 print("WROTE src/oled_digits.v bytes=%d" % len(txt))
 
 SC = 6
-prev = Image.new("RGB", (len(GLYPHS)*W*SC + 40, H*SC + 60), (18, 18, 22))
+SCS = 12                                    # 小字形放大倍数（8x8 太小，放大 12 倍才看得清）
+prev = Image.new("RGB", (max(len(GLYPHS)*W*SC, 16*8*SCS) + 40,
+                         H*SC + 60 + 8*SCS + 90), (18, 18, 22))
 for gi, c in enumerate(GLYPHS):
     img = render(c)
     x0 = 20 + gi*W*SC
@@ -105,5 +108,17 @@ f = ImageFont.truetype(FONTS[0], 18)
 d = ImageDraw.Draw(prev)
 for gi, c in enumerate(GLYPHS):
     d.text((20 + gi*W*SC + 30, 20 + H*SC + 8), c, font=f, fill=(200, 200, 210))
+
+# ---- 第二行：8x8 小字形（page0 二进制串与 'cm' 用的就是这一套）----
+y0 = H*SC + 60 + 40
+d.text((20, y0 - 30), "8x8 小字形（page0 二进制串用 0/1，cm 用 c/m）", font=f, fill=(150, 220, 160))
+for si, s in enumerate(sml):
+    x0 = 20 + si*8*SCS
+    for col in range(8):
+        v = s[col]
+        for b in range(8):
+            if v >> b & 1:
+                prev.paste((150, 220, 160), (x0+col*SCS, y0+b*SCS, x0+col*SCS+SCS, y0+b*SCS+SCS))
+    d.text((x0 + 8*SCS//2 - 6, y0 + 8*SCS + 10), "cm01"[si], font=f, fill=(200, 200, 210))
 prev.save("FpgaCar/docs/OLED数字点阵预览.png")
 print("WROTE preview")

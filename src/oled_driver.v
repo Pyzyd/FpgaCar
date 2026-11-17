@@ -44,6 +44,9 @@
 //     page 6/7 col64..79: 车状态号 0=IDLE 1=RUN 2=LOST 3=SEARCH 4=STOP。
 //     page 6/7 col80..127: 四个标志格，每格 12 px（实心 10 px），
 //                         自左向右 = 障碍 / 左红外 / 右红外 / 丢线；
+//     page 0 col8..71   : 八路循迹的八位二进制串（8 个 8x8 数字，每字 8 列），
+//                         自左向右 = line[7]..line[0]，与串口 T= 的字符序一致。
+//                         page 0 两端 col0..7 / col120..127 归 S_MARK，不冲突。
 //                         实心 = 置位，只留底边 = 复位（与循迹条同一套读法）。
 //   刷新：调试输入每 DBG_SAMPLE_MS（默认 100 ms）采样一次，值一变就整屏重推。
 //   超声 16 Hz、屏 10 Hz，够用；一次全屏约 23 ms，I2C 占空比约 23%。
@@ -388,12 +391,13 @@ module oled_driver #(
     reg [4:0]  rc;            // col 0..31
     reg [1:0]  pk;            // 推送步进：0=列窗 1=页窗 2=数据流
 
-    // 调试区：dk 是绘制步进（0..367），dbg_*_r 是采样锁存值
-    // 绘制分四段，边界必须写在状态机之前（S_DBG 用 DK_END 判结束）
-    localparam [8:0] DK_SEG2 = 9'd128,   // page1 循迹条 128 字节
-                     DK_SEG3 = 9'd224,   // page6/7 三位距离数字 96 字节
-                     DK_SEG4 = 9'd272,   // 'cm' 16 + 状态号 32 = 48 字节
-                     DK_END  = 9'd368;   // 四标志格 96 字节
+    // 调试区：dk 是绘制步进（0..431），dbg_*_r 是采样锁存值
+    // 绘制分五段，边界必须写在状态机之前（S_DBG 用 DK_END 判结束）
+    localparam [8:0] DK_SEG2 = 9'd128,   // 段1 结束：page1 循迹条 128 字节
+                     DK_SEG3 = 9'd224,   // 段2 结束：page6/7 三位距离 96 字节
+                     DK_SEG4 = 9'd272,   // 段3 结束：'cm' 16 + 状态号 32 = 48 字节
+                     DK_SEG5 = 9'd368,   // 段4 结束：四标志格 96 字节
+                     DK_END  = 9'd432;   // 段5 结束：page0 八位二进制串 64 字节
     reg [8:0]  dk;
     reg [9:0]  dbg_addr;      // 调试区显存地址（组合）
     reg [7:0]  dbg_data;      // 调试区字节（组合）
@@ -797,7 +801,7 @@ module oled_driver #(
                            + {6'd0, k2[3:0]};
                 dbg_data = dg_q;
             end
-        end else begin
+        end else if (dk < DK_SEG5) begin
             // ---- page 6/7 col80..127：四个标志格，自左向右 障碍/左红外/右红外/丢线 ----
             kk = dk - DK_SEG4;                   // 0..95
             pgh = (kk >= 7'd48);
@@ -817,6 +821,15 @@ module oled_driver #(
             if (cix == 7'd0 || cix == 7'd11) dbg_data = 8'hFF;
             else if (pgh == 1'b0)            dbg_data = setv ? 8'hFF : 8'h01;
             else                             dbg_data = setv ? 8'hFF : 8'h80;
+        end else begin
+            // ---- page 0 col8..71：八位二进制串，自左向右 = line[7]..line[0] ----
+            // 与串口 T= 的字符序一致（uart_report 也是 bit7 在前），可以逐字对照抄。
+            // page 0 的 col0..7（存活标记）与 col120..127（K230 叉号）由 S_MARK 写，
+            // 这里只占中间的 col8..71，两边不打架。
+            dbg_addr = 10'd8 + {4'd0, dk[5:0]};       // dk 368..431 -> 段内 0..63
+            dga      = (dbg_line_r[7'd7 - dk[5:3]] ? 10'd408 : 10'd400)
+                       + {7'd0, dk[2:0]};             // '0'=400, '1'=408
+            dbg_data = dg_q;
         end
     end
 

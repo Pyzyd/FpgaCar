@@ -51,7 +51,8 @@ module oled_driver_tb;
 
     oled_driver #(
         .CLK_FREQ(CLK_F), .SCL_FREQ(SCL_HZ), .BOOT_MS(1),
-        .FLASH_MS(1), .ALIVE_MARK(1)      // 仿真里白闪只保持 1 ms
+        .FLASH_MS(1), .ALIVE_MARK(1),     // 仿真里白闪只保持 1 ms
+        .DBG_SAMPLE_MS(1)                 // 调试区 1 ms 采一次，别让仿真等 100 ms
     ) u_dut (
         .clk(clk), .rst_n(rst_n),
         .k230_off(k230_off),
@@ -234,6 +235,14 @@ module oled_driver_tb;
                     daddr = dbg_state * 32 + pg * 16 + cl;
                     #1;
                     exp_fb[(6 + pg) * 128 + 64 + cl] = dq;
+                end
+
+            // ---- page0 col8..71：八位二进制串，自左向右 = line[7]..line[0] ----
+            for (ln = 0; ln < 8; ln = ln + 1)
+                for (cl = 0; cl < 8; cl = cl + 1) begin
+                    daddr = (dbg_line[7 - ln] ? 10'd408 : 10'd400) + cl;
+                    #1;
+                    exp_fb[8 + ln * 8 + cl] = dq;
                 end
 
             // ---- 四个标志格：page6/7 col80..127 ----
@@ -424,6 +433,23 @@ module oled_driver_tb;
         $display("PHASE: recover frame arrived at %0t", $time); $fflush(0);
         build_exp;
         check_fb("after K230 recover");
+
+        // ---- 第 5 阶段：调试输入真变一次，验证数字/'1' 字形/标志格都跟着走 ----
+        // 前面的用例里 dbg_line 恒 0，只走到 '0' 字形；这里给 8'b10000001，
+        // 最左和最右两格必须是 '1'，并且四个标志格要跟着翻转，才算真的接通。
+        $display("PHASE: waiting debug-data frame at %0t", $time); $fflush(0);
+        dbg_dist  = 16'd123;
+        dbg_line  = 8'b10000001;
+        dbg_state = 3'd2;
+        dbg_obs   = 1'b1;
+        dbg_irl   = 1'b0;
+        dbg_irr   = 1'b1;
+        dbg_lost  = 1'b0;
+        @(posedge frame_done);
+        @(posedge clk);
+        $display("PHASE: debug-data frame arrived at %0t", $time); $fflush(0);
+        build_exp;
+        check_fb("debug data 123cm / 10000001 / state2");
 
         if (nack !== 0) $display("FAIL: slave model saw %0d address NACKs", nack);
         else            $display("PASS: every transaction addressed 0x3C correctly");

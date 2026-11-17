@@ -279,11 +279,21 @@ module FpgaCar (
     // ------------------------------------------------------------------
     localparam [15:0] OBSTACLE_CM = 16'd25;    // 刹车/绕行阈值，实测后调
 
+    // 【总开关】红外避障（E18-D80NK）—— 现阶段不用，默认关闭。
+    //   1'b0 = 不参与障碍判定（超声波单独决定 obstacle），接线与 RTL 全部保留；
+    //   1'b1 = 超声波 或 任一路红外触发都算障碍。
+    //   为什么默认关：E18-D80NK 要外接 10k 上拉到 D3V3 再经 1k/1.2k 分压（详见
+    //   PROJECT_PLAN §3.21），没接模块时输入端要么悬空要么被内部上拉抬高，
+    //   一旦电平判错就会凭空报障碍把车摁停 —— 现场最难查的一类故障。
+    //   要启用：接好两路（含分压）后把这里改 1'b1 重新综合；只接一路也可以，
+    //   另一路保持断开即可（未接那路若误报，把对应端口改接 D3V3 拉到「无遮挡」）。
+    localparam USE_IR = 1'b0;
+
     wire hc_near  = (dist_cm != 16'hFFFF) && (dist_cm <= OBSTACLE_CM);
     wire ir_l_det = ~ir_l;                      // NPN 低有效
     wire ir_r_det = ~ir_r;
-    wire ir_det   = ir_l_det | ir_r_det;
-    wire obstacle = hc_near | ir_det;
+    wire ir_det   = ir_l_det | ir_r_det;        // 原始判定，始终可观测（屏上四个标志格）
+    wire obstacle = hc_near | (USE_IR & ir_det);
 
     // ------------------------------------------------------------------
     // 运动闭环：track_pid（位置 PID）+ car_fsm（状态机）
@@ -590,7 +600,7 @@ module FpgaCar (
             .dbg_line   (line_bits),    // bit0 = 车体最左 X1
             .dbg_state  (car_state),
             .dbg_obs    (obstacle),
-            .dbg_irl    (ir_l_det),
+            .dbg_irl    (ir_l_det),    // 原始电平，不看 USE_IR：接没接一眼可见
             .dbg_irr    (ir_r_det),
             .dbg_lost   (line_lost)
         );
