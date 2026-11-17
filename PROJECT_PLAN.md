@@ -1867,7 +1867,7 @@ tools\flash.bat       # 固化进 SPI Flash（三步：bridge → 写入 → 回
 ```
 
 也可继续走 GUI：Programmer → Select Image File → `outflow/FpgaCar.bit` → JTAG → Start Program
-（**位流 2026-11-12 19:50**，含 `color_detect` v3 的黄色判据 + 帧内四色轮询）。5 项预期里先做这 4 项：
+（**位流 2026-11-17 20:54**，含 `hc_sr04` 周期修复，见 §3.22）。5 项预期里先做这 4 项：
 
 1. `LED[5]` 约 0.35 s 慢闪 → 位流已加载、24 MHz 时钟在跑。
 2. YB-MUX04 接上（8 根线到 User_IO2~9 + 5V/GND，板子已有）→ 黑线在探头下从左往右推，
