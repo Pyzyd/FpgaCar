@@ -92,13 +92,18 @@ module hc_sr04 #(
             // 等够 PERIOD_US 再发下一次触发
             S_PERIOD: begin
                 trig <= 1'b0;
-                if (period_cnt >= PERIOD_US - 1) begin
-                    period_cnt <= 18'd0;
-                    trig_cnt   <= 6'd0;
-                    trig       <= 1'b1;             // 抬起 Trig
-                    state      <= S_TRIG;
-                end else begin
-                    period_cnt <= period_cnt + 18'd1;
+                // 注意：必须用 us_tick 门控。早期版本这里每 clk 加一，
+                // 导致 PERIOD_US 实际只有 2.5 ms（60_000 个 24 MHz 周期），
+                // 远低于 HC-SR04 要求的 ≥60 ms 触发间隔，会造成串扰与大量无回波。
+                if (us_tick) begin
+                    if (period_cnt >= PERIOD_US - 1) begin
+                        period_cnt <= 18'd0;
+                        trig_cnt   <= 6'd0;
+                        trig       <= 1'b1;         // 抬起 Trig
+                        state      <= S_TRIG;
+                    end else begin
+                        period_cnt <= period_cnt + 18'd1;
+                    end
                 end
             end
 
