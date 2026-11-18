@@ -302,32 +302,33 @@ PIN_YS = [270, 390, 510, 630]
 
 HC_PINS = [
     ("Vcc", "HC-SR04 · Vcc",
-     "5 V（车载 DC-DC 那一路）· 约 15 mA 峰值\n接 D3V3 只有 3.3 V，量程会掉到 1 m 以内", C_POWER),
+     "3.3 V（外部电源模块的 3.3 V 输出）· 约 15 mA 峰值\n★ 2026-11-18 实测：3.3 V 下 2.2 m 仍稳定回波", C_POWER),
     ("Trig", "hc_trig",
      "User_IO10 · G4 · pin 13 · 1B bank 1.8V\n3.3 V 直驱，脉宽 15 µs（规格要求 ≥10 µs）", C_HC),
     ("Echo", "hc_echo",
-     "1 kΩ / 2 kΩ 分压 → User_IO11 · G3 · pin 14\n★ 模块输出 5 V，直连超 TXS0108E 的 4.6 V 绝对最大", C_HC),
+     "直连 → User_IO11 · G3 · pin 14\n高电平 = Vcc；3.3 V 供电即 3.3 V，不必分压", C_HC),
     ("Gnd", "GND",
-     "pin 12 / 30 · 与 Ti60 板共地\n电机功率地与信号地单点相接", C_POWER),
+     "面包板 GND · 与 Ti60 的 pin 12 / 30 共地\n3.3 V 与 5 V 两路的地必须共到一起", C_POWER),
 ]
 
 HC_ITEMS = [
     ("①", "先看丝印，别按位置插",
      "本模块自上而下是 Vcc / Trig / Echo / Gnd（照片已确认）。克隆板有把 Trig 和 Echo 对调的版本，"
      "接反不会烧（一个输入一个输出），但串口会一直 D=---cm，很容易误判成模块坏了。"),
-    ("②", "Echo 必须分压，1 kΩ 串 + 2 kΩ 下地",
-     "5 V × 2 k / (1 k + 2 k) = 3.33 V，正好落在 3.3 V 侧合法区间（高门限约 2.3 V，绝对最大 4.6 V）。"
-     "手上只有 2.2 kΩ 的话输出 3.44 V，仍然安全。别用 1 kΩ+1 kΩ（2.5 V 余量太小，"
-     "也别用 10 kΩ 级——TXS0108E 靠边沿加速，驱动太弱会让上升沿变慢）。"),
-    ("③", "5 V 从车载 DC-DC 取，不要从 D3V3 取",
-     "HC-SR04 要 5 V 才能保证 4 m 量程。D5V0（pin 11）在引脚表里标的是「5V 电源输入」，"
-     "接之前先用万用表确认本板该脚真的有 5 V 输出，再挂负载；没有就并入 DC-DC 的 5 V。"),
+    ("②", "Vcc 接 3.3 V，Echo 就可以直连",
+     "Echo 高电平由板上 MCU 在 Vcc 上推挽输出，Vcc 是几伏 Echo 就是几伏。所以 3.3 V 供电时"
+     "pin 14 直连合法，一根电阻都不用。反过来若改回 5 V 供电，Echo 就是 5 V，"
+     "必须 1 kΩ 串 + 2 kΩ 下地分压到 3.33 V，否则超 TXS0108E 的 4.6 V 绝对最大。"),
+    ("③", "电源一律从外部电源模块取，不从排针取",
+     "D5V0（pin 11）与 D3V3（pin 29）在引脚表里都是「输入」性质，不是对外供电的出口。"
+     "所有负载统一由外部电源模块供电，Ti60 只出信号与地；共地要接两根（pin 12 与 pin 30）。"),
     ("④", "探头装车头正中、离地 8~15 cm、略下倾 5°~10°",
      "hc_sr04.v 每 60 ms 测一次（PERIOD_US = 60_000，约 16.7 Hz），顶层判 obstacle = dist_cm ≤ 25 cm。"
      "锥角约 15°，两侧 25 cm 内的斜墙也算障碍；平装容易收到地面回波，读数会莫名其妙地一直很近。"),
     ("⑤", "串口一直 D=---cm 时按这个顺序查",
-     "① 量模块 Vcc 是否 ≥4.6 V；② 量 Trig 是否有 15 µs 高脉冲；③ 量分压节点是否在 3.0~3.4 V；"
-     "④ 都正常还不跳数，先并一个 100 nF 到 Vcc-GND 再试，最后才换模块（HC-SR04 批次差异大）。"),
+     "① 量模块 Vcc 是否在 3.2~3.4 V；② 量 Echo 高电平是否 ≤3.4 V（超过说明没跟着 Vcc 走，立即断电）；"
+     "③ 量 Trig 是否有 15 µs 高脉冲；④ 都正常还不跳数，先并一个 100 nF 到 Vcc-GND 再试，"
+     "最后才换模块（HC-SR04 批次差异大）。"),
 ]
 
 _probe_img3 = Image.new("RGB", (W, 4000), "white")
@@ -342,7 +343,7 @@ d = ImageDraw.Draw(img)
 
 d.text((MARGIN + 4, 42), "HC-SR04 超声波测距模块 · 引脚配置与接线", font=F(46, True), fill=C_TITLE)
 d.text((MARGIN + 4, 108),
-       "4 脚（自上而下 Vcc / Trig / Echo / Gnd）· Trig 3.3 V 直驱 · Echo 5 V 必须 1k/2k 分压到 3.33 V",
+       "4 脚（自上而下 Vcc / Trig / Echo / Gnd）· Vcc 接 3.3 V · Trig 与 Echo 均可直连、不需分压",
        font=F(20), fill=C_SUB)
 
 # ---- 模块本体 ----
@@ -363,29 +364,23 @@ for i, (sk, net, detail, col) in enumerate(HC_PINS):
     d.text((60, y - 50), net, font=F(25, True), fill=col)
     draw_wrapped(d, (60, y - 22), detail, 16, 356, C_NOTE)
 
-# ---- Echo 分压小电路 ----
+# ---- Echo 直连（3.3 V 供电方案）----
 d.rounded_rectangle((1000, 230, 1664, 690), radius=14, fill="#f0f6f4", outline="#a9cfc6", width=2)
-d.text((1030, 248), "Echo 分压网络（必须接）", font=F(21, True), fill="#0b5a4f")
-d.text((1030, 286), "模块 5 V 输出 → 排针 3.3 V 侧，分压后 3.33 V", font=F(16), fill="#3d6b62")
+d.text((1030, 248), "Echo 直连（Vcc = 3.3 V 时合法）", font=F(21, True), fill="#0b5a4f")
+d.text((1030, 286), "Echo 高电平跟随 Vcc：Vcc 3.3 V → Echo 3.3 V → pin 14 直连", font=F(16), fill="#3d6b62")
 
 WIRE_Y = 400
-d.line((1040, WIRE_Y, 1128, WIRE_Y), fill=C_HC, width=4)
-d.rounded_rectangle((1128, WIRE_Y - 18, 1228, WIRE_Y + 18), radius=6, fill="white", outline=C_HC, width=3)
-d.text((1178, WIRE_Y), "1 kΩ", font=F(16, True), fill=C_HC, anchor="mm")
-d.line((1228, WIRE_Y, 1640, WIRE_Y), fill=C_HC, width=4)
-d.ellipse((1282, WIRE_Y - 7, 1296, WIRE_Y + 7), fill=C_HC)
-d.line((1289, WIRE_Y, 1289, 440), fill=C_HC, width=4)
-d.rounded_rectangle((1271, 440, 1307, 528), radius=6, fill="white", outline=C_HC, width=3)
-d.line((1289, 528, 1289, 566), fill=C_HC, width=4)
-for w, yy in ((64, 566), (40, 574), (18, 582)):
-    d.line((1289 - w // 2, yy, 1289 + w // 2, yy), fill=C_HC, width=4)
-d.text((1318, 452), "R2  2 kΩ", font=F(17, True), fill=C_HC)
-d.text((1318, 480), "下地", font=F(15), fill="#3d6b62")
-d.text((1040, 356), "Echo（5 V）", font=F(18, True), fill=C_HC)
-d.text((1320, 348), "User_IO11 · G3 · pin 14", font=F(18, True), fill=C_HC)
-d.text((1320, 420), "分压后 3.33 V", font=F(16), fill="#3d6b62")
-d.text((1030, 616), "5 V × 2k/(1k+2k) = 3.33 V　·　TXS0108E B 侧绝对最大 4.6 V", font=F(15), fill="#3d6b62")
-d.text((1030, 646), "两个电阻都用 1/4 W 金属膜即可，误差 1% 更稳", font=F(15), fill="#3d6b62")
+d.line((1040, WIRE_Y, 1640, WIRE_Y), fill=C_HC, width=4)
+d.ellipse((1040 - 7, WIRE_Y - 7, 1040 + 7, WIRE_Y + 7), fill=C_HC)
+d.ellipse((1640 - 7, WIRE_Y - 7, 1640 + 7, WIRE_Y + 7), fill=C_HC)
+d.text((1040, 356), "Echo（= Vcc = 3.3 V）", font=F(18, True), fill=C_HC)
+d.text((1640, 334), "→ User_IO11 · G3 · pin 14", font=F(18, True), fill=C_HC, anchor="ra")
+d.text((1030, 430), "★ 不需要任何分压电阻：3.3 V < TXS0108E B 侧绝对最大 4.6 V", font=F(16), fill="#0b5a4f")
+d.text((1030, 462), "注意：若把 Vcc 改回 5 V，Echo 立刻变 5 V，必须补 1 kΩ 串 + 2 kΩ 下地", font=F(16), fill="#a3441f")
+d.text((1030, 500), "　 分压到 3.33 V（5 × 2k/(1k+2k)），且电阻要放在排针这一侧", font=F(15), fill="#3d6b62")
+d.text((1030, 560), "为什么能直连：Echo 由模块板上 MCU 在 Vcc 上推挽输出，", font=F(15), fill="#3d6b62")
+d.text((1030, 588), "不是固定的 5 V 电平——供电降下来，输出也跟着降。", font=F(15), fill="#3d6b62")
+d.text((1030, 636), "实测：3.3 V 供电下 215/215 帧有回波，最远 2.2 m。", font=F(15), fill="#3d6b62")
 
 # ---- 图例 ----
 ly = 738
@@ -395,7 +390,7 @@ d.text((MARGIN + 104, ly + 2), "测距信号（Trig 输出 / Echo 输入）", fo
 d.rectangle((MARGIN + 470, ly + 5, MARGIN + 492, ly + 22), fill=C_POWER)
 d.text((MARGIN + 500, ly + 2), "电源 / 地", font=F(18), fill=C_NOTE)
 d.text((MARGIN + 660, ly + 2),
-       "模块 Vcc 接 5 V、Echo 经 1k/2k 分压 —— 这两条搞错，串口就是永远 D=---cm",
+       "Vcc 接 3.3 V 后 Echo 可直连；若改回 5 V 供电则必须补 1k/2k 分压，否则超 4.6 V",
        font=F(18), fill=C_NOTE)
 
 d.rounded_rectangle((PANEL_X0, _panel_top3, PANEL_X1, H - 40), radius=14,
