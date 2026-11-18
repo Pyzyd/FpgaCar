@@ -51,7 +51,7 @@ rem verify_method='none' inside that branch (see the jtag2spi dispatcher), so
 rem it prints "PROGRAMMING DONE" with zero verification and exits 0 even if the
 rem image is corrupt. Verified 2026-11-18: that path let a bad image reach the
 rem flash and the board came up dark after power cycle.
-set FLOG=%~dp0..outflowlash_write.log
+set FLOG=%~dp0..\outflow\flash_write.log
 "%PYEXE%" "%~dp0jtag_program.py" -m jtag_bridge --jtag_bridge_mode all --verify_method hostx1 -b "Generic Board Profile Using FT232H" -u %URL% -x "%JCF%" -n 1 "%IMG%" > "%FLOG%" 2>&1
 if errorlevel 1 goto :fail
 rem Exit code alone proves nothing: a silent zero-verify path also returns 0.
