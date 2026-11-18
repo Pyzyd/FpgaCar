@@ -29,6 +29,7 @@ module car_fsm #(
     parameter integer LOST_HOLD_MS  = 300,    // 丢线先保持多久
     parameter integer SEARCH_MS     = 1500,   // 原地找线最长多久
     parameter integer SEARCH_DUTY   = 500,    // 找线时的占空比
+    parameter integer SEARCH_FAIL_TO_IDLE = 1, // 找线超时后：1=回 IDLE 等重新压线，0=永久停车
     parameter integer DIR_DEAD_MS   = 10,     // 方向切换死区
     parameter integer TURN_MS       = 700,    // 交通牌强制转向持续时长
     parameter integer TURN_DUTY     = 700     // 强制转向时的占空比
@@ -246,9 +247,16 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                         ms_cnt <= 16'd0;
                         state  <= S_RUN;
                     end else if (ms_cnt >= SEARCH_MS - 1) begin
-                        ms_cnt     <= 16'd0;
-                        final_stop <= 1'b1;
-                        state      <= S_STOP;
+                        ms_cnt <= 16'd0;
+                        // 桌面/小场地反复测试时，永久停车只能断电才能解除，非常难用。
+                        // SEARCH_FAIL_TO_IDLE=1 改成回 IDLE：把车放回线上等 2 s 就重新起跑。
+                        // 正式比赛改回 0（找线失败即判负，不能无限重试）。
+                        if (SEARCH_FAIL_TO_IDLE != 0) begin
+                            state <= S_IDLE;
+                        end else begin
+                            final_stop <= 1'b1;
+                            state      <= S_STOP;
+                        end
                     end else begin
                         ms_cnt <= ms_cnt + 16'd1;
                     end

@@ -4,7 +4,7 @@
 // 每来一个 dist_valid 脉冲（hc_sr04 每 60 ms 一帧）打两行，格式固定：
 //
 //     D=123cm T=00011000 P=+02 O=0 M=01          (35 字节)
-//     L=00000123 R=00000123 VL=0005 VR=0005      (39 字节)
+//     L=00000123 R=00000123 VL=0005 VR=0005 ...  (71 字节)
 //
 //   D=xxxcm : 超声波距离；--- 表示无回波/超量程
 //   T=      : 8 路循迹探头，bit7..bit0 对应 track[7]..track[0]，1=压线
@@ -13,6 +13,14 @@
 //   M=nn    : 状态机状态（00 IDLE 01 RUN 02 LOST 03 SEARCH 04 STOP，两位十进制）
 //   L=/R=   : 左右编码器累计里程，8 位十六进制二补码（标定每米脉冲数用）
 //   VL=/VR= : 左右速度，每 50 ms 窗口净步数，4 位十六进制二补码
+//   X=      : 循迹消抖后的**原始电平**（未经 ACTIVE_HIGH 取反），bit7..bit0
+//             = X8..X1。T= 已经过极性统一，极性设反时只会看到"全压线"，
+//             而"全压线"与"模块真在报全黑"在 T= 上无法区分 —— X= 就是那面镜子。
+//   C=±nnn  : track_pid 的转向修正量（corr，±BASE_DUTY 内）。
+//             只看 T=/P= 无法判断 PID 到底在做什么；调 P/D 时必须看这一项。
+//   DL=/DR= : car_fsm 实际下发的左右占空比，3 位十六进制（0..4B0=1200）。
+//             它与 C= 的关系是 DL=BASE+C、DR=BASE-C，BASE=600=0x258。
+//             两者对不上说明 PID 输出被状态机改写（LOST 保持/SEARCH/TURN）。
 //
 // 【为什么里程用十六进制】编码器计数是 32 位有符号，十进制要套 8 次 div10，
 // 组合逻辑代价比信息价值大；解析时按行首字母分流，主机侧再换算即可。
@@ -33,8 +41,12 @@ module uart_report #(
     input  wire        rst_n,      // 低有效（已同步化）
     input  wire [15:0] dist_cm,    // 距离，16'hFFFF = 无效
     input  wire        dist_valid, // 1 clk 脉冲：dist_cm 已更新，触发本行
-    input  wire [7:0]  line,       // 循迹压线位图
+    input  wire [7:0]  line,       // 循迹压线位图（已极性统一）
+    input  wire [7:0]  raw,        // 循迹原始电平（未取反）
     input  wire signed [4:0] pos,  // 线位置
+    input  wire signed [10:0] corr,     // PID 修正量（C=）
+    input  wire [10:0] duty_l,          // 实际下发占空比左（DL=）
+    input  wire [10:0] duty_r,          // 实际下发占空比右（DR=）
     input  wire        obstacle,   // 障碍标志
     input  wire [2:0]  state,      // 状态机状态（M=）
     input  wire [31:0] enc_l,      // 左编码器累计（二补码）
@@ -45,7 +57,7 @@ module uart_report #(
 );
 
     localparam integer MSG_LEN  = 35;   // 第一行：D=/T=/P=/O=/M=
-    localparam integer MSG2_LEN = 39;   // 第二行：L=/R=/VL=/VR=
+    localparam integer MSG2_LEN = 71;   // 第二行：L=/R=/VL=/VR=/X=/C=/DL=/DR=
 
     // ------------------------------------------------------------------
     // 无符号除以 10（移位-减法，10 次迭代，纯组合）
@@ -105,7 +117,10 @@ module uart_report #(
 
     reg  [9:0]  v10;         // 距离（0..999）
     reg         bad;         // 距离无效
-    reg  [7:0]  ln;          // 锁存的循迹位图
+    reg  [7:0]  ln;          // 锁存的循迹位图（已极性统一）
+    reg  [7:0]  rx_raw;      // 锁存的循迹原始电平
+    reg  signed [10:0] cr;   // 锁存的 PID 修正量
+    reg  [10:0] dl, dr;      // 锁存的实际占空比
     reg  signed [4:0] pz;    // 锁存的位置
     reg         obst;        // 锁存的障碍标志
     reg  [2:0]  st;          // 锁存的状态
@@ -126,6 +141,13 @@ module uart_report #(
     wire [7:0]  p_t   = div10u({5'd0, p_mag});
     wire [7:0]  p_tt  = p_t;
     wire [7:0]  p_uu  = {3'd0, p_mag} - p_t * 8'd10;
+
+    // 修正量十进制（绝对值 0..600 → 3 位），带符号
+    wire [10:0] c_mag = cr[10] ? (~cr + 11'd1) : cr;
+    wire [7:0]  c_t   = div10u(c_mag[9:0]);              // |corr|/10
+    wire [7:0]  c_h   = div10u({2'b00, c_t});            // |corr|/100
+    wire [7:0]  c_tt  = c_t - c_h * 8'd10;
+    wire [7:0]  c_uu  = c_mag - c_t * 8'd10;             // |corr|<=600，个位
 
     // 状态两位十进制（0..99，当前只用到 0..4）
     wire [7:0]  m_t   = div10u({2'b00, 5'd0, st});
@@ -149,6 +171,10 @@ module uart_report #(
             v10      <= 10'd0;
             bad      <= 1'b1;
             ln       <= 8'h00;
+            rx_raw   <= 8'h00;
+            cr       <= 11'sd0;
+            dl       <= 11'd0;
+            dr       <= 11'd0;
             pz       <= 5'sd0;
             obst     <= 1'b0;
             st       <= 3'd0;
@@ -171,6 +197,10 @@ module uart_report #(
                 bad  <= bad_now;
                 v10  <= v_now;
                 ln   <= line;
+                rx_raw <= raw;
+                cr   <= corr;
+                dl   <= duty_l;
+                dr   <= duty_r;
                 pz   <= pos;
                 obst <= obstacle;
                 st   <= state;
@@ -261,7 +291,7 @@ module uart_report #(
     end
 
     // ------------------------------------------------------------------
-    // 第二行：L=00000123 R=00000123 VL=0005 VR=0005 CR LF
+    // 第二行：L=00000123 R=00000123 VL=0005 VR=0005 X=11111111 C=+000 DL=258 DR=258 CR LF
     //   里程是 32 位二补码的十六进制（8 位），速度是 16 位的（4 位）。
     //   负值直接显示补码：要把 L=FFFFFFF0 读成 -16，主机侧按有符号解析即可。
     // ------------------------------------------------------------------
@@ -303,8 +333,43 @@ module uart_report #(
         msg2[34] = hexd(sr[11:8]);
         msg2[35] = hexd(sr[7:4]);
         msg2[36] = hexd(sr[3:0]);
-        msg2[37] = 8'h0D;
-        msg2[38] = 8'h0A;
+        // ---- X= 原始电平（bit7..bit0 = X8..X1）----
+        msg2[37] = 8'h20;                                  // ' '
+        msg2[38] = 8'h58;                                  // 'X'
+        msg2[39] = 8'h3D;
+        msg2[40] = rx_raw[7] ? 8'h31 : 8'h30;
+        msg2[41] = rx_raw[6] ? 8'h31 : 8'h30;
+        msg2[42] = rx_raw[5] ? 8'h31 : 8'h30;
+        msg2[43] = rx_raw[4] ? 8'h31 : 8'h30;
+        msg2[44] = rx_raw[3] ? 8'h31 : 8'h30;
+        msg2[45] = rx_raw[2] ? 8'h31 : 8'h30;
+        msg2[46] = rx_raw[1] ? 8'h31 : 8'h30;
+        msg2[47] = rx_raw[0] ? 8'h31 : 8'h30;
+        // ---- C= 修正量，带符号三位十进制 ----
+        msg2[48] = 8'h20;
+        msg2[49] = 8'h43;                                  // 'C'
+        msg2[50] = 8'h3D;
+        msg2[51] = cr[10] ? 8'h2D : 8'h2B;                 // '-' / '+'
+        msg2[52] = 8'h30 + c_h[3:0];
+        msg2[53] = 8'h30 + c_tt[3:0];
+        msg2[54] = 8'h30 + c_uu[3:0];
+        // ---- DL= / DR= 实际占空比，3 位十六进制 ----
+        msg2[55] = 8'h20;
+        msg2[56] = 8'h44;                                  // 'D'
+        msg2[57] = 8'h4C;                                  // 'L'
+        msg2[58] = 8'h3D;
+        msg2[59] = hexd({2'b00, dl[10:8]});
+        msg2[60] = hexd(dl[7:4]);
+        msg2[61] = hexd(dl[3:0]);
+        msg2[62] = 8'h20;
+        msg2[63] = 8'h44;                                  // 'D'
+        msg2[64] = 8'h52;                                  // 'R'
+        msg2[65] = 8'h3D;
+        msg2[66] = hexd({2'b00, dr[10:8]});
+        msg2[67] = hexd(dr[7:4]);
+        msg2[68] = hexd(dr[3:0]);
+        msg2[69] = 8'h0D;
+        msg2[70] = 8'h0A;
     end
 
 endmodule

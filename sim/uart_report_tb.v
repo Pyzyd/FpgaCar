@@ -5,7 +5,8 @@
 // -----------------------------------------------------------------------------
 // 每个 dist_valid 打两行，共 35 + 39 = 74 字节：
 //   第 1 行 D=123cm T=00011000 P=+02 O=0 M=01 CR LF
-//   第 2 行 L=0000007B R=FFFFFFF0 VL=0005 VR=FFF0 CR LF
+//   第 2 行 L=0000007B R=FFFFFFF0 VL=0005 VR=FFF0 X=11100111 C=+036 DL=27C DR=234 CR LF
+//   第 2 行共 71 字节：L=/R=(21) VL=/VR=(15) X=(10) C=(6) DL=(6) DR=(6) + 5 空格 + CR LF
 // 验收：
 //   1) 123cm / 中间两路 / pos=+2 / 无障碍 / RUN / 里程 123 与 -16
 //   2) 无效距离 --- / 两端各一路 / pos=-7 / 有障碍 / STOP / 里程 0
@@ -21,7 +22,7 @@ module uart_report_tb;
 
     localparam real    BIT_NS   = 1.0e9 / 115200.0;
     localparam integer MSG_LEN  = 35;
-    localparam integer MSG2_LEN = 39;
+    localparam integer MSG2_LEN = 71;
 
     reg         clk = 1'b0;
     reg         rst_n = 1'b0;
@@ -30,7 +31,11 @@ module uart_report_tb;
     reg  [15:0] dist_cm = 16'd0;
     reg         dist_valid = 1'b0;
     reg  [7:0]  line = 8'h00;
-    reg  signed [4:0] pos = 5'sd0;
+    reg  [7:0]  raw  = 8'h00;
+    reg  signed [4:0]  pos    = 5'sd0;
+    reg  signed [10:0] corr   = 11'sd0;
+    reg  [10:0]        duty_l = 11'd0;
+    reg  [10:0]        duty_r = 11'd0;
     reg         obstacle = 1'b0;
     reg  [2:0]  state = 3'd0;
     reg  [31:0] enc_l = 32'd0;
@@ -42,14 +47,16 @@ module uart_report_tb;
     uart_report #(.CLK_FREQ(24_000_000), .BAUD(115_200), .REPORT_EN(1)) u_dut (
         .clk(clk), .rst_n(rst_n),
         .dist_cm(dist_cm), .dist_valid(dist_valid),
-        .line(line), .pos(pos), .obstacle(obstacle),
+        .line(line), .raw(raw), .pos(pos),
+        .corr(corr), .duty_l(duty_l), .duty_r(duty_r),
+        .obstacle(obstacle),
         .state(state), .enc_l(enc_l), .enc_r(enc_r),
         .spd_l(spd_l), .spd_r(spd_r),
         .tx(tx)
     );
 
     integer fails = 0;
-    reg [7:0] exp [0:63];       // 模块级：set_exp 写、check_line 读，只此一份
+    reg [7:0] exp [0:95];       // 模块级：set_exp 写、check_line 读，只此一份
 
     task rx_byte (output [7:0] b);
         integer k;
@@ -65,7 +72,7 @@ module uart_report_tb;
     endtask
 
     // 期望串正文（不含 CR LF）摊进 exp[0..n-1]，再在末尾补 CR LF
-    task set_exp (input integer n, input [8*64-1:0] s);
+    task set_exp (input integer n, input [8*96-1:0] s);
         integer i;
         begin
             for (i = 0; i < n; i = i + 1)
@@ -105,62 +112,67 @@ module uart_report_tb;
 
         // ---------- 用例 1：正常一帧 ----------
         dist_cm = 16'd123; line = 8'b00011000; pos = 5'sd2;
+        raw = 8'b00011000; corr = 11'sd36; duty_l = 11'd636; duty_r = 11'd564;
         obstacle = 1'b0; state = 3'd1;
         enc_l = 32'd123; enc_r = 32'hFFFFFFF0;
         spd_l = 16'sd5;  spd_r = -16'sd16;
         fire;
         set_exp(MSG_LEN-2, "D=123cm T=00011000 P=+02 O=0 M=01");
         check_line(MSG_LEN, "L1 ");
-        set_exp(MSG2_LEN-2, "L=0000007B R=FFFFFFF0 VL=0005 VR=FFF0");
+        set_exp(MSG2_LEN-2, "L=0000007B R=FFFFFFF0 VL=0005 VR=FFF0 X=00011000 C=+036 DL=27C DR=234");
         check_line(MSG2_LEN, "L2 ");
         #5000;
 
         // ---------- 用例 2：无效距离 + 障碍 + 永久停车 ----------
         dist_cm = 16'hFFFF; line = 8'b10000001; pos = -5'sd7;
+        raw = 8'b01111110; corr = -11'sd600; duty_l = 11'd0; duty_r = 11'd0;
         obstacle = 1'b1; state = 3'd4;
         enc_l = 32'd0; enc_r = 32'd0;
         spd_l = 16'sd0; spd_r = 16'sd0;
         fire;
         set_exp(MSG_LEN-2, "D=---cm T=10000001 P=-07 O=1 M=04");
         check_line(MSG_LEN, "L1b");
-        set_exp(MSG2_LEN-2, "L=00000000 R=00000000 VL=0000 VR=0000");
+        set_exp(MSG2_LEN-2, "L=00000000 R=00000000 VL=0000 VR=0000 X=01111110 C=-600 DL=000 DR=000");
         check_line(MSG2_LEN, "L2b");
         #5000;
 
         // ---------- 用例 3：IDLE + 全丢线 + 负里程与负速度 ----------
         dist_cm = 16'd7; line = 8'h00; pos = 5'sd0;
+        raw = 8'hFF; corr = 11'sd0; duty_l = 11'd1200; duty_r = 11'd1200;
         obstacle = 1'b0; state = 3'd0;
         enc_l = 32'h0000ABCD; enc_r = 32'hFFFFFFFF;
         spd_l = 16'sd1200;    spd_r = -16'sd1;
         fire;
         set_exp(MSG_LEN-2, "D=007cm T=00000000 P=+00 O=0 M=00");
         check_line(MSG_LEN, "L1c");
-        set_exp(MSG2_LEN-2, "L=0000ABCD R=FFFFFFFF VL=04B0 VR=FFFF");
+        set_exp(MSG2_LEN-2, "L=0000ABCD R=FFFFFFFF VL=04B0 VR=FFFF X=11111111 C=+000 DL=4B0 DR=4B0");
         check_line(MSG2_LEN, "L2c");
         #5000;
 
         // ---------- 用例 4：两位位置与三位距离的边界 ----------
         // 注意 5 位有符号的范围是 -16..+15，写 5'sd16 会被当成 -16
         dist_cm = 16'd999; line = 8'hFF; pos = 5'sd15;
+        raw = 8'h00; corr = 11'sd600; duty_l = 11'd1200; duty_r = 11'd0;
         obstacle = 1'b0; state = 3'd3;
         enc_l = 32'h7FFFFFFF; enc_r = 32'h80000000;
         spd_l = 16'sd32767;   spd_r = -16'sd32768;
         fire;
         set_exp(MSG_LEN-2, "D=999cm T=11111111 P=+15 O=0 M=03");
         check_line(MSG_LEN, "L1d");
-        set_exp(MSG2_LEN-2, "L=7FFFFFFF R=80000000 VL=7FFF VR=8000");
+        set_exp(MSG2_LEN-2, "L=7FFFFFFF R=80000000 VL=7FFF VR=8000 X=00000000 C=+600 DL=4B0 DR=000");
         check_line(MSG2_LEN, "L2d");
         #5000;
 
         // ---------- 用例 5：pos=-16 与 "50cm" 前导零 ----------
         dist_cm = 16'd50; line = 8'b00000001; pos = -5'sd16;
+        raw = 8'b11111110; corr = -11'sd16; duty_l = 11'd584; duty_r = 11'd616;
         obstacle = 1'b0; state = 3'd2;
         enc_l = 32'd0; enc_r = 32'd0;
         spd_l = 16'sd0; spd_r = 16'sd0;
         fire;
         set_exp(MSG_LEN-2, "D=050cm T=00000001 P=-16 O=0 M=02");
         check_line(MSG_LEN, "L1e");
-        set_exp(MSG2_LEN-2, "L=00000000 R=00000000 VL=0000 VR=0000");
+        set_exp(MSG2_LEN-2, "L=00000000 R=00000000 VL=0000 VR=0000 X=11111110 C=-016 DL=248 DR=268");
         check_line(MSG2_LEN, "L2e");
 
         if (fails == 0) $display("INFO: uart_report_tb ALL PASS");

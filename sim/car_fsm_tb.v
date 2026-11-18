@@ -7,6 +7,7 @@
 //   4) 重新压线 → 回 RUN
 //   5) 障碍 → STOP 且 en=0；障碍消失 → 自动恢复 RUN
 //   6) 找线超时 → STOP 且永久保持（obstacle 清零也不恢复）
+//   7) SEARCH_FAIL_TO_IDLE=1 的实例：同一激励下回 IDLE，放回线上能重新起跑
 //
 // 注意：每个 check 的字符串不能超过 31 字符（Verilog 任务端口位宽会截断，只留尾部）。
 // =============================================================================
@@ -40,6 +41,7 @@ module car_fsm_tb;
         .LOST_HOLD_MS (1),
         .SEARCH_MS    (10),                    // 拉长到 10 ms，留出观察 SEARCH 的时间窗
         .SEARCH_DUTY  (500),
+        .SEARCH_FAIL_TO_IDLE (0),              // 比赛行为：找线超时永久停车
         .DIR_DEAD_MS  (1)
     ) u_dut (
         .clk (clk), .rst_n (rst_n),
@@ -47,6 +49,29 @@ module car_fsm_tb;
         .pid_l (pid_l), .pid_r (pid_r),
         .en (en), .dir_l (dir_l), .dir_r (dir_r),
         .duty_l (duty_l), .duty_r (duty_r), .state (state)
+    );
+
+    // 第二个实例：桌面反复测试用的行为 —— 找线超时回 IDLE 而不是永久停车。
+    // 与 u_dut 共用同一组激励，只有这一个参数不同，便于逐拍对照两种收敛方式。
+    wire              en2, dir_l2, dir_r2;
+    wire [10:0]       duty_l2, duty_r2;
+    wire [2:0]        state2;
+
+    car_fsm #(
+        .CLK_FREQ     (24_000_000),
+        .START_MS     (1),
+        .START_REQUIRE_LINE (1),
+        .LOST_HOLD_MS (1),
+        .SEARCH_MS    (10),
+        .SEARCH_DUTY  (500),
+        .SEARCH_FAIL_TO_IDLE (1),              // 桌面行为：找线超时回 IDLE，可重新起跑
+        .DIR_DEAD_MS  (1)
+    ) u_dut2 (
+        .clk (clk), .rst_n (rst_n),
+        .on_line (on_line), .lost (lost), .obstacle (obstacle), .pos (pos),
+        .pid_l (pid_l), .pid_r (pid_r),
+        .en (en2), .dir_l (dir_l2), .dir_r (dir_r2),
+        .duty_l (duty_l2), .duty_r (duty_r2), .state (state2)
     );
 
     task wait_us (input integer n);
@@ -128,6 +153,15 @@ module car_fsm_tb;
         obstacle = 1'b0; lost = 1'b1;
         wait_us(3000);
         chk(state == S_STOP && en === 1'b0, "final stop latched");
+
+        // ---- 7) 同一激励下 SEARCH_FAIL_TO_IDLE=1 的实例应回到 IDLE ----
+        chk(state2 == S_IDLE, "fail-to-idle: back to IDLE");
+        chk(en2 === 1'b0, "fail-to-idle: motor off in IDLE");
+        // 放回线上，应能重新起跑（不需要断电）
+        lost = 1'b0; on_line = 1'b1; pos = 5'sd0;
+        wait_us(3500);
+        chk(state2 == S_RUN, "fail-to-idle: restarts on line");
+        chk(state == S_STOP, "final-stop DUT stays stopped");
 
         if (fails == 0) $display("INFO: car_fsm_tb ALL PASS");
         else            $display("INFO: car_fsm_tb %0d FAIL(S)", fails);

@@ -3,7 +3,7 @@
 FpgaCar emits two ASCII lines per HC-SR04 frame (every 60 ms):
 
     D=123cm T=00011000 P=+02 O=0 M=01          (35 bytes)
-    L=00000123 R=FFFFFFF0 VL=0005 VR=FFF0      (39 bytes)
+    L=00000123 R=FFFFFFF0 VL=0005 VR=FFF0 X=00011000 C=+036 DL=27C DR=234  (71 bytes)
 
   D   ultrasonic distance in cm, "---" when no echo / out of range
   T   track_line 8-channel bitmap, bit7..bit0 = track[7]..track[0], 1 = on tape
@@ -40,6 +40,9 @@ RE1 = re.compile(r"D=(-{3}|\d+)cm T=([01]{8}) P=([+-]\d+) O=(\d) M=(\d{2})")
 # 前面锚 \s，否则 "VR=FFF0" 里的 "R=" 会被当成里程 R=
 RE2 = re.compile(r"(?:^|\s)L=([0-9A-Fa-f]{8}) R=([0-9A-Fa-f]{8})"
                  r" VL=([0-9A-Fa-f]{4}) VR=([0-9A-Fa-f]{4})")
+# 循迹调试段：X= 原始电平、C= PID 修正量、DL/DR= 实际占空比（可缺省，兼容旧位流）
+RE3 = re.compile(r"(?:^|\s)X=([01]{8}) C=([+-]\d{3})"
+                 r" DL=([0-9A-Fa-f]{3}) DR=([0-9A-Fa-f]{3})")
 
 STATE_NAME = {0: "IDLE", 1: "RUN", 2: "LOST", 3: "SEARCH", 4: "STOP"}
 
@@ -109,11 +112,16 @@ def main():
             now = time.time()
             if t0 is None:
                 t0 = now
+            m3 = RE3.search(ln)
             rows.append((now - t0,
                          pending1.group(1), pending1.group(2), pending1.group(3),
                          int(pending1.group(4)), int(pending1.group(5)),
                          s32(m2.group(1)), s32(m2.group(2)),
-                         s16(m2.group(3)), s16(m2.group(4))))
+                         s16(m2.group(3)), s16(m2.group(4)),
+                         m3.group(1) if m3 else "",
+                         int(m3.group(2)) if m3 else 0,
+                         int(m3.group(3), 16) if m3 else 0,
+                         int(m3.group(4), 16) if m3 else 0))
             pending1 = None
 
     if not rows:
@@ -122,12 +130,14 @@ def main():
         return 4
 
     print("--- %d frames ---" % len(rows))
-    print("    t      D        T        P    O  M        L          R       VL    VR")
+    print("    t      D        T        P    O  M        L          R       VL    VR"
+          "     X         C     DL    DR")
     for r in rows[-12:]:
         print("  %5.2f  %-6s  %s  %+3s  %d  %s  %+9d  %+9d  %+5d %+5d"
+              "  %-8s  %+4d  %4d  %4d"
               % (r[0], r[1], r[2], r[3], r[4],
                  "%02d %-6s" % (r[5], STATE_NAME.get(r[5], "?")),
-                 r[6], r[7], r[8], r[9]))
+                 r[6], r[7], r[8], r[9], r[10] or "-", r[11], r[12], r[13]))
 
     print("--- summary ---")
     states = sorted({r[5] for r in rows})
@@ -157,9 +167,9 @@ def main():
         csv_path = os.path.join(DATA_DIR, csv_path)   # 只给文件名 -> 落到 data/
     if csv_path:
         with open(csv_path, "w", encoding="utf-8") as fp:
-            fp.write("t,D,T,P,O,M,L,R,VL,VR\n")
+            fp.write("t,D,T,P,O,M,L,R,VL,VR,X,C,DL,DR\n")
             for r in rows:
-                fp.write("%.3f,%s,%s,%s,%d,%d,%d,%d,%d,%d\n" % r)
+                fp.write("%.3f,%s,%s,%s,%d,%d,%d,%d,%d,%d,%s,%d,%d,%d\n" % r)
         print("CSV -> %s" % csv_path)
     return 0
 

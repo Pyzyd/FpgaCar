@@ -120,7 +120,9 @@ module FpgaCar (
     // K230 视觉链路：颜色事件的来源改由它提供（USE_CAMERA 才是 OV5640 那条路）。
     // 两者互斥地驱动同一组 cam_color/cam_color_evt 也可以，但没必要 ——
     // 赛场上 K230 是主方案，OV5640 只作退路，用一个开关明确二选一更不容易出错。
-    localparam USE_K230   = 1'b1;
+    // 2026-11-18 起临时关闭：K230 尚未接线，k230_off 恒 1 会让 OLED 右上角一直画叉号，
+    // 看起来像故障。只测循迹期间关掉；接回 K230 时改回 1'b1。
+    localparam USE_K230   = 1'b0;
 
     // ------------------------------------------------------------------
     // 复位同步化：异步有效、同步释放
@@ -252,6 +254,7 @@ module FpgaCar (
     // ACTIVE_HIGH=0：TCRT5000 + LM393 模块的常见极性（压黑线输出低）。
     // ------------------------------------------------------------------
     wire [7:0]  line_bits;
+    wire [7:0]  line_raw;      // 消抖后的原始电平（未按 ACTIVE_HIGH 取反）
     wire [3:0]  line_cnt;
     wire        line_on, line_lost;
     wire signed [4:0] line_pos;
@@ -266,6 +269,7 @@ module FpgaCar (
         .rst_n   (sys_rst_n),
         .track   (track),
         .line    (line_bits),
+        .raw     (line_raw),
         .cnt     (line_cnt),
         .on_line (line_on),
         .lost    (line_lost),
@@ -289,11 +293,19 @@ module FpgaCar (
     //   另一路保持断开即可（未接那路若误报，把对应端口改接 D3V3 拉到「无遮挡」）。
     localparam USE_IR = 1'b0;
 
+    // 【总开关】超声波避障参与障碍判定 —— 2026-11-18 起临时关闭，只测循迹。
+    //   1'b0 = hc_near 不参与 obstacle（O 恒 0，车不会因为前方 25 cm 内有墙被摁停），
+    //          但 u_ultra 仍然例化运行，D= / 屏上距离继续可读，方便对照。
+    //   1'b1 = 恢复超声波避障（原行为）。
+    //   为什么要关：桌面/室内测试时车头正前方常有墙或桌沿，25 cm 门限会频繁把
+    //   car_fsm 打进 S_STOP，循迹根本跑不起来。测完循迹要把这里改回 1'b1。
+    localparam USE_ULTRA = 1'b0;
+
     wire hc_near  = (dist_cm != 16'hFFFF) && (dist_cm <= OBSTACLE_CM);
     wire ir_l_det = ~ir_l;                      // NPN 低有效
     wire ir_r_det = ~ir_r;
     wire ir_det   = ir_l_det | ir_r_det;        // 原始判定，始终可观测（屏上四个标志格）
-    wire obstacle = hc_near | (USE_IR & ir_det);
+    wire obstacle = (USE_ULTRA ? hc_near : 1'b0) | (USE_IR & ir_det);
 
     // ------------------------------------------------------------------
     // 运动闭环：track_pid（位置 PID）+ car_fsm（状态机）
@@ -342,6 +354,9 @@ module FpgaCar (
         .LOST_HOLD_MS (300),
         .SEARCH_MS    (1500),
         .SEARCH_DUTY  (500),
+        // 1 = 找线超时回 IDLE（把车放回线上 2 s 就重新起跑），桌面反复调试用。
+        // 正式比赛改回 0：找线失败直接永久停车。
+        .SEARCH_FAIL_TO_IDLE (1),
         .DIR_DEAD_MS  (10),
         .TURN_MS      (700),
         .TURN_DUTY    (700)
@@ -628,7 +643,11 @@ module FpgaCar (
         .dist_cm    (dist_cm),
         .dist_valid (dist_valid),
         .line       (line_bits),
+        .raw        (line_raw),
         .pos        (line_pos),
+        .corr       (pid_corr),
+        .duty_l     (ctrl_duty_l),
+        .duty_r     (ctrl_duty_r),
         .obstacle   (obstacle),
         .state      (car_state),
         .enc_l      (enc_l_pos),

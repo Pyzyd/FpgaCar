@@ -33,6 +33,7 @@ module track_line #(
     input  wire        rst_n,      // 低有效（已同步化）
     input  wire [7:0]  track,      // 原始八路
     output reg  [7:0]  line,       // 极性统一后：1 = 该探头压线
+    output wire [7:0]  raw,        // 消抖后的原始电平（调试：判断 ACTIVE_HIGH 设反没设反）
     output reg  [3:0]  cnt,        // 压线探头个数 0~8
     output reg         on_line,    // cnt > 0
     output reg         lost,       // cnt == 0（全丢线：该减速/找线）
@@ -92,6 +93,11 @@ module track_line #(
     always @(*) begin
         line = ACTIVE_HIGH ? trk_stable : ~trk_stable;
     end
+
+    // 原始电平直接送出去：串口 X= 字段显示它。
+    // 没有这个字段就只能看 line（已经过 ACTIVE_HIGH 取反），
+    // 极性设反时看到的是"全压线"，与"模块真在报全黑"无法区分。
+    assign raw = trk_stable;
 
     // 权重：i=0..7 -> -7,-5,-3,-1,+1,+3,+5,+7
     // 左边(0..3)幅值 7,5,3,1；右边(4..7)幅值 1,3,5,7

@@ -22,6 +22,7 @@ module track_line_tb;
 
     reg  [7:0] track = 8'hFF;
     wire [7:0] line;
+    wire [7:0] raw;
     wire [3:0] cnt;
     wire       on_line, lost;
     wire signed [4:0] pos;
@@ -30,7 +31,7 @@ module track_line_tb;
         .CLK_FREQ(24_000_000), .SAMPLE_KHZ(1_000), .DEBOUNCE_N(4), .ACTIVE_HIGH(0)
     ) u_dut (
         .clk(clk), .rst_n(rst_n), .track(track),
-        .line(line), .cnt(cnt), .on_line(on_line), .lost(lost), .pos(pos)
+        .line(line), .raw(raw), .cnt(cnt), .on_line(on_line), .lost(lost), .pos(pos)
     );
 
     // 施加"线位置"(1=压线)，内部取反成原始电平

@@ -3,7 +3,7 @@
 FpgaCar top level emits two ASCII lines per HC-SR04 frame (every 60 ms):
 
     D=123cm T=00011000 P=+02 O=0 M=01          (35 bytes)
-    L=00000123 R=FFFFFFF0 VL=0005 VR=FFF0      (39 bytes)
+    L=00000123 R=FFFFFFF0 VL=0005 VR=FFF0 X=00011000 C=+036 DL=27C DR=234   (71 bytes)
 
   D   ultrasonic distance in cm, "---" when no echo / out of range
   T   track_line 8-channel bitmap, bit7..bit0 = track[7]..track[0], 1 = on tape
@@ -14,6 +14,18 @@ FpgaCar top level emits two ASCII lines per HC-SR04 frame (every 60 ms):
   L/R left/right encoder accumulated position, 8 hex digits, two's complement
   VL/VR left/right speed = net steps in the last 50 ms window, 4 hex digits,
         two's complement
+  X   track_line RAW debounced levels BEFORE the ACTIVE_HIGH inversion, same
+        bit order as T.  T tells you which channels "see tape" after polarity
+        is applied; if ACTIVE_HIGH is wrong T reads 11111111 and you cannot
+        tell that apart from "the module really sees black everywhere".
+        X is the mirror: compare X with T, they should be bitwise complements.
+  C   track_pid correction term, signed decimal. Positive = turn right.
+        Saturates at +/-BASE_DUTY (600). This is the number to watch while
+        tuning P_GAIN / D_GAIN; T and P cannot show you what the PID did.
+  DL/DR  left/right duty actually handed to the motors, 3 hex digits
+        (0..4B0 = 0..1200). DL = BASE + C and DR = BASE - C when the FSM is
+        passing the PID straight through; a mismatch means LOST-hold, SEARCH
+        or TURN has taken over the duty.
 
 Both of the last two groups are hex on purpose: a 32-bit signed value would
 need eight cascaded div10 stages in fabric, which costs far more than the
@@ -47,6 +59,13 @@ FIELDS2 = (
     ("R", re.compile(r"(?:^|\s)R=([0-9A-Fa-f]{8})")),
     ("VL", re.compile(r"(?:^|\s)VL=([0-9A-Fa-f]{4})")),
     ("VR", re.compile(r"(?:^|\s)VR=([0-9A-Fa-f]{4})")),
+)
+# 第二行的循迹调试段：X= 原始电平、C= PID 修正量（带符号十进制）、DL/DR= 实际占空比
+FIELDS3 = (
+    ("X",  re.compile(r"(?:^|\s)X=([01]{8})")),
+    ("C",  re.compile(r"(?:^|\s)C=([+-]\d{3})")),
+    ("DL", re.compile(r"(?:^|\s)DL=([0-9A-Fa-f]{3})")),
+    ("DR", re.compile(r"(?:^|\s)DR=([0-9A-Fa-f]{3})")),
 )
 
 
@@ -196,6 +215,44 @@ def main():
             vr = [s16(v) for v in f2["VR"]]
             print("  speed window  VL %d..%d  VR %d..%d  (每 50 ms 净步数)"
                   % (min(vl), max(vl), min(vr), max(vr)))
+        # ---- 循迹调试段：X= / C= / DL= / DR= ----
+        f3 = collect(line2, FIELDS3)
+        if f3.get("X") or f3.get("C"):
+            print("--- 循迹调试段 ---")
+            if f3.get("X"):
+                uniq = show_uniq("X", f3["X"])
+                print("        -> X 原始电平压线数 %s"
+                      % [sum(b == "0" for b in v) for v in uniq])
+            if f3.get("C"):
+                cs = [int(v) for v in f3["C"]]
+                print("  C= 修正量 %+d..%+d（限幅 ±600）  均值 %+.1f"
+                      % (min(cs), max(cs), sum(cs) / len(cs)))
+            if f3.get("DL") and f3.get("DR"):
+                dls = [int(v, 16) for v in f3["DL"]]
+                drs = [int(v, 16) for v in f3["DR"]]
+                print("  DL %d..%d   DR %d..%d  (BASE=600)"
+                      % (min(dls), max(dls), min(drs), max(drs)))
+                print("        -> 若某一侧恒为 0 或恒为 1200，说明状态机在接管（LOST/SEARCH/TURN）")
+            # X 与 T 应逐位互补：X = ~T（ACTIVE_HIGH=0 时）
+            pair = []
+            for ln in line2:
+                mx = re.search(r"T=([01]{8})", ln)
+                mxx = re.search(r"(?:^|\s)X=([01]{8})", ln)
+                if mx and mxx:
+                    pair.append((mx.group(1), mxx.group(1)))
+            if pair:
+                same = sum(1 for t, x in pair if t == x)
+                comp = sum(1 for t, x in pair if all((a == "1") != (b == "1")
+                                                    for a, b in zip(t, x)))
+                print("  X 与 T 关系：完全相同 %d 帧 / 逐位互补 %d 帧 / 共 %d 帧"
+                      % (same, comp, len(pair)))
+                if same == len(pair):
+                    print("        注意：T 与 X 完全相同说明 ACTIVE_HIGH 可能没生效，"
+                          "或模块输出恒为某一电平（先量 X1 对 GND）")
+                elif comp == len(pair):
+                    print("        正常：X 是消抖后的原始电平，T 已经过 ACTIVE_HIGH 取反")
+                else:
+                    print("        异常：T 与 X 既不完全相同也不互补，检查是否有些位在抖")
     else:
         print("--- no line 2 (L=/R=/VL=/VR=) yet; bitstream too old? ---")
 
