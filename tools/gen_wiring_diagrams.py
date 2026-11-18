@@ -87,9 +87,9 @@ PANEL_X0, PANEL_X1 = MARGIN, W - MARGIN
 MUX_ITEMS = [
     ("①", "X1~X8 是按车头方向从左到右排的，顺序不能反",
      "track[0] 对应 X1 = 最左探头。接反了车会朝反方向修线 —— 现象是「越修越偏」。"),
-    ("②", "先量一下 X 脚的高电平，再决定用 5V 还是 D3V3 供电",
-     "底板每个 User_IO 都过 TXS0108E，B 侧绝对最大只有 4.6 V。若模块 5 V 供电时 X 输出到 5 V，"
-     "直连就超规格；要么改用 D3V3（pin 29）供电，要么每根串电阻分压。空载量 X1 对 GND 的电压即可确认。"),
+    ("②", "先量 X 脚高电平：是 3.3 V 就直连，一根电阻都不用",
+     "底板每个 User_IO 都过 TXS0108E，B 侧绝对最大只有 4.6 V。本模块板上带 MCU、自带 3.3 V 稳压，"
+     "X 脚几乎肯定是 3.3 V —— 那样八路直连 pin 3~10 完全合规。只有量出 5 V 才需要每根串电阻分压。"),
     ("③", "压线极性用 track_line 的 ACTIVE_HIGH 统一，不要改接线",
      "默认 0 = 低电平压线（TCRT5000 + LM393 最常见）。上板时看串口 T= 位串：把黑线在探头下从左往右推，"
      "那个 1 应当从一端走到另一端；若「压黑线显示 0」就把 ACTIVE_HIGH 改成 1 再重编。"),
@@ -108,7 +108,7 @@ d = ImageDraw.Draw(img)
 d.text((MARGIN + 4, 42), "Yahboom YB-MUX04-1.0 八路循迹模块 · 引脚配置与接线",
        font=F(44, True), fill=C_TITLE)
 d.text((MARGIN + 4, 106),
-       "16 脚单排（丝印从左到右）· X1~X8 → track[7:0] · 5V/GND 供电 · TX/RX/SCL/SDA 本工程悬空不接",
+       "16 脚单排（丝印从左到右）· X1~X8 → track[7:0] · 5V 取自外部电源模块（不从 D5V0/pin 11 取）· TX/RX/SCL/SDA 悬空不接",
        font=F(20), fill=C_SUB)
 
 BAR_Y0, BAR_Y1 = 214, 298
@@ -131,8 +131,8 @@ for i in range(8):
     net[4 + i] = "track[%d]" % i
     io[4 + i] = "IO%d" % (2 + i)
     pin[4 + i] = "pin %d" % (3 + i)
-net[0], pin[0] = "D5V0", "pin 11"
-net[1], pin[1] = "GND", "pin 12"
+net[0], pin[0] = "5V", "电源模块"
+net[1], pin[1] = "GND", "面包板"
 
 d.rounded_rectangle((MARGIN, BAR_Y0, W - MARGIN, BAR_Y1), radius=10,
                     fill="#111111", outline="#000000", width=2)
