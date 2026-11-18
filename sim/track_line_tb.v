@@ -31,8 +31,19 @@ module track_line_tb;
     wire signed [4:0] pos;
     wire       wide;
 
+    // 毛刺监视：记录 line 的每一次变化，用例 6 用来判断毛刺有没有漏过去。
+    // （原来只在毛刺结束后看 line，中途翻过又翻回来也算 PASS，属假通过。）
+    integer line_changes = 0;
+    reg [7:0] line_prev = 8'hxx;
+    always @(posedge clk) if (rst_n) begin
+        if (line !== line_prev) begin
+            if (line_prev !== 8'hxx) line_changes = line_changes + 1;
+            line_prev = line;
+        end
+    end
+
     track_line #(
-        .CLK_FREQ(24_000_000), .SAMPLE_KHZ(1_000), .DEBOUNCE_N(4), .ACTIVE_HIGH(0)
+        .CLK_FREQ(24_000_000), .SAMPLE_KHZ(1), .DEBOUNCE_N(4), .ACTIVE_HIGH(0)
     ) u_dut (
         .clk(clk), .rst_n(rst_n), .track(track),
         .line(line), .raw(raw), .cnt(cnt), .on_line(on_line), .lost(lost),
@@ -46,7 +57,7 @@ module track_line_tb;
     wire signed [4:0] pos2;
 
     track_line #(
-        .CLK_FREQ(24_000_000), .SAMPLE_KHZ(1_000), .DEBOUNCE_N(4), .ACTIVE_HIGH(0),
+        .CLK_FREQ(24_000_000), .SAMPLE_KHZ(1), .DEBOUNCE_N(4), .ACTIVE_HIGH(0),
         .WIDE_CNT_TH(5'd5), .WIDE_MS(1000)
     ) u_dut2 (
         .clk(clk), .rst_n(rst_n), .track(track),
@@ -61,7 +72,7 @@ module track_line_tb;
     wire signed [4:0] pos3;
 
     track_line #(
-        .CLK_FREQ(24_000_000), .SAMPLE_KHZ(1_000), .DEBOUNCE_N(4), .ACTIVE_HIGH(0),
+        .CLK_FREQ(24_000_000), .SAMPLE_KHZ(1), .DEBOUNCE_N(4), .ACTIVE_HIGH(0),
         .WIDE_CNT_TH(5'd5), .WIDE_MS(3)
     ) u_dut3 (
         .clk(clk), .rst_n(rst_n), .track(track),
@@ -125,21 +136,26 @@ module track_line_tb;
         // 6) 毛刺：只在两个采样点之间抖一下，不应改变 line
         set_line(8'b0001_1000);
         #7_000_000;
+        line_changes = 0;            // 清计数，只看这次毛刺期间的翻转
         set_line(8'b1111_1111);      // 假的全压线
-        #800_000;                    // 0.8 ms：短于 4 次采样所需
+        #800_000;                    // 0.8 ms：短于 4 次采样所需（1 ms x 4）
         set_line(8'b0001_1000);
         #7_000_000;
+        // 两个条件都要过：最终值没变，且中途一次都没翻（否则就是漏过去了）
         if (line !== 8'b0001_1000)
             $display("FAIL: glitch leaked through, line=%b", line);
+        else if (line_changes != 0)
+            $display("FAIL: glitch flipped line %0d times (should be 0)", line_changes);
         else
-            $display("PASS: short glitch filtered, line=%b", line);
+            $display("PASS: short glitch filtered, line=%b changes=%0d", line, line_changes);
 
         // 7) 宽黑（影子）不采信：先把 pos 打到 +7，再八路全压
         set_line(8'b1000_0000);
         #7_000_000;
         if (pos2 !== 5'sd7) $display("FAIL: wide pre pos2=%0d (expect +7)", pos2);
         set_line(8'b1111_1111);          // 影子盖住整排
-        #7_000_000;
+        // 消抖节拍 1 ms x 4 次 = 4 ms 才认账，再加 3 ms 宽黑超时，留余量等 10 ms
+        #10_000_000;
         if (wide2 !== 1'b1)
             $display("FAIL: wide flag not set (wide2=%b cnt2=%0d)", wide2, cnt2);
         else if (lost2 !== 1'b0)

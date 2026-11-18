@@ -262,7 +262,7 @@ module FpgaCar (
 
     track_line #(
         .CLK_FREQ    (24_000_000),
-        .SAMPLE_KHZ  (1_000),
+        .SAMPLE_KHZ  (1),          // 1 kHz = 1 ms 消抖节拍
         .DEBOUNCE_N  (4),
         .ACTIVE_HIGH (0)
     ) u_track (

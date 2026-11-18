@@ -18,7 +18,7 @@
 //   用"加权平均"而不是"最中间那个探头"：线宽 1~3 个探头时输出连续，PID 不会阶梯跳变。
 //   归一化用倒数查表（1024/n 再右移 10 位），不推断除法器。
 //
-// 【消抖】1 ms 采样一次，连续 4 次一致才认账。红外探头在黑白交界处会抖，
+// 【消抖】1 ms 采样一次（SAMPLE_KHZ=1），连续 4 次一致才认账。红外探头在黑白交界处会抖，
 // 不消抖会让 PID 微分项炸掉。
 //
 // 【宽黑兜底 / 影子防护】影子盖住整排探头时，八路会一起判"压线"。此时
@@ -36,7 +36,7 @@
 
 module track_line #(
     parameter integer CLK_FREQ    = 24_000_000,
-    parameter integer SAMPLE_KHZ  = 1_000,     // 采样率（消抖节拍）
+    parameter integer SAMPLE_KHZ  = 1,         // 消抖采样率，单位 kHz（1 = 1 ms 一次）
     parameter integer DEBOUNCE_N  = 4,         // 连续一致次数
     parameter         ACTIVE_HIGH = 0,         // 1=高电平压线，0=低电平压线
     parameter [4:0]   WIDE_CNT_TH = 5'd5,      // 压线数 >= 此值判"宽黑"（0=关闭）
@@ -57,6 +57,10 @@ module track_line #(
     // ------------------------------------------------------------------
     // 采样节拍
     // ------------------------------------------------------------------
+    // tick 周期 = 1/SAMPLE_KHZ 毫秒。SAMPLE_KHZ=1 时 24000 个时钟 = 1 ms。
+    // 【2026-11-18 修】原默认 1_000 被读成 1000 kHz = 1 MHz，节拍只有 1 us，
+    // 消抖实际只能滤掉 4 us 的毛刺，等于没做。宽黑计时因为 WIDE_TICKS 与
+    // tick 共用同一个 SAMPLE_KHZ，两处误差互相抵消才碰巧是对的。
     localparam integer TICK_RAW = CLK_FREQ / (SAMPLE_KHZ * 1000);
     localparam integer TICK     = (TICK_RAW < 1) ? 1 : TICK_RAW;   // 24 MHz/1 kHz = 24000
 
@@ -156,7 +160,7 @@ module track_line #(
     // WIDE_CNT_TH=0 时取 9（cnt 最大 8，条件永不成立）→ 功能关闭。
     localparam [4:0] WIDE_TH = (WIDE_CNT_TH == 5'd0) ? 5'd9 : WIDE_CNT_TH;
 
-    // tick 周期 = CLK_FREQ/(SAMPLE_KHZ*1000)，SAMPLE_KHZ=1000 时是 1 us，
+    // tick 周期 = CLK_FREQ/(SAMPLE_KHZ*1000)，SAMPLE_KHZ=1 时是 1 ms，
     // 所以"毫秒数"必须换成 tick 数，不能拿 tick 直接当 ms 用。
     localparam integer WIDE_TICKS = (WIDE_MS <= 0) ? 1 : (WIDE_MS * SAMPLE_KHZ);
 

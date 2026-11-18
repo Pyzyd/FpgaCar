@@ -2309,7 +2309,9 @@ map 699 s / pnr / pgm 全 PASS，`outflow/FpgaCar.bit` = **1840716 B**（比上�
 - 宽黑超过 `WIDE_MS`：`wide_lost` 置位 → `lost = 1`、`on_line = 0`、`pos = 0` → 正常进入丢线流程（`S_LOST` → `S_SEARCH`）。
 - 恢复正常压线数：`wide_tmr` 清零，立即恢复。
 
-**踩坑记录（重要）**：`wide_tmr` 第一版直接每个 `clk` 加一，`WIDE_MS=200` 实际只有 8.3 us，等于兜底完全失效。第二版加了 `tick` 门控，但 `track_line` 的采样节拍是 `CLK_FREQ/(SAMPLE_KHZ*1000)` = 24 个时钟 = **1 us 而不是 1 ms**（名字里的 `SAMPLE_KHZ=1000` 是 1000 kHz 而不是 1000 Hz），所以仍然是微秒量级。最终用 `localparam integer WIDE_TICKS = WIDE_MS * SAMPLE_KHZ;` 换算成 tick 数，并把计数器加宽到 24 位。
+**踩坑记录（重要）**：`wide_tmr` 第一版直接每个 `clk` 加一，`WIDE_MS=200` 实际只有 8.3 us，等于兜底完全失效。第二版加了 `tick` 门控，但当时的 tick 周期是 1 us 而不是 1 ms（`SAMPLE_KHZ` 名不副实，详见 §3.29），所以仍然差了三个数量级。最终用 `localparam integer WIDE_TICKS = WIDE_MS * SAMPLE_KHZ;` 换算成 tick 数，并把计数器加宽到 24 位。
+
+> 注：`WIDE_TICKS = WIDE_MS * SAMPLE_KHZ` 这个写法在 §3.29 修正 `SAMPLE_KHZ` 之后依然成立 —— tick 周期与乘数用的是同一个参数，误差天然抵消。宽黑计时从一开始就是对的，错的是消抖。
 
 ### 3.28.2 避障三段：后退 → 原地转身 → 低速试探
 
@@ -2343,6 +2345,50 @@ map 699 s / pnr / pgm 全 PASS，`outflow/FpgaCar.bit` = **1840716 B**（比上�
 
 `bash tools/run_regression.sh` 全量 **20 个 tb 全绿（74 s）**；单项 `track_line_tb` PASS=8、`car_fsm_tb` PASS=44 ALLPASS=1、`uart_report_tb` ALLPASS=1。
 
+---
+
+## 3.29 `SAMPLE_KHZ` 单位错：消抖一直只滤 4 us（2026-11-18）
+
+### 3.29.1 现象与发现过程
+
+读 `docs/` 时发现文档写「消抖采样节拍 1 ms、连续 4 次」：`src/track_line.v:64` 是 `localparam integer TICK_RAW = CLK_FREQ / (SAMPLE_KHZ * 1000);`，而 `:39` 的默认值是 `SAMPLE_KHZ = 1_000`。按名字读是 1000 kHz = 1 MHz，代进去就是 24 个时钟 = 1 us。
+
+写临时探针台实测（`.scratch/probe_glitch.v` / `.scratch/probe_wide.v`，未纳入回归）：
+
+| 量 | 修前实测 | 设计意图 |
+|---|---|---|
+| 消抖延迟（4 次采样） | 4.854 us | 4 ms |
+| 0.8 ms 毛刺是否被滤掉 | 未滤掉（line 翻转 1 次） | 应被滤掉 |
+| `WIDE_MS=200` 实际时长 | 200.012 ms | 200 ms（对） |
+
+结论：宽黑计时是对的，**消抖形同虚设**。原因是 tick 周期与 `WIDE_TICKS` 的乘数共用同一个 `SAMPLE_KHZ`，两处误差互相抵消；消抖没有这种抵消，所以差了 1000 倍。
+
+### 3.29.2 为什么测试台没抓到（值得记的教训）
+
+`sim/track_line_tb.v` 用例 6「单拍毛刺」原本只在毛刺结束后检查 `line` 是否仍是原值。毛刺期间 line 翻转了一次又翻回来，结束时值相同 → 判 PASS。**这是典型的「只查终态、不查过程」假绿灯。**
+
+修法：加一个 `line_changes` 计数器，用 `always @(posedge clk)` 记录 `line` 的每一次变化，用例 6 除终态外还断言 `line_changes == 0`。
+
+反向验证：把测试台实例参数临时改回 `SAMPLE_KHZ(1_000)` → `FAIL: glitch flipped line 2 times (should be 0)`；改回 `1` → PASS。说明这条断言真的有效。
+
+### 3.29.3 修法
+
+- `src/track_line.v:39` 参数默认值 `1_000` → `1`，注释改为「消抖采样率，单位 kHz（1 = 1 ms 一次）」。
+- `src/FpgaCar.v:265` 例化处 `.SAMPLE_KHZ (1_000)` → `.SAMPLE_KHZ (1)`。
+- `sim/track_line_tb.v` 三个实例同步改 `1`；用例 8 的等待由 7 ms 加长到 10 ms（4 ms 消抖 + 3 ms 宽黑超时正好卡边界）。
+- tick 与 `WIDE_TICKS` 的计算式不变 —— 改完参数后 `WIDE_MS=200` 仍是 200 ms。
+
+### 3.29.4 回归
+
+`bash tools/run_regression.sh` **20 个 tb 全绿（74 s）**。修后探针：消抖延迟 **5.000 ms**（4 ms 消抖 + 1 ms 采样量化）、0.8 ms 毛刺 **FILTERED**、`WIDE_MS` 实测 205.007 ms。
+
+> 通用教训：本工程凡以 `MS` / `US` / `KHZ` 结尾的参数，写进 RTL 前必须把单位代数算一遍。§3.28 的 `wide_tmr` 与本节是同一类错误的两次发作。
+
+### 3.29.5 文档同步
+
+- `docs/模块接线说明.md` §2.2 参数表：`SAMPLE_KHZ` 由 `1000` 改 `1` 并标注单位；补 `WIDE_CNT_TH` / `WIDE_MS` 行；`DEBOUNCE_N` 补「1 ms × 4 = 4 ms」。
+- 同文件三处过期行号订正：`FpgaCar.v:357-361` → `394-397`、`:142` → `144`、`:630` → `658`、`track_line.v:93` → `108`。
+- `docs/上板使用说明.md`：`START_REQUIRE_LINE` 行号 `car_fsm.v:28` → `:33`、PID 例化 `FpgaCar.v:313` → `:320`；避障轮数由「2 轮」订正为 **3 轮**（`AVOID_TRIES=3`，`FpgaCar.v:374` 传入）。
 ## 4. 下一步（2026-11-10 按实际到货情况重排）
 
 ### 第 1 步：现在就能做的上板验证（不需要任何待买硬件）
