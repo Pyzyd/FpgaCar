@@ -348,7 +348,8 @@ module FpgaCar (
     wire       k_alive;                 // 2 s 内收到过合法消息
     wire [7:0] k_err;                   // 协议异常计数，OLED 诊断用
 
-    wire [2:0] dir_evt_mux = USE_K230 ? k_dir : 3'd0;
+    wire [2:0] dir_evt_mux = USE_K230 ? k_dir : 3'd0;   // K230 停用时恒 0，转向走 car_fsm 的拐角兜底
+    wire [1:0] turn_dir;                                // 最近一次转向方向（0 无 1 左 2 右），串口 S= 用
 
     car_fsm #(
         .CLK_FREQ     (24_000_000),
@@ -378,6 +379,8 @@ module FpgaCar (
         .on_line  (line_on),
         .lost     (line_lost),
         .obstacle (obstacle),
+        .wide     (line_wide),
+        .turn_dir (turn_dir),
         .pos      (line_pos),
         .dir_evt  (dir_evt_mux),    // 交通牌方向：K230 提供，停用时恒 0
         .pid_l    (pid_duty_l),
@@ -662,6 +665,7 @@ module FpgaCar (
         .duty_l     (ctrl_duty_l),
         .duty_r     (ctrl_duty_r),
         .wide       (line_wide),
+        .turn_dir   (turn_dir),
         .obstacle   (obstacle),
         .state      (car_state),
         .enc_l      (enc_l_pos),

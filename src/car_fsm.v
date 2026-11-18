@@ -46,7 +46,13 @@ module car_fsm #(
     parameter integer AVOID_TURN_DUTY = 600,// 原地转占空比
     parameter integer AVOID_PROBE_MS = 400, // 试探前进时长
     parameter integer AVOID_PROBE_DUTY = 450,// 试探前进占空比
-    parameter integer AVOID_TRIES = 3       // 最多连续尝试次数，用尽则停车等待
+    parameter integer AVOID_TRIES = 3,      // 最多连续尝试次数，用尽则停车等待
+    // ---- 拐角兜底（没有 K230 / 没识别到转向牌时怎么走）----
+    // 1 = 判到"直角/菱形拐角"而没有任何转向牌事件时，一律向左转；
+    // 0 = 退回旧行为（按最后看到线的方位转，线在左就左转、在右就右转）。
+    parameter integer DEFAULT_TURN_LEFT = 1,
+    // 宽黑（wide）出现后多久内仍算"拐角"。0 = 完全不做拐角判断。
+    parameter integer CORNER_WIDE_MS = 500
 ) (
     input  wire              clk,
     input  wire              rst_n,
@@ -54,6 +60,7 @@ module car_fsm #(
     input  wire              on_line,
     input  wire              lost,
     input  wire              obstacle,
+    input  wire              wide,          // 1 = 当前宽黑（拐角/影子），拐角兜底用
     input  wire signed [4:0] pos,
 input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直，单周期脉冲
     // 闭环输出
@@ -65,7 +72,8 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     output reg               dir_r,
     output reg  [10:0]       duty_l,
     output reg  [10:0]       duty_r,
-    output reg  [2:0]        state            // 观察用
+    output reg  [2:0]        state,           // 观察用
+    output reg  [1:0]        turn_dir         // 最近一次转向方向：0=无 1=左 2=右
 );
 
     // 5/6/7 三个编码正好空着，避障直接占用，M= 字段（两位十进制）无需扩位。
@@ -102,6 +110,13 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     reg [15:0] turn_cnt;            // 转向剩余 ms
     reg        turn_left;           // 1 = 左转（左轮后退、右轮前进）
     reg        turn_req;            // 已收到转向请求，等下一个 ms_tick 处理
+
+    // ---------------- 拐角兜底（没有 K230 时的默认左转）----------------
+    // 直角/菱形拐角在八路阵列上表现为"先宽黑、后全丢线"。宽黑出现后
+    // CORNER_WIDE_MS 内丢线，就认为这是拐角而不是普通跑偏，此时若没有
+    // 转向牌事件（K230 没装/没识别到），一律按 DEFAULT_TURN_LEFT 左转。
+    // 不做这个区分的话，正常右弯跑偏丢线也会被强制左转，车会往反方向找线。
+    reg  [15:0] corner_cnt;         // 距离上次宽黑还有多少 ms
 
     // ---------------- 方向死区 ----------------
     reg        dead;
@@ -142,6 +157,8 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
             turn_req    <= 1'b0;
             avoid_tries <= 4'd0;
             avoid_left  <= 1'b0;
+            corner_cnt  <= 16'd0;
+            turn_dir    <= 2'd0;
         end else begin
             // ---- 记住线的方位 ----
             if (on_line && !lost) begin
@@ -172,9 +189,11 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
             if (dir_evt == 3'd1) begin
                 turn_req  <= 1'b1;
                 turn_left <= 1'b1;
+                turn_dir  <= 2'd1;
             end else if (dir_evt == 3'd2) begin
                 turn_req  <= 1'b1;
                 turn_left <= 1'b0;
+                turn_dir  <= 2'd2;
             end else if (dir_evt == 3'd3) begin
                 turn_req  <= 1'b0;
                 turning   <= 1'b0;
@@ -183,6 +202,15 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
 
             // ---- 主状态机（1 ms 步进）----
             if (ms_tick) begin
+                // ---- 拐角记忆 ----
+                // 直角/菱形拐角会让八路同时压线（wide=1），随后整条线消失。
+                // 记住"刚过拐角"这段时间，找线时才能区分"拐角"和"普通跑偏"。
+                if (wide && CORNER_WIDE_MS > 0) begin
+                    corner_cnt <= CORNER_WIDE_MS[15:0];
+                end else if (corner_cnt != 16'd0) begin
+                    corner_cnt <= corner_cnt - 16'd1;
+                end
+
                 case (state)
                 S_IDLE: begin
                     duty_l <= 11'd0;
@@ -241,6 +269,8 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             turn_req <= 1'b0;
                             turning  <= 1'b1;
                             turn_cnt <= TURN_MS[15:0];
+                            turn_dir <= turn_left ? 2'd1 : 2'd2;
+                            corner_cnt <= 16'd0;
                         end else if (obstacle) begin
                             ms_cnt <= 16'd0;
                             avoid_tries <= 4'd0;
@@ -262,9 +292,31 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                         state  <= S_RUN;
                     end else if (ms_cnt >= LOST_HOLD_MS - 1) begin
                         ms_cnt <= 16'd0;
-                        // 线在右边 → 向右转：左轮前进、右轮后退
-                        dir_l_des <= ~last_pos_neg;
-                        dir_r_des <=  last_pos_neg;
+                        // ---- 找线方向决策（三级优先级）----
+                        // ① 有转向牌事件（K230 识别到左/右转）：完全按牌走。
+                        // ② 刚过拐角（宽黑后 CORNER_WIDE_MS 内）且没有牌：
+                        //    按 DEFAULT_TURN_LEFT 一律左转。这正是"没装 K230 /
+                        //    没识别到牌"时的兜底，菱形那两段各触发一次。
+                        // ③ 其余情况（普通跑偏丢线）：线在哪边就往哪边转，
+                        //    否则正常赛道上一旦偏出去就会朝反方向找，越找越远。
+                        if (turn_req) begin
+                            turn_req  <= 1'b0;
+                            dir_l_des <= turn_left ? 1'b0 : 1'b1;
+                            dir_r_des <= turn_left ? 1'b1 : 1'b0;
+                            turn_dir  <= turn_left ? 2'd1 : 2'd2;
+                            corner_cnt <= 16'd0;
+                        end else if ((DEFAULT_TURN_LEFT != 0) && (corner_cnt != 16'd0)) begin
+                            // 拐角兜底：默认左转（左轮后退、右轮前进）
+                            dir_l_des <= 1'b0;
+                            dir_r_des <= 1'b1;
+                            turn_dir  <= 2'd1;
+                            corner_cnt <= 16'd0;
+                        end else begin
+                            // 线在右边 → 向右转：左轮前进、右轮后退
+                            dir_l_des <= ~last_pos_neg;
+                            dir_r_des <=  last_pos_neg;
+                            turn_dir  <= last_pos_neg ? 2'd1 : 2'd2;
+                        end
                         duty_l    <= SEARCH_DUTY[10:0];
                         duty_r    <= SEARCH_DUTY[10:0];
                         state     <= S_SEARCH;

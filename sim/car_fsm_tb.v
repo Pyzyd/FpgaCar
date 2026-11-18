@@ -30,6 +30,7 @@ module car_fsm_tb;
     reg               on_line = 1'b0;      // 一开始不压线：先验安全锁，再手动压线起跑
     reg               lost = 1'b0;
     reg               obstacle = 1'b0;
+    reg               wide = 1'b0;         // 宽黑标志（默认 0：不触发拐角兜底）
     reg signed [4:0]  pos = 5'sd0;
     reg [10:0]        pid_l = 11'd700;
     reg [10:0]        pid_r = 11'd500;
@@ -38,6 +39,7 @@ module car_fsm_tb;
     wire              dir_l, dir_r;
     wire [10:0]       duty_l, duty_r;
     wire [2:0]        state;
+    wire [1:0]        td, td2, td3, td4;
 
     car_fsm #(
         .CLK_FREQ     (24_000_000),
@@ -52,9 +54,10 @@ module car_fsm_tb;
     ) u_dut (
         .clk (clk), .rst_n (rst_n),
         .on_line (on_line), .lost (lost), .obstacle (obstacle), .pos (pos),
+        .wide (wide),
         .pid_l (pid_l), .pid_r (pid_r),
         .en (en), .dir_l (dir_l), .dir_r (dir_r),
-        .duty_l (duty_l), .duty_r (duty_r), .state (state)
+        .duty_l (duty_l), .duty_r (duty_r), .state (state), .turn_dir (td)
     );
 
     // 第二个实例：桌面反复测试用的行为 —— 找线超时回 IDLE 而不是永久停车。
@@ -76,9 +79,10 @@ module car_fsm_tb;
     ) u_dut2 (
         .clk (clk), .rst_n (rst_n),
         .on_line (on_line), .lost (lost), .obstacle (obstacle), .pos (pos),
+        .wide (wide),
         .pid_l (pid_l), .pid_r (pid_r),
         .en (en2), .dir_l (dir_l2), .dir_r (dir_r2),
-        .duty_l (duty_l2), .duty_r (duty_r2), .state (state2)
+        .duty_l (duty_l2), .duty_r (duty_r2), .state (state2), .turn_dir (td2)
     );
 
     // 第三个实例：DIR_DEAD_MS 用真实值 3 ms（DEAD_CYC = 24000*3 = 72000 > 16 位上限）。
@@ -100,9 +104,10 @@ module car_fsm_tb;
     ) u_dut3 (
         .clk (clk), .rst_n (rst_n),
         .on_line (on_line), .lost (lost), .obstacle (obstacle), .pos (pos),
+        .wide (wide),
         .pid_l (pid_l), .pid_r (pid_r),
         .en (en3), .dir_l (dir_l3), .dir_r (dir_r3),
-        .duty_l (duty_l3), .duty_r (duty_r3), .state (state3)
+        .duty_l (duty_l3), .duty_r (duty_r3), .state (state3), .turn_dir (td3)
     );
 
     // 第四个实例：开避障三段。用自己的激励，避免被前面用例（永久停车等）干扰。
@@ -133,10 +138,55 @@ module car_fsm_tb;
     ) u_dut4 (
         .clk (clk), .rst_n (rst_n),
         .on_line (on4), .lost (lost4), .obstacle (obs4), .pos (5'sd0),
+        .wide (1'b0),
         .pid_l (11'd700), .pid_r (11'd500),
         .en (en4), .dir_l (dir_l4), .dir_r (dir_r4),
-        .duty_l (duty_l4), .duty_r (duty_r4), .state (state4)
+        .duty_l (duty_l4), .duty_r (duty_r4), .state (state4), .turn_dir (td4)
     );
+
+    // 第五个实例：拐角兜底。没有 K230 时应"宽黑后丢线 -> 一律左转"。
+    // 用自己的激励，且故意把 pos 设成 +3（线在右、正常跑偏会右转），
+    // 这样才能证明是兜底生效而不是碰巧走了原逻辑。
+    reg               on5 = 1'b0;
+    reg               lost5 = 1'b0;
+    reg               wide5 = 1'b0;
+    reg signed [4:0]  pos5 = 5'sd0;
+    wire              en5, dir_l5, dir_r5;
+    wire [10:0]       duty_l5, duty_r5;
+    wire [2:0]        state5;
+    wire [1:0]        td5;
+
+    car_fsm #(
+        .CLK_FREQ     (24_000_000),
+        .START_MS     (1),
+        .START_REQUIRE_LINE (1),
+        .LOST_HOLD_MS (1),
+        .SEARCH_MS    (10),
+        .SEARCH_DUTY  (500),
+        .SEARCH_FAIL_TO_IDLE (1),
+        .DIR_DEAD_MS  (3),                     // 死区 > 1 拍，断言前要等它走完
+        .AVOID_EN     (0),
+        .DEFAULT_TURN_LEFT (1),
+        .CORNER_WIDE_MS    (500)
+    ) u_dut5 (
+        .clk (clk), .rst_n (rst_n),
+        .on_line (on5), .lost (lost5), .obstacle (1'b0), .wide (wide5), .pos (pos5),
+        .pid_l (11'd700), .pid_r (11'd500),
+        .en (en5), .dir_l (dir_l5), .dir_r (dir_r5),
+        .duty_l (duty_l5), .duty_r (duty_r5), .state (state5), .turn_dir (td5)
+    );
+
+    task wait_state5 (input [2:0] want, input integer timeout_us);
+        integer n;
+        begin
+            n = 0;
+            while (state5 !== want && n < timeout_us) begin
+                wait_us(100);
+                n = n + 100;
+            end
+            #1;
+        end
+    endtask
 
     task wait_us (input integer n);
         begin
@@ -185,6 +235,17 @@ module car_fsm_tb;
                 n = n + 100;
             end
             wait_us(200);
+        end
+    endtask
+
+    task chk5 (input integer cond, input [8*28-1:0] msg);
+        begin
+            if (cond) $display("PASS: %0s", msg);
+            else begin
+                $display("FAIL: %0s | st5=%0d dir5=%b%b td5=%0d",
+                         msg, state5, dir_l5, dir_r5, td5);
+                fails = fails + 1;
+            end
         end
     endtask
 
@@ -340,6 +401,32 @@ module car_fsm_tb;
         wait_state4(S_RUN, 8000);
         wait_us(4000);
         chk4(state4 == S_RUN && en4 === 1'b1, "avoid: obstacle gone -> RUN");
+
+        // ---- 12) 拐角兜底：宽黑之后丢线、且没有转向牌 -> 一律左转 ----
+        // 故意把 pos 设成 +3（线在右侧）：若走原逻辑应右转，只有兜底生效才会左转。
+        lost5 = 1'b0; on5 = 1'b1; pos5 = 5'sd3;
+        wait_us(3000);
+        chk5(state5 == S_RUN, "corner: in RUN");
+        wide5 = 1'b1;                      // 宽黑 = 拐角特征
+        wait_us(2000);
+        wide5 = 1'b0;
+        lost5 = 1'b1; on5 = 1'b0;          // 拐角之后线消失
+        wait_state5(S_SEARCH, 20000);
+        wait_us(4000);                     // 等方向死区走完
+        chk5(state5 == S_SEARCH, "corner: in SEARCH");
+        chk5(dir_l5 === 1'b0 && dir_r5 === 1'b1, "corner: forced LEFT");
+        chk5(td5 == 2'd1, "corner: S=1 left");
+
+        // ---- 13) 普通跑偏（没有宽黑）仍按"线在哪边往哪边转" ----
+        // 这一条是兜底的边界：不能因为加了默认左转，就让正常右弯跑偏也左转。
+        lost5 = 1'b0; on5 = 1'b1; pos5 = 5'sd3;
+        wait_state5(S_RUN, 20000);
+        wait_us(3000);
+        lost5 = 1'b1; on5 = 1'b0;
+        wait_state5(S_SEARCH, 20000);
+        wait_us(4000);
+        chk5(dir_l5 === 1'b1 && dir_r5 === 1'b0, "normal: turn to line side");
+        chk5(td5 == 2'd2, "normal: S=2 right");
 
         if (fails == 0) $display("INFO: car_fsm_tb ALL PASS");
         else            $display("INFO: car_fsm_tb %0d FAIL(S)", fails);
