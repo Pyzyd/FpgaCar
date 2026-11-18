@@ -1247,6 +1247,18 @@ Configuration 类引脚，直接进 FPGA 的配置控制器，**RTL 完全碰不
 已实测：擦除写入 562 KiB、读回校验 `Flash verify successful`、随后回烧应用位流 `FLASH DONE`。
 固化后按 K3 每次都会重新配置并重跑白闪自检。
 
+**最近一次固化（2026-11-18）**：位流为 2026-11-17 22:14 生成的那一版（含 OLED 调试区、
+page0 八位二进制串、`USE_IR = 1'b0`）。三步实测记录：
+
+| 步骤 | 输出 |
+|---|---|
+| ① 载入 JTAG→SPI 桥 | `Programming 'C:/Efinity/2026.1/pgm/fli/titanium/u10660A79.bit'` → `PROGRAMMING DONE` |
+| ② 经桥写 Flash | `Flash device: Winbond W25Q64 8 MiB (JEDEC ID: 0xEF6017)` / 擦除 **656 KiB** / 写入 **654 KiB** / `Flash verify successful` |
+| ③ 回烧应用位流 | `Programming 'outflow/FpgaCar.bit'` → `PROGRAMMING DONE` |
+
+> 镜像从 562 KiB 涨到 654 KiB 是调试区（`oled_digits` ROM + `S_DBG` 逻辑）带来的，属正常。
+> 固化的**只是裸位流**，不含 RTL 之外的状态；Flash 里没有第二镜像，回退只能靠重新综合再固化。
+
 > **K1 的定位**：保留，作为**调试专用逻辑复位**——只复位用户逻辑（`sys_rst_n`），
 > 不动配置、不掉位流，开发期间可以反复按。K3 则是整片重配置，只在验证上电自启动时用。
 
