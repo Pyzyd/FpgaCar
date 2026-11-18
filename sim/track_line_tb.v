@@ -11,6 +11,9 @@
 //   4) 偏左三路 (bit1,2,3)      -> cnt=3, pos=-3（验证加权平均+四舍五入）
 //   5) 全白                     -> lost=1, on_line=0, pos=0
 //   6) 单拍毛刺（4 次采样内）    -> 被消抖滤掉，line 不变
+//   7) 八路全压（影子）           -> wide=1、lost=0、pos 保持上一拍（不采信质心）
+//   8) 宽黑持续超过 WIDE_MS       -> 降级成丢线（lost=1、on_line=0）
+// 为了在毫秒级仿真里看到 WIDE_MS 生效，用例 7/8 各用一个缩短 WIDE_MS 的实例。
 // =============================================================================
 `timescale 1ns/1ps
 
@@ -26,12 +29,44 @@ module track_line_tb;
     wire [3:0] cnt;
     wire       on_line, lost;
     wire signed [4:0] pos;
+    wire       wide;
 
     track_line #(
         .CLK_FREQ(24_000_000), .SAMPLE_KHZ(1_000), .DEBOUNCE_N(4), .ACTIVE_HIGH(0)
     ) u_dut (
         .clk(clk), .rst_n(rst_n), .track(track),
-        .line(line), .raw(raw), .cnt(cnt), .on_line(on_line), .lost(lost), .pos(pos)
+        .line(line), .raw(raw), .cnt(cnt), .on_line(on_line), .lost(lost),
+        .pos(pos), .wide(wide)
+    );
+
+    // 用例 7：宽黑（影子）但永不超时 —— 用来验证 wide=1 且 pos 冻结
+    wire [7:0] line2;
+    wire [3:0] cnt2;
+    wire       on_line2, lost2, wide2;
+    wire signed [4:0] pos2;
+
+    track_line #(
+        .CLK_FREQ(24_000_000), .SAMPLE_KHZ(1_000), .DEBOUNCE_N(4), .ACTIVE_HIGH(0),
+        .WIDE_CNT_TH(5'd5), .WIDE_MS(1000)
+    ) u_dut2 (
+        .clk(clk), .rst_n(rst_n), .track(track),
+        .line(line2), .raw(), .cnt(cnt2), .on_line(on_line2), .lost(lost2),
+        .pos(pos2), .wide(wide2)
+    );
+
+    // 用例 8：宽黑 3 ms 就降级成丢线
+    wire [7:0] line3;
+    wire [3:0] cnt3;
+    wire       on_line3, lost3, wide3;
+    wire signed [4:0] pos3;
+
+    track_line #(
+        .CLK_FREQ(24_000_000), .SAMPLE_KHZ(1_000), .DEBOUNCE_N(4), .ACTIVE_HIGH(0),
+        .WIDE_CNT_TH(5'd5), .WIDE_MS(3)
+    ) u_dut3 (
+        .clk(clk), .rst_n(rst_n), .track(track),
+        .line(line3), .raw(), .cnt(cnt3), .on_line(on_line3), .lost(lost3),
+        .pos(pos3), .wide(wide3)
     );
 
     // 施加"线位置"(1=压线)，内部取反成原始电平
@@ -99,13 +134,36 @@ module track_line_tb;
         else
             $display("PASS: short glitch filtered, line=%b", line);
 
+        // 7) 宽黑（影子）不采信：先把 pos 打到 +7，再八路全压
+        set_line(8'b1000_0000);
+        #7_000_000;
+        if (pos2 !== 5'sd7) $display("FAIL: wide pre pos2=%0d (expect +7)", pos2);
+        set_line(8'b1111_1111);          // 影子盖住整排
+        #7_000_000;
+        if (wide2 !== 1'b1)
+            $display("FAIL: wide flag not set (wide2=%b cnt2=%0d)", wide2, cnt2);
+        else if (lost2 !== 1'b0)
+            $display("FAIL: wide short should not be lost (lost2=%b)", lost2);
+        else if (pos2 !== 5'sd7)
+            $display("FAIL: wide froze pos2=%0d (expect keep +7)", pos2);
+        else
+            $display("PASS: wide black -> wide=1, pos held");
+
+        // 8) 宽黑超时（WIDE_MS=3）降级成丢线
+        if (lost3 !== 1'b1 || on_line3 !== 1'b0)
+            $display("FAIL: wide timeout lost3=%b on_line3=%b", lost3, on_line3);
+        else if (pos3 !== 5'sd0)
+            $display("FAIL: wide timeout pos3=%0d (expect 0)", pos3);
+        else
+            $display("PASS: wide timeout -> degraded to lost");
+
         $display("INFO: track_line_tb done");
         $finish;
     end
 
     // 看门狗
     initial begin
-        #80_000_000;
+        #150_000_000;
         $display("TIMEOUT: track_line_tb hung");
         $finish;
     end

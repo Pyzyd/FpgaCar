@@ -20,6 +20,17 @@
 //
 // 【消抖】1 ms 采样一次，连续 4 次一致才认账。红外探头在黑白交界处会抖，
 // 不消抖会让 PID 微分项炸掉。
+//
+// 【宽黑兜底 / 影子防护】影子盖住整排探头时，八路会一起判"压线"。此时
+// 加权和恰好左右对称（mag_left = mag_right = 16，wsum = 0），pos = 0，
+// 在 car_fsm 看来是"完美居中" → 全速直冲，比丢线危险得多。
+// 而 16 mm 线宽配 11 mm 探头间距，物理上最多压住 3 路，cnt >= 5 在真实
+// 赛道上不可能出现。所以：
+//   cnt >= WIDE_CNT_TH  → 判"宽黑"，不采信它的位置，保持上一拍的 pos；
+//   宽黑持续超过 WIDE_MS → 降级成丢线（lost = 1），交回 car_fsm 的
+//                          减速找线逻辑，不再直冲。
+//   WIDE_CNT_TH = 0 关闭该功能（退回旧行为）。
+// wide 输出是给串口/OLED 看的标志，说明"这一拍被判成宽黑"。
 // =============================================================================
 `timescale 1ns/1ns
 
@@ -27,7 +38,9 @@ module track_line #(
     parameter integer CLK_FREQ    = 24_000_000,
     parameter integer SAMPLE_KHZ  = 1_000,     // 采样率（消抖节拍）
     parameter integer DEBOUNCE_N  = 4,         // 连续一致次数
-    parameter         ACTIVE_HIGH = 0          // 1=高电平压线，0=低电平压线
+    parameter         ACTIVE_HIGH = 0,         // 1=高电平压线，0=低电平压线
+    parameter [4:0]   WIDE_CNT_TH = 5'd5,      // 压线数 >= 此值判"宽黑"（0=关闭）
+    parameter integer WIDE_MS     = 200        // 宽黑持续多久后降级成丢线
 ) (
     input  wire        clk,
     input  wire        rst_n,      // 低有效（已同步化）
@@ -37,7 +50,8 @@ module track_line #(
     output reg  [3:0]  cnt,        // 压线探头个数 0~8
     output reg         on_line,    // cnt > 0
     output reg         lost,       // cnt == 0（全丢线：该减速/找线）
-    output reg  signed [4:0] pos   // 线位置，-7 最左 … 0 正中 … +7 最右（二补码）
+    output reg  signed [4:0] pos,  // 线位置，-7 最左 … 0 正中 … +7 最右（二补码）
+    output reg         wide        // 1 = 这一拍被判成"宽黑"（影子/整片黑），位置不可信
 );
 
     // ------------------------------------------------------------------
@@ -138,18 +152,47 @@ module track_line #(
     wire [16:0] prod = wabs * recip + 17'd512;
     wire [6:0]  pmag = prod >> 10;             // 0..16
 
+    // ---------------- 宽黑判定（影子防护） ----------------
+    // WIDE_CNT_TH=0 时取 9（cnt 最大 8，条件永不成立）→ 功能关闭。
+    localparam [4:0] WIDE_TH = (WIDE_CNT_TH == 5'd0) ? 5'd9 : WIDE_CNT_TH;
+
+    // tick 周期 = CLK_FREQ/(SAMPLE_KHZ*1000)，SAMPLE_KHZ=1000 时是 1 us，
+    // 所以"毫秒数"必须换成 tick 数，不能拿 tick 直接当 ms 用。
+    localparam integer WIDE_TICKS = (WIDE_MS <= 0) ? 1 : (WIDE_MS * SAMPLE_KHZ);
+
+    wire        wide_now = (cnt_w >= WIDE_TH);
+    reg  [23:0] wide_tmr;              // 宽黑已持续的 tick 数
+    wire        wide_lost = (wide_tmr >= WIDE_TICKS);
+
     always @(posedge clk or negedge rst_n)
         if (!rst_n) begin
-            cnt     <= 4'd0;
-            on_line <= 1'b0;
-            lost    <= 1'b1;
-            pos     <= 5'sd0;
+            cnt      <= 4'd0;
+            on_line  <= 1'b0;
+            lost     <= 1'b1;
+            pos      <= 5'sd0;
+            wide     <= 1'b0;
+            wide_tmr <= 24'd0;
         end else begin
-            cnt     <= cnt_w[3:0];
-            on_line <= (cnt_w != 5'd0);
-            lost    <= (cnt_w == 5'd0);
-            if (cnt_w == 5'd0)
+            cnt  <= cnt_w[3:0];
+            wide <= wide_now;
+
+            // 宽黑计时：连续宽黑才累加，一恢复成正常压线数就清零。
+            // 必须用 tick 门控（1 kHz 采样拍）才是"毫秒"；直接每个 clk 加一
+            // 会让 WIDE_MS=200 变成 8.3 us，等于兜底完全失效。
+            if (!wide_now) begin
+                wide_tmr <= 24'd0;
+            end else if (tick) begin
+                if (wide_tmr < WIDE_TICKS) wide_tmr <= wide_tmr + 24'd1;
+            end
+
+            // 宽黑超时就当丢线处理，让 car_fsm 去减速找线
+            on_line <= (cnt_w != 5'd0) && !wide_lost;
+            lost    <= (cnt_w == 5'd0) || wide_lost;
+
+            if (cnt_w == 5'd0 || wide_lost)
                 pos <= 5'sd0;                   // 丢线时位置输出 0，由 lost 标志决定策略
+            else if (wide_now)
+                pos <= pos;                     // 宽黑但还没超时：不采信新位置，保持上一拍
             else if (wsum[5])
                 pos <= -$signed({1'b0, pmag[4:0]});   // 左负
             else

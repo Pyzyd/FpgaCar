@@ -2281,6 +2281,68 @@ reg [15:0] dead_cnt;                                // ← 上限只有 65535
 ### 3.27.5 本版位流
 
 map 699 s / pnr / pgm 全 PASS，`outflow/FpgaCar.bit` = **1840716 B**（比上一版 1858368 B 小）。JTAG 烧录后串口第二行仍是 69 字符，判据见 `docs/上板使用说明.md` 第 4 节。
+
+---
+
+## 3.28 宽黑兜底 + 避障三段（2026-11-18，仅仿真，未综合）
+
+> 本轮按 m04952「今天到此就不烧录代码了」只改 RTL 与测试台，**没有综合、没有烧录**。
+> 下面所有参数都还没在实车上跑过。
+
+### 3.28.1 宽黑兜底：修「影子被当成完美居中」
+
+现象推演：影子或整片深色遮住整排探头 → 八路齐判压线 → `mag_left = mag_right = 16`、`wsum = 0` → `pos = 0`，同时 `cnt = 8`、`on_line = 1`、`lost = 0`。`car_fsm` 看到的是「线在正中」，于是全速直冲 —— 比丢线更危险（丢线至少会减速找线），而且一片持续 2 s 的影子就能解开 `START_REQUIRE_LINE` 安全锁。
+
+判据依据：赛道线宽 16 mm，探头间距约 11 mm，物理上最多压住 3 路。`cnt >= 5` 在真实赛道上不可能出现。
+
+实现（`src/track_line.v`）：
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| `WIDE_CNT_TH` | `5'd5` | 压线数 ≥ 此值判宽黑；写 0 = 关闭（内部取 9，条件永不成立） |
+| `WIDE_MS` | `200` | 宽黑持续多久降级成丢线 |
+| 新端口 `wide` | 1 位 | 本拍是否判宽黑，直通串口 `W=` |
+
+行为：
+
+- 宽黑但未超时：`pos <= pos`（保持上一拍），`on_line`/`lost` 不变 → 车按上一个可信位置继续走，不会突然打正。
+- 宽黑超过 `WIDE_MS`：`wide_lost` 置位 → `lost = 1`、`on_line = 0`、`pos = 0` → 正常进入丢线流程（`S_LOST` → `S_SEARCH`）。
+- 恢复正常压线数：`wide_tmr` 清零，立即恢复。
+
+**踩坑记录（重要）**：`wide_tmr` 第一版直接每个 `clk` 加一，`WIDE_MS=200` 实际只有 8.3 us，等于兜底完全失效。第二版加了 `tick` 门控，但 `track_line` 的采样节拍是 `CLK_FREQ/(SAMPLE_KHZ*1000)` = 24 个时钟 = **1 us 而不是 1 ms**（名字里的 `SAMPLE_KHZ=1000` 是 1000 kHz 而不是 1000 Hz），所以仍然是微秒量级。最终用 `localparam integer WIDE_TICKS = WIDE_MS * SAMPLE_KHZ;` 换算成 tick 数，并把计数器加宽到 24 位。
+
+### 3.28.2 避障三段：后退 → 原地转身 → 低速试探
+
+原来 `S_RUN` 遇 `obstacle` 直接进 `S_STOP`（占空比 0），障碍消失才回 `S_RUN`。车贴着墙角或桌腿时会出现「停了→障碍还在→永远停」，能力等于零。
+
+`state` 是 3 位，原用到 0..4，5/6/7 空着，正好扩三段（串口 `M=` 两位十进制、OLED 状态号都无需扩位）：
+
+| 状态 | 值 | 动作 | 参数 |
+|---|---|---|---|
+| `S_AVOID_BACK` | 5 | 两轮反转后退 | `AVOID_BACK_MS=400`、`AVOID_BACK_DUTY=500` |
+| `S_AVOID_TURN` | 6 | 原地转（一正一反） | `AVOID_TURN_MS=600`、`AVOID_TURN_DUTY=600` |
+| `S_AVOID_PROBE` | 7 | 低速两轮正转 | `AVOID_PROBE_MS=400`、`AVOID_PROBE_DUTY=450` |
+
+- 进 `S_AVOID_BACK` 时按 `avoid_left = !last_pos_neg` 定转向：线在右边就往左绕，避免绕到线的另一侧。
+- 试探期间 `obstacle` 仍为 1 → `avoid_tries` 加一、`avoid_left` 取反、回 `S_AVOID_BACK` 再来一轮；用满 `AVOID_TRIES=3`（顶层传 2）进 `S_STOP`。
+- 试探期间 `obstacle` 已清 0 且走满 `AVOID_PROBE_MS` → 回 `S_RUN`。
+- `S_STOP` 的自动恢复路径（`!final_stop && !obstacle` → `S_RUN`）保留，`AVOID_EN=0` 时退回老行为。
+- `en_run` 扩为也包含三段，所以避障期间电机是通电的；`en = en_run & ~dead` 中的换相死区照常生效。
+
+`AVOID_EN=1` 时 `USE_ULTRA` 应同时为 1，否则 `obstacle` 恒 0、避障永不触发。本轮顶层取 `USE_ULTRA=1'b1`、`USE_IR=1'b0`、`USE_K230=1'b0`。
+
+### 3.28.3 串口与测试台
+
+- `uart_report.v` 第二行 `MSG2_LEN` 71 → **75**，末尾新增 ` W=`+1 位（`msg2[69]`=空格、`[70]`=`W`、`[71]`=`=`、`[72]`=值、`[73]`=CR、`[74]`=LF）。新端口 `input wire wide`，与其它字段一起在 `R_LOAD` 单拍锁存。
+- `sim/uart_report_tb.v`：`MSG2_LEN=75`，5 条期望串尾部补 ` W=0`（用例 4 补 ` W=1` 覆盖置位分支）。因为 `check_line` 只比对到 `MSG2_LEN`，不改长度就会静默漏掉新增字节。
+- `sim/track_line_tb.v`：新增 `u_dut2`（`WIDE_MS=1000`，永不超时）验「`wide=1` 且 `pos` 冻结在 +7」；`u_dut3`（`WIDE_MS=3`）验「宽黑超时降级成丢线」。看门狗 80 ms → 150 ms。
+- `sim/car_fsm_tb.v`：原三个实例显式补 `.AVOID_EN(0)`（否则默认 1 会让用例 5「障碍→STOP」走进 BACK 而挂掉）；新增 `u_dut4`（`AVOID_EN=1`、各段 8 ms、`AVOID_TRIES=2`、`DIR_DEAD_MS=3`）配独立激励，覆盖用例 9~11。
+- 测试台写法教训：进新一段时先改 `dir_*_des`，换相死区会把 `dir/duty` 压住 `DIR_DEAD_MS`；且 `S_AVOID_PROBE` 在障碍仍在时只停留约 1 ms。**定长延时不可靠**，必须用 `wait_state4` / `wait_avoid` 轮询「状态 + 方向 + 双轮占空比」三者同时到位。
+
+### 3.28.4 回归
+
+`bash tools/run_regression.sh` 全量 **20 个 tb 全绿（74 s）**；单项 `track_line_tb` PASS=8、`car_fsm_tb` PASS=44 ALLPASS=1、`uart_report_tb` ALLPASS=1。
+
 ## 4. 下一步（2026-11-10 按实际到货情况重排）
 
 ### 第 1 步：现在就能做的上板验证（不需要任何待买硬件）

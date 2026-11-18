@@ -7,9 +7,14 @@
 //                              |                 |                   |
 //                              |<--(重新压线)----+-------------------+
 //                              |                                     |
-//                              +--(障碍)--> STOP <--(找线超时)-------+
-//                                            |
-//                                        (障碍消失) --> RUN
+//                              +--(障碍)--> BACK --> TURN --> PROBE -+
+//                              |        (后退)   (原地转)  (试探前进) |
+//                              |                            |        |
+//                              |             (还有障碍 & 未超次数)--+
+//                              |                            |
+//                              |                     (无障碍) --> RUN
+//                              |                (次数用尽) --> STOP
+//                              +<--找线超时(SEARCH_FAIL_TO_IDLE=1)---+
 //
 // 【为什么要有 LOST 这一级】track_line 的 lost 会在线抖动/短暂离线的瞬间置位，
 // 立刻进找线会让车原地抽搐。先保持最后一刻的转向 HOLD_MS，多数情况下线就回来了。
@@ -32,7 +37,16 @@ module car_fsm #(
     parameter integer SEARCH_FAIL_TO_IDLE = 1, // 找线超时后：1=回 IDLE 等重新压线，0=永久停车
     parameter integer DIR_DEAD_MS   = 10,     // 方向切换死区
     parameter integer TURN_MS       = 700,    // 交通牌强制转向持续时长
-    parameter integer TURN_DUTY     = 700     // 强制转向时的占空比
+    parameter integer TURN_DUTY     = 700,    // 强制转向时的占空比
+    // ---- 避障（BACK → TURN → PROBE 三段）----
+    parameter integer AVOID_EN    = 1,      // 1 = 遇障碍执行避障；0 = 旧行为（原地停，障碍消失即走）
+    parameter integer AVOID_BACK_MS = 400,  // 后退时长
+    parameter integer AVOID_BACK_DUTY = 500,// 后退占空比
+    parameter integer AVOID_TURN_MS = 600,  // 原地转时长
+    parameter integer AVOID_TURN_DUTY = 600,// 原地转占空比
+    parameter integer AVOID_PROBE_MS = 400, // 试探前进时长
+    parameter integer AVOID_PROBE_DUTY = 450,// 试探前进占空比
+    parameter integer AVOID_TRIES = 3       // 最多连续尝试次数，用尽则停车等待
 ) (
     input  wire              clk,
     input  wire              rst_n,
@@ -54,11 +68,15 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     output reg  [2:0]        state            // 观察用
 );
 
-    localparam [2:0] S_IDLE   = 3'd0,
-                     S_RUN    = 3'd1,
-                     S_LOST   = 3'd2,
-                     S_SEARCH = 3'd3,
-                     S_STOP   = 3'd4;
+    // 5/6/7 三个编码正好空着，避障直接占用，M= 字段（两位十进制）无需扩位。
+    localparam [2:0] S_IDLE       = 3'd0,
+                     S_RUN        = 3'd1,
+                     S_LOST       = 3'd2,
+                     S_SEARCH     = 3'd3,
+                     S_STOP       = 3'd4,
+                     S_AVOID_BACK = 3'd5,
+                     S_AVOID_TURN = 3'd6,
+                     S_AVOID_PROBE= 3'd7;
 
     localparam integer MS_DIV     = CLK_FREQ / 1000;
     localparam integer DEAD_CYC   = MS_DIV * DIR_DEAD_MS;
@@ -95,7 +113,12 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     reg [31:0] dead_cnt;
     reg        dir_l_des, dir_r_des;
 
-    wire en_run = (state == S_RUN) || (state == S_LOST) || (state == S_SEARCH);
+    // ---------------- 避障 ----------------
+    reg [3:0]  avoid_tries;         // 本次障碍已尝试几轮
+    reg        avoid_left;          // 1 = 这次往左绕（按最后看到线的方位反着走）
+
+    wire en_run = (state == S_RUN)   || (state == S_LOST)     || (state == S_SEARCH)
+               || (state == S_AVOID_BACK) || (state == S_AVOID_TURN) || (state == S_AVOID_PROBE);
     assign en   = en_run & ~dead;
 
     always @(posedge clk or negedge rst_n) begin
@@ -117,6 +140,8 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
             turn_cnt    <= 16'd0;
             turn_left   <= 1'b0;
             turn_req    <= 1'b0;
+            avoid_tries <= 4'd0;
+            avoid_left  <= 1'b0;
         end else begin
             // ---- 记住线的方位 ----
             if (on_line && !lost) begin
@@ -199,7 +224,10 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                         if (obstacle) begin
                             turning <= 1'b0;        // 撞上障碍就放弃这次转向
                             ms_cnt  <= 16'd0;
-                            state   <= S_STOP;
+                            avoid_tries <= 4'd0;
+                            // 往"线不在的那一侧"绕：线在右（!last_pos_neg）就往左绕
+                            avoid_left  <= !last_pos_neg;
+                            state   <= (AVOID_EN != 0) ? S_AVOID_BACK : S_STOP;
                         end
                     end else begin
                         dir_l_des <= 1'b1;
@@ -215,7 +243,9 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             turn_cnt <= TURN_MS[15:0];
                         end else if (obstacle) begin
                             ms_cnt <= 16'd0;
-                            state  <= S_STOP;
+                            avoid_tries <= 4'd0;
+                            avoid_left  <= !last_pos_neg;
+                            state  <= (AVOID_EN != 0) ? S_AVOID_BACK : S_STOP;
                         end else if (lost) begin
                             ms_cnt <= 16'd0;
                             state  <= S_LOST;
@@ -271,9 +301,78 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                     duty_l <= 11'd0;
                     duty_r <= 11'd0;
                     // 只有"障碍导致的停车"且障碍消失才恢复；找线超时的停车保持
+                    // AVOID_EN=1 时障碍不再进这里（走 BACK/TURN/PROBE），
+                    // 所以这条恢复路径只对 AVOID_EN=0 的老行为有效。
                     if (!final_stop && !obstacle) begin
                         ms_cnt <= 16'd0;
                         state  <= S_RUN;
+                    end
+                end
+
+                // ----------------------------------------------------------
+                // 避障：后退 → 原地转（绕开障碍）→ 试探前进
+                //   三段都是定长动作，不看线（这时候线通常已经被让开或压不到）；
+                //   试探完还有障碍就再来一轮，最多 AVOID_TRIES 轮；
+                //   用尽后进 S_STOP 等障碍消失，避免顶死在墙角反复撞。
+                // ----------------------------------------------------------
+                S_AVOID_BACK: begin
+                    // 后退：两轮同向反转
+                    dir_l_des <= 1'b0;
+                    dir_r_des <= 1'b0;
+                    if (!dead) begin
+                        duty_l <= AVOID_BACK_DUTY[10:0];
+                        duty_r <= AVOID_BACK_DUTY[10:0];
+                    end
+                    if (ms_cnt >= AVOID_BACK_MS - 1) begin
+                        ms_cnt <= 16'd0;
+                        state  <= S_AVOID_TURN;
+                    end else begin
+                        ms_cnt <= ms_cnt + 16'd1;
+                    end
+                end
+
+                S_AVOID_TURN: begin
+                    // 原地转：一侧前进、一侧后退。方向按 avoid_left 定。
+                    dir_l_des <= avoid_left ? 1'b0 : 1'b1;  // 往左绕：左轮后退
+                    dir_r_des <= avoid_left ? 1'b1 : 1'b0;
+                    if (!dead) begin
+                        duty_l <= AVOID_TURN_DUTY[10:0];
+                        duty_r <= AVOID_TURN_DUTY[10:0];
+                    end
+                    if (ms_cnt >= AVOID_TURN_MS - 1) begin
+                        ms_cnt <= 16'd0;
+                        state  <= S_AVOID_PROBE;
+                    end else begin
+                        ms_cnt <= ms_cnt + 16'd1;
+                    end
+                end
+
+                S_AVOID_PROBE: begin
+                    // 试探前进：用较低占空比慢慢靠近，看障碍还在不在
+                    dir_l_des <= 1'b1;
+                    dir_r_des <= 1'b1;
+                    if (!dead) begin
+                        duty_l <= AVOID_PROBE_DUTY[10:0];
+                        duty_r <= AVOID_PROBE_DUTY[10:0];
+                    end
+                    if (obstacle) begin
+                        // 还堵着：动作已经做完，再来一轮（或放弃）
+                        ms_cnt <= 16'd0;
+                        if (avoid_tries >= AVOID_TRIES - 1) begin
+                            avoid_tries <= 4'd0;
+                            state <= S_STOP;
+                        end else begin
+                            avoid_tries <= avoid_tries + 4'd1;
+                            avoid_left  <= ~avoid_left;   // 换个方向再试
+                            state <= S_AVOID_BACK;
+                        end
+                    end else if (ms_cnt >= AVOID_PROBE_MS - 1) begin
+                        // 探出去了：绕过障碍，回正常循迹
+                        ms_cnt      <= 16'd0;
+                        avoid_tries <= 4'd0;
+                        state       <= S_RUN;
+                    end else begin
+                        ms_cnt <= ms_cnt + 16'd1;
                     end
                 end
 

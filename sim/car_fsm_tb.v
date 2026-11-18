@@ -9,6 +9,9 @@
 //   6) 找线超时 → STOP 且永久保持（obstacle 清零也不恢复）
 //   7) SEARCH_FAIL_TO_IDLE=1 的实例：同一激励下回 IDLE，放回线上能重新起跑
 //   8) DIR_DEAD_MS=3 的实例：死区计时能走完，en/duty 恢复（防计数器位宽不足）
+//   9) AVOID_EN=1 的实例：障碍 -> BACK(倒) -> TURN(原地转) -> PROBE(慢进) -> RUN
+//  10) 试探仍被挡 -> 重试并换转向
+//  11) 重试次数用尽 -> STOP；障碍消失后自动回 RUN
 //
 // 注意：每个 check 的字符串不能超过 31 字符（Verilog 任务端口位宽会截断，只留尾部）。
 // =============================================================================
@@ -17,7 +20,8 @@
 module car_fsm_tb;
 
     localparam [2:0] S_IDLE = 3'd0, S_RUN = 3'd1, S_LOST = 3'd2,
-                     S_SEARCH = 3'd3, S_STOP = 3'd4;
+                     S_SEARCH = 3'd3, S_STOP = 3'd4,
+                     S_AVOID_BACK = 3'd5, S_AVOID_TURN = 3'd6, S_AVOID_PROBE = 3'd7;
 
     reg clk = 1'b0;
     reg rst_n = 1'b0;
@@ -43,7 +47,8 @@ module car_fsm_tb;
         .SEARCH_MS    (10),                    // 拉长到 10 ms，留出观察 SEARCH 的时间窗
         .SEARCH_DUTY  (500),
         .SEARCH_FAIL_TO_IDLE (0),              // 比赛行为：找线超时永久停车
-        .DIR_DEAD_MS  (1)
+        .DIR_DEAD_MS  (1),
+        .AVOID_EN     (0)                       // 老实例保持"障碍 -> STOP"的旧语义
     ) u_dut (
         .clk (clk), .rst_n (rst_n),
         .on_line (on_line), .lost (lost), .obstacle (obstacle), .pos (pos),
@@ -66,7 +71,8 @@ module car_fsm_tb;
         .SEARCH_MS    (10),
         .SEARCH_DUTY  (500),
         .SEARCH_FAIL_TO_IDLE (1),              // 桌面行为：找线超时回 IDLE，可重新起跑
-        .DIR_DEAD_MS  (1)
+        .DIR_DEAD_MS  (1),
+        .AVOID_EN     (0)
     ) u_dut2 (
         .clk (clk), .rst_n (rst_n),
         .on_line (on_line), .lost (lost), .obstacle (obstacle), .pos (pos),
@@ -89,13 +95,47 @@ module car_fsm_tb;
         .SEARCH_MS    (10),
         .SEARCH_DUTY  (500),
         .SEARCH_FAIL_TO_IDLE (1),              // 回 IDLE，用例 8 才能重新起跑到 SEARCH
-        .DIR_DEAD_MS  (3)
+        .DIR_DEAD_MS  (3),
+        .AVOID_EN     (0)
     ) u_dut3 (
         .clk (clk), .rst_n (rst_n),
         .on_line (on_line), .lost (lost), .obstacle (obstacle), .pos (pos),
         .pid_l (pid_l), .pid_r (pid_r),
         .en (en3), .dir_l (dir_l3), .dir_r (dir_r3),
         .duty_l (duty_l3), .duty_r (duty_r3), .state (state3)
+    );
+
+    // 第四个实例：开避障三段。用自己的激励，避免被前面用例（永久停车等）干扰。
+    reg               on4 = 1'b0;
+    reg               lost4 = 1'b0;
+    reg               obs4 = 1'b0;
+    wire              en4, dir_l4, dir_r4;
+    wire [10:0]       duty_l4, duty_r4;
+    wire [2:0]        state4;
+
+    car_fsm #(
+        .CLK_FREQ     (24_000_000),
+        .START_MS     (1),
+        .START_REQUIRE_LINE (1),
+        .LOST_HOLD_MS (1),
+        .SEARCH_MS    (10),
+        .SEARCH_DUTY  (500),
+        .SEARCH_FAIL_TO_IDLE (1),
+        .DIR_DEAD_MS  (3),                      // 3 ms 死区 > 1 拍，必须等它走完
+        .AVOID_EN     (1),
+        .AVOID_BACK_MS   (8),                   // 每段 8 ms，给死区留出余量
+        .AVOID_BACK_DUTY (400),
+        .AVOID_TURN_MS   (8),
+        .AVOID_TURN_DUTY (400),
+        .AVOID_PROBE_MS  (8),
+        .AVOID_PROBE_DUTY(350),
+        .AVOID_TRIES  (2)
+    ) u_dut4 (
+        .clk (clk), .rst_n (rst_n),
+        .on_line (on4), .lost (lost4), .obstacle (obs4), .pos (5'sd0),
+        .pid_l (11'd700), .pid_r (11'd500),
+        .en (en4), .dir_l (dir_l4), .dir_r (dir_r4),
+        .duty_l (duty_l4), .duty_r (duty_r4), .state (state4)
     );
 
     task wait_us (input integer n);
@@ -113,6 +153,47 @@ module car_fsm_tb;
             else begin
                 $display("FAIL: %0s | st=%0d en=%b dir=%b%b d=%0d/%0d",
                          msg, state, en, dir_l, dir_r, duty_l, duty_r);
+                fails = fails + 1;
+            end
+        end
+    endtask
+
+    // 轮询等状态4到位（避障段被障碍打断时可能只停留一拍，定长延时不可靠）
+    task wait_state4 (input [2:0] want, input integer timeout_us);
+        integer n;
+        begin
+            n = 0;
+            while (state4 !== want && n < timeout_us) begin
+                wait_us(100);
+                n = n + 100;
+            end
+            #1;
+        end
+    endtask
+
+    // 轮询等"方向 + 双轮占空比"三者同时到位。
+    // 不能只看 duty：进新一段时本段 duty 会先装载一次，随后换相死区把 duty
+    // 压到 0 再放开，中间会出现"duty 已是新值、dir 还是旧值"的窗口。
+    task wait_avoid (input dl_want, input dr_want, input [10:0] d_want,
+                     input integer timeout_us);
+        integer n;
+        begin
+            n = 0;
+            while ((dir_l4 !== dl_want || dir_r4 !== dr_want ||
+                    duty_l4 != d_want || duty_r4 != d_want) && n < timeout_us) begin
+                wait_us(100);
+                n = n + 100;
+            end
+            wait_us(200);
+        end
+    endtask
+
+    task chk4 (input integer cond, input [8*28-1:0] msg);
+        begin
+            if (cond) $display("PASS: %0s", msg);
+            else begin
+                $display("FAIL: %0s | st4=%0d en4=%b dir4=%b%b d4=%0d/%0d",
+                         msg, state4, en4, dir_l4, dir_r4, duty_l4, duty_r4);
                 fails = fails + 1;
             end
         end
@@ -198,13 +279,75 @@ module car_fsm_tb;
         chk(en3 === 1'b1, "dead zone clears (en)");
         chk(duty_l3 == 11'd500 && duty_r3 == 11'd500, "dead zone clears (duty)");
 
+        // ---- 9) 避障三段：障碍 -> BACK -> TURN -> PROBE -> RUN ----
+        // 两个坑：
+        //   a) 进新一段时先改 dir_*_des，换相死区（DIR_DEAD_MS=3 ms）会把
+        //      dir/duty 压住 3 ms，断言方向/占空比必须等到 duty 真正装载；
+        //   b) PROBE 期间若障碍仍在会立刻重试，PROBE 只停留约 1 ms。
+        // 所以一律用 wait_state4 / wait_duty4 轮询，不用定长延时。
+        lost4 = 1'b0; on4 = 1'b1;
+        wait_state4(S_RUN, 5000);
+        chk4(state4 == S_RUN && en4 === 1'b1, "avoid: in RUN");
+
+        obs4 = 1'b1;
+        wait_state4(S_AVOID_BACK, 2000);
+        chk4(state4 == S_AVOID_BACK, "avoid: obstacle -> BACK");
+        wait_avoid(1'b0, 1'b0, 11'd400, 9000);
+        chk4(dir_l4 === 1'b0 && dir_r4 === 1'b0, "avoid: BACK both reverse");
+        chk4(duty_l4 == 11'd400 && duty_r4 == 11'd400, "avoid: BACK duty 400");
+
+        wait_state4(S_AVOID_TURN, 12000);
+        chk4(state4 == S_AVOID_TURN, "avoid: BACK -> TURN");
+        wait_avoid(1'b0, 1'b1, 11'd400, 9000);
+        chk4(dir_l4 === 1'b0 && dir_r4 === 1'b1, "avoid: TURN left wheel back");
+        chk4(duty_l4 == 11'd400 && duty_r4 == 11'd400, "avoid: TURN duty 400");
+
+        obs4 = 1'b0;                       // 转完把障碍拿开，试探应成功
+        wait_state4(S_AVOID_PROBE, 12000);
+        chk4(state4 == S_AVOID_PROBE, "avoid: TURN -> PROBE");
+        wait_avoid(1'b1, 1'b1, 11'd350, 9000);
+        chk4(dir_l4 === 1'b1 && dir_r4 === 1'b1, "avoid: PROBE forward");
+        chk4(duty_l4 == 11'd350 && duty_r4 == 11'd350, "avoid: PROBE duty 350");
+
+        wait_state4(S_RUN, 12000);
+        chk4(state4 == S_RUN, "avoid: PROBE -> RUN");
+
+        // ---- 10) 试探仍被挡 -> 重来一轮，第二次转向与第一次相反 ----
+        obs4 = 1'b1;
+        wait_state4(S_AVOID_BACK, 2000);
+        chk4(state4 == S_AVOID_BACK, "retry: BACK again");
+
+        wait_state4(S_AVOID_TURN, 12000);
+        chk4(state4 == S_AVOID_TURN, "retry: TURN again");
+        wait_avoid(1'b0, 1'b1, 11'd400, 9000);
+        chk4(dir_l4 === 1'b0 && dir_r4 === 1'b1, "retry: TURN same side");
+
+        // 第一轮试探被挡后会翻向，回到 BACK 再来一遍
+        wait_state4(S_AVOID_BACK, 12000);
+        chk4(state4 == S_AVOID_BACK, "retry: flip -> BACK");
+
+        wait_state4(S_AVOID_TURN, 12000);
+        chk4(state4 == S_AVOID_TURN, "retry: TURN after flip");
+        wait_avoid(1'b1, 1'b0, 11'd400, 9000);
+        chk4(dir_l4 === 1'b1 && dir_r4 === 1'b0, "retry: TURN flips side");
+
+        // ---- 11) 次数用尽 -> STOP；障碍消失后自动回 RUN ----
+        // AVOID_TRIES=2：这一轮 PROBE 仍被挡即放弃。
+        wait_state4(S_STOP, 20000);
+        chk4(state4 == S_STOP && en4 === 1'b0, "retry2: tries used -> STOP");
+
+        obs4 = 1'b0;
+        wait_state4(S_RUN, 8000);
+        wait_us(4000);
+        chk4(state4 == S_RUN && en4 === 1'b1, "avoid: obstacle gone -> RUN");
+
         if (fails == 0) $display("INFO: car_fsm_tb ALL PASS");
         else            $display("INFO: car_fsm_tb %0d FAIL(S)", fails);
         $finish;
     end
 
     initial begin
-        #200_000_000;                      // 200 ms：整个用例约 30 ms
+        #600_000_000;                      // 600 ms：用例从约 30 ms 涨到约 130 ms
         $display("TIMEOUT: car_fsm_tb hung (state=%0d)", state);
         $finish;
     end

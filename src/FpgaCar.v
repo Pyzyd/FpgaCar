@@ -257,6 +257,7 @@ module FpgaCar (
     wire [7:0]  line_raw;      // 消抖后的原始电平（未按 ACTIVE_HIGH 取反）
     wire [3:0]  line_cnt;
     wire        line_on, line_lost;
+    wire        line_wide;     // 宽黑判定（影子防护），串口 W= 字段显示
     wire signed [4:0] line_pos;
 
     track_line #(
@@ -273,7 +274,8 @@ module FpgaCar (
         .cnt     (line_cnt),
         .on_line (line_on),
         .lost    (line_lost),
-        .pos     (line_pos)
+        .pos     (line_pos),
+        .wide    (line_wide)
     );
 
     // ------------------------------------------------------------------
@@ -293,13 +295,13 @@ module FpgaCar (
     //   另一路保持断开即可（未接那路若误报，把对应端口改接 D3V3 拉到「无遮挡」）。
     localparam USE_IR = 1'b0;
 
-    // 【总开关】超声波避障参与障碍判定 —— 2026-11-18 起临时关闭，只测循迹。
+    // 【总开关】超声波避障参与障碍判定 —— 2026-11-18 恢复为 1（避障已实现）。
     //   1'b0 = hc_near 不参与 obstacle（O 恒 0，车不会因为前方 25 cm 内有墙被摁停），
     //          但 u_ultra 仍然例化运行，D= / 屏上距离继续可读，方便对照。
-    //   1'b1 = 恢复超声波避障（原行为）。
-    //   为什么要关：桌面/室内测试时车头正前方常有墙或桌沿，25 cm 门限会频繁把
-    //   car_fsm 打进 S_STOP，循迹根本跑不起来。测完循迹要把这里改回 1'b1。
-    localparam USE_ULTRA = 1'b0;
+    //          只测循迹、不想被墙摁停时改成 0。
+    //   1'b1 = 恢复超声波避障（原行为）。现在遇障碍不再原地干停，
+    //          而是走 car_fsm 的 BACK → TURN → PROBE 三段绕行。
+    localparam USE_ULTRA = 1'b1;
 
     wire hc_near  = (dist_cm != 16'hFFFF) && (dist_cm <= OBSTACLE_CM);
     wire ir_l_det = ~ir_l;                      // NPN 低有效
@@ -359,7 +361,17 @@ module FpgaCar (
         .SEARCH_FAIL_TO_IDLE (1),
         .DIR_DEAD_MS  (10),
         .TURN_MS      (700),
-        .TURN_DUTY    (700)
+        .TURN_DUTY    (700),
+        // 避障三段：后退 → 原地转 → 试探前进，最多 3 轮，用尽则停车等障碍消失。
+        // 只测循迹不想让车绕行时把 AVOID_EN 改成 0（退回"遇障碍原地停"）。
+        .AVOID_EN         (1),
+        .AVOID_BACK_MS    (400),
+        .AVOID_BACK_DUTY  (500),
+        .AVOID_TURN_MS    (600),
+        .AVOID_TURN_DUTY  (600),
+        .AVOID_PROBE_MS   (400),
+        .AVOID_PROBE_DUTY (450),
+        .AVOID_TRIES      (3)
     ) u_car (
         .clk      (clk),
         .rst_n    (sys_rst_n),
@@ -630,7 +642,8 @@ module FpgaCar (
     // 调试串口：每测一次距离打两行（CH340N，115200-8-N-1）
     //   第 1 行  D=123cm T=00011000 P=+02 O=0 M=01
     //   第 2 行  L=00000123 R=00000123 VL=0005 VR=0005
-    // M= 是状态机状态（00 IDLE 01 RUN 02 LOST 03 SEARCH 04 STOP，入库/绕行会往后排）；
+    // M= 是状态机状态（00 IDLE 01 RUN 02 LOST 03 SEARCH 04 STOP
+    //                 05 AVOID_BACK 06 AVOID_TURN 07 AVOID_PROBE）；
     // L=/R= 是左右编码器累计里程（二补码十六进制），标定每米脉冲数时用。
     // ------------------------------------------------------------------
     uart_report #(
@@ -648,6 +661,7 @@ module FpgaCar (
         .corr       (pid_corr),
         .duty_l     (ctrl_duty_l),
         .duty_r     (ctrl_duty_r),
+        .wide       (line_wide),
         .obstacle   (obstacle),
         .state      (car_state),
         .enc_l      (enc_l_pos),

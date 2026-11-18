@@ -10,7 +10,8 @@
 //   T=      : 8 路循迹探头，bit7..bit0 对应 track[7]..track[0]，1=压线
 //   P=+02   : 加权质心位置，-16..+16，正=线在右
 //   O=      : 1=前方有障碍（默认只看超声波近距；红外由顶层 USE_IR 开关决定是否取或）
-//   M=nn    : 状态机状态（00 IDLE 01 RUN 02 LOST 03 SEARCH 04 STOP，两位十进制）
+//   M=nn    : 状态机状态（00 IDLE 01 RUN 02 LOST 03 SEARCH 04 STOP
+//             05 AVOID_BACK 06 AVOID_TURN 07 AVOID_PROBE，两位十进制）
 //   L=/R=   : 左右编码器累计里程，8 位十六进制二补码（标定每米脉冲数用）
 //   VL=/VR= : 左右速度，每 50 ms 窗口净步数，4 位十六进制二补码
 //   X=      : 循迹消抖后的**原始电平**（未经 ACTIVE_HIGH 取反），bit7..bit0
@@ -21,6 +22,10 @@
 //   DL=/DR= : car_fsm 实际下发的左右占空比，3 位十六进制（0..4B0=1200）。
 //             它与 C= 的关系是 DL=BASE+C、DR=BASE-C，BASE=600=0x258。
 //             两者对不上说明 PID 输出被状态机改写（LOST 保持/SEARCH/TURN）。
+//   W=      : 宽黑标志。1 = 这一拍被判成"压线太宽"（影子/整片黑），
+//             track_line 不采信它的位置并保持上一拍 pos；持续超过 WIDE_MS
+//             会降级成丢线（此时 T= 仍然有多个 1，但 M 会走 02 LOST）。
+//             这是夜里被自己影子/灯影骗到时唯一能一眼看出来的字段。
 //
 // 【为什么里程用十六进制】编码器计数是 32 位有符号，十进制要套 8 次 div10，
 // 组合逻辑代价比信息价值大；解析时按行首字母分流，主机侧再换算即可。
@@ -47,6 +52,7 @@ module uart_report #(
     input  wire signed [10:0] corr,     // PID 修正量（C=）
     input  wire [10:0] duty_l,          // 实际下发占空比左（DL=）
     input  wire [10:0] duty_r,          // 实际下发占空比右（DR=）
+    input  wire        wide,       // 宽黑标志（影子防护，W=）
     input  wire        obstacle,   // 障碍标志
     input  wire [2:0]  state,      // 状态机状态（M=）
     input  wire [31:0] enc_l,      // 左编码器累计（二补码）
@@ -57,7 +63,7 @@ module uart_report #(
 );
 
     localparam integer MSG_LEN  = 35;   // 第一行：D=/T=/P=/O=/M=
-    localparam integer MSG2_LEN = 71;   // 第二行：L=/R=/VL=/VR=/X=/C=/DL=/DR=
+    localparam integer MSG2_LEN = 75;   // 第二行：L=/R=/VL=/VR=/X=/C=/DL=/DR=/W=
 
     // ------------------------------------------------------------------
     // 无符号除以 10（移位-减法，10 次迭代，纯组合）
@@ -122,6 +128,7 @@ module uart_report #(
     reg  signed [10:0] cr;   // 锁存的 PID 修正量
     reg  [10:0] dl, dr;      // 锁存的实际占空比
     reg  signed [4:0] pz;    // 锁存的位置
+    reg         wid;         // 锁存的宽黑标志
     reg         obst;        // 锁存的障碍标志
     reg  [2:0]  st;          // 锁存的状态
     reg  [31:0] el, er;      // 锁存的编码器里程
@@ -176,6 +183,7 @@ module uart_report #(
             dl       <= 11'd0;
             dr       <= 11'd0;
             pz       <= 5'sd0;
+            wid      <= 1'b0;
             obst     <= 1'b0;
             st       <= 3'd0;
             el       <= 32'd0;
@@ -202,6 +210,7 @@ module uart_report #(
                 dl   <= duty_l;
                 dr   <= duty_r;
                 pz   <= pos;
+                wid  <= wide;
                 obst <= obstacle;
                 st   <= state;
                 el   <= enc_l;
@@ -368,8 +377,13 @@ module uart_report #(
         msg2[66] = hexd({2'b00, dr[10:8]});
         msg2[67] = hexd(dr[7:4]);
         msg2[68] = hexd(dr[3:0]);
-        msg2[69] = 8'h0D;
-        msg2[70] = 8'h0A;
+        // ---- W= 宽黑标志 ----
+        msg2[69] = 8'h20;
+        msg2[70] = 8'h57;                                  // 'W'
+        msg2[71] = 8'h3D;
+        msg2[72] = wid ? 8'h31 : 8'h30;
+        msg2[73] = 8'h0D;
+        msg2[74] = 8'h0A;
     end
 
 endmodule
