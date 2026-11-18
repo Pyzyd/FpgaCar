@@ -87,7 +87,12 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
 
     // ---------------- 方向死区 ----------------
     reg        dead;
-    reg [15:0] dead_cnt;
+    // 死区计时必须比 MS_DIV 宽：DEAD_CYC = MS_DIV * DIR_DEAD_MS，
+    // 24 MHz + DIR_DEAD_MS=10 时是 240000，16 位放不下（上限 65535）。
+    // 宽度不够的后果不是"死区变短"，而是 dead_cnt 永远追不上 DEAD_CYC-1，
+    // dead 一旦置位就再也不清 → en 恒 0、duty 恒 0，车再也不动。
+    // 测试台用 DIR_DEAD_MS=1（24000，刚好放得下）所以测不出这个错。
+    reg [31:0] dead_cnt;
     reg        dir_l_des, dir_r_des;
 
     wire en_run = (state == S_RUN) || (state == S_LOST) || (state == S_SEARCH);
@@ -107,7 +112,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
             duty_l      <= 11'd0;
             duty_r      <= 11'd0;
             dead        <= 1'b0;
-            dead_cnt    <= 16'd0;
+            dead_cnt    <= 32'd0;
             turning     <= 1'b0;
             turn_cnt    <= 16'd0;
             turn_left   <= 1'b0;
@@ -123,15 +128,15 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
             if (dead) begin
                 if (dead_cnt >= DEAD_CYC - 1) begin
                     dead      <= 1'b0;
-                    dead_cnt  <= 16'd0;
+                    dead_cnt  <= 32'd0;
                     dir_l     <= dir_l_des;
                     dir_r     <= dir_r_des;
                 end else begin
-                    dead_cnt <= dead_cnt + 16'd1;
+                    dead_cnt <= dead_cnt + 32'd1;
                 end
             end else if ((dir_l_des != dir_l) || (dir_r_des != dir_r)) begin
                 dead     <= 1'b1;
-                dead_cnt <= 16'd0;
+                dead_cnt <= 32'd0;
                 duty_l   <= 11'd0;      // 换相前先断电
                 duty_r   <= 11'd0;
             end

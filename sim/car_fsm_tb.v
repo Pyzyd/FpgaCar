@@ -8,6 +8,7 @@
 //   5) 障碍 → STOP 且 en=0；障碍消失 → 自动恢复 RUN
 //   6) 找线超时 → STOP 且永久保持（obstacle 清零也不恢复）
 //   7) SEARCH_FAIL_TO_IDLE=1 的实例：同一激励下回 IDLE，放回线上能重新起跑
+//   8) DIR_DEAD_MS=3 的实例：死区计时能走完，en/duty 恢复（防计数器位宽不足）
 //
 // 注意：每个 check 的字符串不能超过 31 字符（Verilog 任务端口位宽会截断，只留尾部）。
 // =============================================================================
@@ -72,6 +73,29 @@ module car_fsm_tb;
         .pid_l (pid_l), .pid_r (pid_r),
         .en (en2), .dir_l (dir_l2), .dir_r (dir_r2),
         .duty_l (duty_l2), .duty_r (duty_r2), .state (state2)
+    );
+
+    // 第三个实例：DIR_DEAD_MS 用真实值 3 ms（DEAD_CYC = 24000*3 = 72000 > 16 位上限）。
+    // 专门盯死区计数器位宽：宽度不够时 dead 永远清不掉，en 恒 0、duty 恒 0。
+    wire              en3, dir_l3, dir_r3;
+    wire [10:0]       duty_l3, duty_r3;
+    wire [2:0]        state3;
+
+    car_fsm #(
+        .CLK_FREQ     (24_000_000),
+        .START_MS     (1),
+        .START_REQUIRE_LINE (1),
+        .LOST_HOLD_MS (1),
+        .SEARCH_MS    (10),
+        .SEARCH_DUTY  (500),
+        .SEARCH_FAIL_TO_IDLE (1),              // 回 IDLE，用例 8 才能重新起跑到 SEARCH
+        .DIR_DEAD_MS  (3)
+    ) u_dut3 (
+        .clk (clk), .rst_n (rst_n),
+        .on_line (on_line), .lost (lost), .obstacle (obstacle), .pos (pos),
+        .pid_l (pid_l), .pid_r (pid_r),
+        .en (en3), .dir_l (dir_l3), .dir_r (dir_r3),
+        .duty_l (duty_l3), .duty_r (duty_r3), .state (state3)
     );
 
     task wait_us (input integer n);
@@ -162,6 +186,17 @@ module car_fsm_tb;
         wait_us(3500);
         chk(state2 == S_RUN, "fail-to-idle: restarts on line");
         chk(state == S_STOP, "final-stop DUT stays stopped");
+
+        // ---- 8) 死区计数器位宽：DIR_DEAD_MS=3 时 dead 必须能清掉 ----
+        // 进 SEARCH 会换相（dir 1,1 -> 1,0），触发 3 ms 死区。旧代码 dead_cnt 只有
+        // 16 位，永远追不上 72000，dead 卡死 -> en 恒 0、duty 恒 0（实车表现为
+        // M=01 却不走）。等 4 ms 后必须恢复输出。
+        on_line = 1'b0; lost = 1'b1;
+        wait_us(2500);                     // LOST_HOLD(1) + 节拍
+        chk(state3 == S_SEARCH, "dead test: in SEARCH");
+        wait_us(4000);                     // > DIR_DEAD_MS(3)
+        chk(en3 === 1'b1, "dead zone clears (en)");
+        chk(duty_l3 == 11'd500 && duty_r3 == 11'd500, "dead zone clears (duty)");
 
         if (fails == 0) $display("INFO: car_fsm_tb ALL PASS");
         else            $display("INFO: car_fsm_tb %0d FAIL(S)", fails);
