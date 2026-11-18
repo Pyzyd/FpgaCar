@@ -19,13 +19,16 @@ FpgaCar/
 │   └── FpgaCar_tb.v     ← 顶层最小 testbench
 ├── tools/               ← 上板/调试/回归脚本（cap.py 抓包、run_regression.sh 全量回归、dl.bat 烧板 …）
 │   └── hooks/pre-push   ← 推送门禁：回归不过不许 push（git config core.hooksPath tools/hooks 启用）
-├── docs/                ← 硬件接口表等文档
+├── docs/                ← 硬件接口表等文档；上板使用说明.md = 现场操作与判据速查（精简，改代码要同步）
 ├── data/                ← 抓包数据（_cap*.csv / _frame*.*），可随时重抓，不入库
 ├── .scratch/            ← 一次性探测脚本与仿真中间产物，可随时删，不入库
 ├── ip/                  ← IP Manager 生成的 IP（DDR / FIFO / PLL / Sapphire …）
 ├── outflow/             ← 编译产物（FpgaCar.bit 已生成 / FpgaCar.hex / 报告），不入库
 └── work_pnr/            ← 布局布线中间文件，不入库
 ```
+
+**文档分工**：要蹲在车边照着做、只关心「按什么键、看到什么算过」的，看 `docs/上板使用说明.md`；
+要查「为什么这么设计、踩过哪些坑」的，看本文。同一事实只在一处展开，另一处给链接。
 
 **入库边界**：`sim/*_tb.v` 与 `tools/` 下正式脚本是源码、**必须入库**；被忽略的只是
 仿真产物（`*.vvp` / `.scratch/` / `_sim/`）、Efinity 产物（`outflow/` 等）、抓包数据（`data/`）和
