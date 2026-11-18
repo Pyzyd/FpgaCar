@@ -937,6 +937,34 @@ Device ID read from JTAG: 0x10660A79
 烧完立刻读串口可确认新位流已在跑（`V=03`、`W=2560 H=720` 是本次编译的值）：
 `cmd /c "tools\mon.bat COM12 5"`。JTAG 烧写是**易失**的，掉电后回到 Flash 里的旧镜像，
 要固化仍需 `tools\flash.bat`。
+
+### 官方 FlashShell 的勘察结论（2026-11-18，结论：不能替代）
+
+Efinity 2026.1 确实自带一套命令行 Flash 工具 `C:\Efinity\2026.1\pgm\flashshell\`
+（`flashshell.py`，基于 cmd2），命令包括
+`find_devices` / `auto_config` / `jtag_flash_read` / `jtag_flash_write` / `jtag_flash_erase` /
+`spi_flash_read` / `spi_flash_write` / `spi_flash_erase` / `spi_reg_*`。
+
+在命令行里执行 `flashshell.py help` 能正常列出命令，`find_devices` 也能识别到
+`('Single RS232-HS', '')`，但 **`auto_config -t jtag` 在本机直接失败**：
+
+```
+'FlashJtagManager' object has no attribute 'add_debug_profile'
+EXCEPTION of type 'AttributeError' occurred with message: 'NoneType' object has no attribute 'flash_load'
+```
+
+原因是 `exts/ext_ftdi.py` 的 `do_auto_config` 走 `jtag` 分支时调用了
+`FlashJtagManager.add_debug_profile()`，而本版本 `efx_dbg.flash.FlashJtagManager` 没有这个方法
+（安装包内部版本不一致）。`spi` 分支则需要 FTDI 直连 CCK/CS，本板排针上没有，同样不可用。
+
+**结论**：官方 FlashShell 在这块板 + 这个安装版本上不成立，继续用 `tools\flash.bat`
+（它调用的 `ftdi_program.py` 是同一套官方后端，只是绕过了那个失效的 JTAG 分支）。
+若日后升级 Efinity 到版本自洽的安装包，可重试 `auto_config -t jtag` + `jtag_flash_write -i <hex>`。
+
+另外记一个环境要求：`flashshell.py` 和 `ftdi_program.py` 的 `__main__` 都会读
+`EFINITY_USER_DIR` 与 `EFINITY_USER_DIR_INI`，缺任一个都直接 `KeyError` 退出。
+`tools\env.bat` 里已经设好，手敲命令时别漏。
+
 ### 为什么 `flash.bat` 必须三步
 
 1. **SPI Active 直连不可用**：本板 FT232H 只引到 JTAG 引脚，CCK/CS 不在 FTDI 排针上，
@@ -1256,10 +1284,27 @@ Configuration 类引脚，直接进 FPGA 的配置控制器，**RTL 完全碰不
 | ② 经桥写 Flash | `Flash device: Winbond W25Q64 8 MiB (JEDEC ID: 0xEF6017)` / 擦除 **652 KiB** / 写入 **648 KiB** / 校验通过（无 mismatch） |
 | ③ 回烧应用位流 | `Programming 'outflow/FpgaCar.bit'` → `PROGRAMMING DONE` |
 
-> **擦写参数（2026-11-18 实测）**：默认 `-m jtag_bridge` 是「直接覆盖写 + 读回校验」，在本板
-> 会报 `ERROR: Flash verify unsuccessful... mismatch found`（旧数据未擦，写保护寄存器在写完后
-> 才恢复）。**必须显式加 `--jtag_bridge_mode erase_and_write --verify_method hostx1`**，让程序
-> 先解锁扇区、擦除、再写、再读回比对。加上之后校验干净通过。
+> **擦写参数（2026-11-18 实测，含一次踩坑订正）**
+>
+> 两个参数必须一起给，而且**只能用 `all`，不能用 `erase_and_write`**：
+>
+> ```
+> -m jtag_bridge --jtag_bridge_mode all --verify_method hostx1
+> ```
+>
+> `all` = 解锁全部扇区 → 擦除 → 写入 → 从 Flash 读回逐字节比对，是 Efinity 自己的默认值，
+> 也是**唯一真正带校验的路径**。`hostx1` 让 PC 通过 JTAG 把 Flash 内容读回来算 SHA1 与源文件比；
+> `onchipx*` 靠 Flash loader 的片上 CRC，不是每块板都支持。
+>
+> **踩坑记录**：曾经改用 `--jtag_bridge_mode erase_and_write`，理由是「默认模式不擦旧扇区所以校验失败」。
+> 这个推论是错的 —— `ftdi_program.py` 的 `jtag2spi()` 分发里，`erase_and_write` 和 `write` 两个分支
+> 把 `verify_method` **硬编码成 `'none'`**（见 `jtag2spi_program(... verify_method='none')`），
+> 所以它打印的 `Flash verify successful` 来自另一条代码路径，**实际上什么都没校验**，退出码仍是 0。
+> 后果：一个坏镜像被静默写进 Flash，断电重启后设计起不来、核心板 LED 全灭（只有 JTAG 下载才能跑起来）。
+> 改成 `all + hostx1` 后读回 648 KiB SHA1 与源文件完全一致，才排除了这个隐患。
+>
+> 判据：日志里必须同时出现 `Reading ... from flash` 与 `Flash verify successful`，
+> 且 `--verify_method` 不是 `none`。只有 `PROGRAMMING DONE` 不足以证明写入正确。
 >
 > 固化的**只是裸位流**，不含 RTL 之外的状态；Flash 里没有第二镜像，回退只能靠重新综合再固化。
 > 固化后上电自启动的是这一版，与 JTAG `dl.bat` 烧的是同一份 `outflow/FpgaCar.bit`。

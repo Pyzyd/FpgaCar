@@ -40,13 +40,27 @@ echo [1/3] Loading JTAG-to-SPI bridge image ...
 if errorlevel 1 goto :fail
 
 echo [2/3] Writing %IMG% into SPI flash ...
-rem erase_and_write + hostx1 are REQUIRED on this board. The default mode is
-rem "overwrite then read back": old sectors are never erased and the write
-rem protect register is restored before verify, which ends in
-rem "ERROR: Flash verify unsuccessful... mismatch found" even though the
-rem write itself succeeded. Verified 2026-11-18.
-"%PYEXE%" "%~dp0jtag_program.py" -m jtag_bridge --jtag_bridge_mode erase_and_write --verify_method hostx1 -b "Generic Board Profile Using FT232H" -u %URL% -x "%JCF%" -n 1 "%IMG%"
+rem mode=all  = erase -> write -> read back and compare. This is Efinity's own
+rem              default and the ONLY path that actually verifies.
+rem --verify_method hostx1 = the PC reads the flash back over JTAG and compares
+rem              SHA1 against the source file. The onchipx* methods use the
+rem              flash loader's on-chip CRC and are NOT available on every board.
+rem
+rem Do NOT use --jtag_bridge_mode erase_and_write: ftdi_program.py hard-codes
+rem verify_method='none' inside that branch (see the jtag2spi dispatcher), so
+rem it prints "PROGRAMMING DONE" with zero verification and exits 0 even if the
+rem image is corrupt. Verified 2026-11-18: that path let a bad image reach the
+rem flash and the board came up dark after power cycle.
+set FLOG=%~dp0..outflowlash_write.log
+"%PYEXE%" "%~dp0jtag_program.py" -m jtag_bridge --jtag_bridge_mode all --verify_method hostx1 -b "Generic Board Profile Using FT232H" -u %URL% -x "%JCF%" -n 1 "%IMG%" > "%FLOG%" 2>&1
 if errorlevel 1 goto :fail
+rem Exit code alone proves nothing: a silent zero-verify path also returns 0.
+rem Require the read-back line AND the verify verdict in the log.
+findstr /C:"from flash" "%FLOG%" >nul || (echo ERROR: no read-back in log, write NOT verified & goto :fail)
+findstr /C:"Flash verify successful" "%FLOG%" >nul || (echo ERROR: Flash verify failed, see "%FLOG%" & goto :fail)
+rem A retry path also prints "verify successful"; reject the mismatch marker.
+findstr /C:"Flash verify unsuccessful" "%FLOG%" >nul && (echo ERROR: read-back mismatch reported, see "%FLOG%" & goto :fail)
+type "%FLOG%"
 
 echo [3/3] Restoring application bitstream ...
 if exist "%APP%" (
