@@ -1,0 +1,23 @@
+{
+  "revision": "fixed-20261117",
+  "protocol": "3-bit-strobe-two-copies",
+  "direction": "K230-to-Ti60",
+  "signals": [
+    {"signal":"D0","k230_gpio":42,"k230_header_pin":1,"ti60_user_io":25,"ti60_p4_pin":28,"gpio_def":"GPIOL_P_14","fpga_port":"k230_d[0]"},
+    {"signal":"D1","k230_gpio":43,"k230_header_pin":2,"ti60_user_io":28,"ti60_p4_pin":33,"gpio_def":"GPIOL_N_16","fpga_port":"k230_d[1]"},
+    {"signal":"D2","k230_gpio":34,"k230_header_pin":8,"ti60_user_io":29,"ti60_p4_pin":34,"gpio_def":"GPIOL_P_16","fpga_port":"k230_d[2]"},
+    {"signal":"STB","k230_gpio":35,"k230_header_pin":10,"ti60_user_io":34,"ti60_p4_pin":39,"gpio_def":"GPIOT_N_11","fpga_port":"k230_stb"}
+  ],
+  "ground": {"k230_header_pin":4,"ti60_p4_pin":30},
+  "ti60_fpga_io_standard": "1.8 V LVCMOS",
+  "ti60_header_voltage": 3.3,
+  "k230_output_voltage": "must_measure_each_signal_before_connection",
+  "lcd_reserved": [
+    {"signal":"SCLK","ti60_user_io":30,"ti60_p4_pin":35,"gpio_def":"GPIOL_N_17"},
+    {"signal":"MOSI","ti60_user_io":31,"ti60_p4_pin":36,"gpio_def":"GPIOL_P_17"},
+    {"signal":"DC","ti60_user_io":32,"ti60_p4_pin":37,"gpio_def":"GPIOL_N_18"},
+    {"signal":"RST","ti60_user_io":33,"ti60_p4_pin":38,"gpio_def":"GPIOL_P_18"},
+    {"signal":"CS","ti60_user_io":35,"ti60_p4_pin":40,"gpio_def":"GPIOT_P_11"}
+  ],
+  "lcd_status": "reserved_only_not_added_to_rtl_or_peri"
+}

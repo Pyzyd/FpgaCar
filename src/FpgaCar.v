@@ -98,7 +98,8 @@ module FpgaCar (
     input  wire         enc_rb,
 
     // ---------------- 视觉：K230 4 线并行口（见 PROJECT_PLAN §3.18）----------------
-    // K230 侧是 Python 写 GPIO，电平 1.8 V，与 User_IO 的 TXS0108 电平域一致。
+    // 固定线束见 docs/K230_GPIO_FIXED.md。P4外侧为3.3V，芯片侧为1.8V，经板载TXS0108转换。
+    // K230输出电平须实测；若为1.8V，在固定线束上加1.8->3.3V转换，不能直接当作电平一致。
     // 未上电时必须靠外部 10 kΩ 下拉把线拉低，否则悬空乱触发（见计划里的风险表）。
     input  wire [2:0]   k230_d,         // D0=GPIO42 / D1=GPIO43 / D2=GPIO34
     input  wire         k230_stb,       // STB=GPIO35，上升沿采样 D[2:0]
