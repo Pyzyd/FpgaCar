@@ -28,8 +28,8 @@ module track_pid_tb;
         .TICK_MS   (1),
         .DUTY_MAX  (1200),
         .BASE_DUTY (600),
-        .P_GAIN    (40),
-        .D_GAIN    (24),
+        .P_GAIN    (72),
+        .D_GAIN    (40),
         .I_SHIFT   (5),
         .I_LIMIT   (640)
     ) u_dut (
@@ -102,7 +102,23 @@ module track_pid_tb;
         else
             $display("FAIL: lost -> duties changed %0d/%0d (held %0d/%0d)",
                      duty_l, duty_r, hold_l, hold_r);
+
+        // ---- 5b) 重新压线不许打 D 尖峰 ----
+        // track_line 丢线时把 pos 强制清 0。若 pos_d 跟着被清零，重新压线那一拍
+        // err_d 会突变成 7 格，D 项打出 7*40=280 计数（23% 占空比）的尖峰。
+        // 这里模拟：丢线期间 pos 变 0，然后恢复到 +7，第一拍就必须稳住。
+        pos = 5'sd0;
+        wait_ticks(5);                       // 丢线期间 pos 被下游清 0
+        pos = 5'sd7;                         // 重新压线，线在右边
         lost = 1'b0;
+        wait_ticks(1);                       // 恢复后第一拍
+        c3 = corr;
+        // 无尖峰时应为 P 项 7*72=504 加积分残量（约 -20），明显低于 560；
+        // 若 D 项没屏蔽，这里会是 504+7*40=784，必然超限。
+        if (c3 <= 11'sd560)
+            $display("PASS: re-acquire no D spike (corr=%0d)", c3);
+        else
+            $display("FAIL: re-acquire D spike (corr=%0d, expect <=560)", c3);
 
         // ---- 6) en=0 归零 ----
         en = 1'b0;

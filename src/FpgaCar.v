@@ -303,8 +303,8 @@ module FpgaCar (
         .TICK_MS   (10),
         .DUTY_MAX  (1200),
         .BASE_DUTY (600),
-        .P_GAIN    (40),
-        .D_GAIN    (24),
+        .P_GAIN    (72),
+        .D_GAIN    (40),
         .I_SHIFT   (5),
         .I_LIMIT   (640)
     ) u_pid (

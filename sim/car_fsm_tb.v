@@ -21,7 +21,7 @@ module car_fsm_tb;
     reg rst_n = 1'b0;
     always #20.8335 clk = ~clk;
 
-    reg               on_line = 1'b1;      // 一开始就压线（否则上电即触发丢线流程）
+    reg               on_line = 1'b0;      // 一开始不压线：先验安全锁，再手动压线起跑
     reg               lost = 1'b0;
     reg               obstacle = 1'b0;
     reg signed [4:0]  pos = 5'sd0;
@@ -36,6 +36,7 @@ module car_fsm_tb;
     car_fsm #(
         .CLK_FREQ     (24_000_000),
         .START_MS     (1),
+        .START_REQUIRE_LINE (1),
         .LOST_HOLD_MS (1),
         .SEARCH_MS    (10),                    // 拉长到 10 ms，留出观察 SEARCH 的时间窗
         .SEARCH_DUTY  (500),
@@ -75,6 +76,15 @@ module car_fsm_tb;
         // ---- 1) IDLE ----
         chk(state == S_IDLE && en === 1'b0, "IDLE, motor off");
 
+        // ---- 1b) 安全锁：不压线就永不起跑 ----
+        // START_REQUIRE_LINE=1 时，"连续压线 START_MS"才算数；这里故意让它
+        // 空等 5 ms（远超 START_MS=1 ms），必须还停在 IDLE、电机断电。
+        wait_us(5000);
+        chk(state == S_IDLE && en === 1'b0, "no line -> stays IDLE");
+        chk(duty_l == 11'd0 && duty_r == 11'd0, "no line -> duty 0");
+
+        // ---- 2) 压线起跑 ----
+        on_line = 1'b1;
         // 进 RUN 是在 1 ms 那一拍发生的，而 duty 要等到下一个 ms 节拍才装载，
         // 所以必须等到 2 ms 之后再检查（1.3 ms 时 duty 还是 0）
         wait_us(2600);                     // 2.6 ms：已过 START_MS 且 duty 已装载

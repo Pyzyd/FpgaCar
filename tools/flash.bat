@@ -40,7 +40,12 @@ echo [1/3] Loading JTAG-to-SPI bridge image ...
 if errorlevel 1 goto :fail
 
 echo [2/3] Writing %IMG% into SPI flash ...
-"%PYEXE%" "%~dp0jtag_program.py" -m jtag_bridge -b "Generic Board Profile Using FT232H" -u %URL% -x "%JCF%" -n 1 "%IMG%"
+rem erase_and_write + hostx1 are REQUIRED on this board. The default mode is
+rem "overwrite then read back": old sectors are never erased and the write
+rem protect register is restored before verify, which ends in
+rem "ERROR: Flash verify unsuccessful... mismatch found" even though the
+rem write itself succeeded. Verified 2026-11-18.
+"%PYEXE%" "%~dp0jtag_program.py" -m jtag_bridge --jtag_bridge_mode erase_and_write --verify_method hostx1 -b "Generic Board Profile Using FT232H" -u %URL% -x "%JCF%" -n 1 "%IMG%"
 if errorlevel 1 goto :fail
 
 echo [3/3] Restoring application bitstream ...

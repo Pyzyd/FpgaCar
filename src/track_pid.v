@@ -22,8 +22,8 @@ module track_pid #(
     parameter integer TICK_MS    = 10,        // 控制周期（100 Hz）
     parameter integer DUTY_MAX   = 1200,      // = CLK_FREQ/PWM_FREQ
     parameter integer BASE_DUTY  = 600,       // 直行占空比（50%）
-    parameter integer P_GAIN     = 40,        // 比例：pos=7 → 280 计数（23% duty）
-    parameter integer D_GAIN     = 24,        // 微分：pos 突变 1 格 → 24 计数
+    parameter integer P_GAIN     = 72,        // 比例：pos=7 → 504 计数（42% duty）
+    parameter integer D_GAIN     = 40,        // 微分：pos 突变 1 格 → 40 计数
     parameter integer I_SHIFT    = 5,         // 积分右移（相当于 Ki = 1/32）
     parameter integer I_LIMIT    = 640         // 积分累加上限（抗饱和）
 ) (
@@ -52,9 +52,16 @@ module track_pid #(
     // ---------------- 误差寄存器 ----------------
     reg signed [4:0]  pos_d;
     reg signed [15:0] i_acc;
+    reg               lost_d;      // 上一拍的丢线状态
 
     wire signed [15:0] err   = {{11{pos[4]}}, pos};
-    wire signed [15:0] err_d = err - {{11{pos_d[4]}}, pos_d};
+
+    // 【重新压线时屏蔽 D 项】track_line 在丢线期间把 pos 强制拉 0。如果这里仍按
+    // 每拍更新 pos_d，丢线期间 pos_d 就会被拖到 0；重新压线那一拍 err_d 突变成
+    // 5~7 格，D 项直接打出 200~280 计数（≈20% 占空比）的尖峰，车会猛甩一下。
+    // 处理：丢线时冻结 pos_d（见下面的时序块），并在恢复后的第一拍把 D 项清零。
+    wire signed [15:0] err_d = lost_d ? 16'sd0 :
+                               (err - {{11{pos_d[4]}}, pos_d});
 
     // 各项（全部 16 位有符号）
     wire signed [15:0] p_term = err   * P_GAIN;
@@ -82,6 +89,7 @@ module track_pid #(
         if (!rst_n) begin
             pos_d  <= 5'sd0;
             i_acc  <= 16'sd0;
+            lost_d <= 1'b0;
             duty_l <= 11'd0;
             duty_r <= 11'd0;
             corr   <= 11'sd0;
@@ -89,18 +97,21 @@ module track_pid #(
             // 停机：输出清零、积分复位（避免下次启动带来残留转向）
             pos_d  <= pos;
             i_acc  <= 16'sd0;
+            lost_d <= 1'b0;
             duty_l <= 11'd0;
             duty_r <= 11'd0;
             corr   <= 11'sd0;
         end else if (tick) begin
-            pos_d <= pos;
+            lost_d <= lost;
 
             if (lost) begin
-                // 丢线：保持上一拍的转向量，只把积分冻住
+                // 丢线：保持上一拍的转向量，冻结积分，pos_d 也一起冻结
+                // （pos_d 若跟着被清零的 pos 走，重新压线时会打出 D 尖峰）
                 duty_l <= duty_l;
                 duty_r <= duty_r;
                 corr   <= corr;
             end else begin
+                pos_d <= pos;
                 if (on_line)
                     i_acc <= i_clamped;
                 duty_l <= d_l[10:0];

@@ -3,7 +3,7 @@
 // -----------------------------------------------------------------------------
 // 状态流转：
 //
-//   IDLE --(上电 START_MS)--> RUN --(丢线)--> LOST --(保持超时)--> SEARCH
+//   IDLE --(连续压线 START_MS)--> RUN --(丢线)--> LOST --(保持超时)--> SEARCH
 //                              |                 |                   |
 //                              |<--(重新压线)----+-------------------+
 //                              |                                     |
@@ -24,7 +24,8 @@
 
 module car_fsm #(
     parameter integer CLK_FREQ      = 24_000_000,
-    parameter integer START_MS      = 2000,   // 上电后等多久起跑（留时间把车放正）
+    parameter integer START_MS      = 2000,   // 连续压线多久后起跑（留时间松手）
+    parameter integer START_REQUIRE_LINE = 1, // 1 = 必须压线才起跑（安全锁）
     parameter integer LOST_HOLD_MS  = 300,    // 丢线先保持多久
     parameter integer SEARCH_MS     = 1500,   // 原地找线最长多久
     parameter integer SEARCH_DUTY   = 500,    // 找线时的占空比
@@ -157,7 +158,15 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                     duty_r <= 11'd0;
                     dir_l_des <= 1'b1;
                     dir_r_des <= 1'b1;
-                    if (ms_cnt >= START_MS - 1) begin
+                    // 【起跑条件 / 安全锁】
+                    //   START_REQUIRE_LINE=1（默认）时必须"连续压线 START_MS"才起跑，
+                    //   相当于把"把车放到线上"当作钥匙。理由：电机接上以后，
+                    //   旧的"上电计时到点就跑"会让车在桌面/箱子里自己窜出去；
+                    //   没压线时这里会一直停着，绝不会自行启动。
+                    //   =0 时退回旧行为（仅台架/专项测试用）。
+                    if (START_REQUIRE_LINE != 0 && !(on_line && !lost)) begin
+                        ms_cnt <= 16'd0;        // 一离线就重新计时，防止抖动蒙混起跑
+                    end else if (ms_cnt >= START_MS - 1) begin
                         ms_cnt <= 16'd0;
                         state  <= S_RUN;
                     end else begin

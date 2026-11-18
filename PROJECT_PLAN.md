@@ -1247,17 +1247,22 @@ Configuration 类引脚，直接进 FPGA 的配置控制器，**RTL 完全碰不
 已实测：擦除写入 562 KiB、读回校验 `Flash verify successful`、随后回烧应用位流 `FLASH DONE`。
 固化后按 K3 每次都会重新配置并重跑白闪自检。
 
-**最近一次固化（2026-11-18）**：位流为 2026-11-17 22:14 生成的那一版（含 OLED 调试区、
-page0 八位二进制串、`USE_IR = 1'b0`）。三步实测记录：
+**最近一次固化（2026-11-18 16:41）**：位流含 OLED 调试区、page0 八位二进制串、`USE_IR = 1'b0`、
+`P_GAIN=72`/`D_GAIN=40`、`car_fsm` 起跑安全锁（`START_REQUIRE_LINE=1`）。三步实测记录：
 
 | 步骤 | 输出 |
 |---|---|
 | ① 载入 JTAG→SPI 桥 | `Programming 'C:/Efinity/2026.1/pgm/fli/titanium/u10660A79.bit'` → `PROGRAMMING DONE` |
-| ② 经桥写 Flash | `Flash device: Winbond W25Q64 8 MiB (JEDEC ID: 0xEF6017)` / 擦除 **656 KiB** / 写入 **654 KiB** / `Flash verify successful` |
+| ② 经桥写 Flash | `Flash device: Winbond W25Q64 8 MiB (JEDEC ID: 0xEF6017)` / 擦除 **652 KiB** / 写入 **648 KiB** / 校验通过（无 mismatch） |
 | ③ 回烧应用位流 | `Programming 'outflow/FpgaCar.bit'` → `PROGRAMMING DONE` |
 
-> 镜像从 562 KiB 涨到 654 KiB 是调试区（`oled_digits` ROM + `S_DBG` 逻辑）带来的，属正常。
+> **擦写参数（2026-11-18 实测）**：默认 `-m jtag_bridge` 是「直接覆盖写 + 读回校验」，在本板
+> 会报 `ERROR: Flash verify unsuccessful... mismatch found`（旧数据未擦，写保护寄存器在写完后
+> 才恢复）。**必须显式加 `--jtag_bridge_mode erase_and_write --verify_method hostx1`**，让程序
+> 先解锁扇区、擦除、再写、再读回比对。加上之后校验干净通过。
+>
 > 固化的**只是裸位流**，不含 RTL 之外的状态；Flash 里没有第二镜像，回退只能靠重新综合再固化。
+> 固化后上电自启动的是这一版，与 JTAG `dl.bat` 烧的是同一份 `outflow/FpgaCar.bit`。
 
 > **K1 的定位**：保留，作为**调试专用逻辑复位**——只复位用户逻辑（`sys_rst_n`），
 > 不动配置、不掉位流，开发期间可以反复按。K3 则是整片重配置，只在验证上电自启动时用。
@@ -1454,13 +1459,32 @@ track_line.pos ──► track_pid ──► pid_duty_l/r ──► car_fsm ─�
 
 | 现象 | 含义 |
 |---|---|
-| 上电 2 s 内轮子不动，之后按线走 | IDLE → RUN 正常 |
+| 上电后轮子不动，**把车放到黑线上持续 2 s** 才起跑 | 安全锁正常（2026-11-18 起） |
 | 压线偏右时左轮明显快 | PID 方向对（`pos>0 → 左快`） |
 | 完全离地（全白）→ 约 0.3 s 后原地向左/右转 | LOST → SEARCH 正常 |
 | 手挡超声波 → 停住，移开后自动恢复 | 障碍联动正常 |
 
-参数起步值：`BASE_DUTY=600`（50%）、`P_GAIN=40`、`D_GAIN=24`、`I_SHIFT=5`。
+参数起步值：`BASE_DUTY=600`（50%）、`P_GAIN=72`、`D_GAIN=40`、`I_SHIFT=5`、`I_LIMIT=640`。
 上车后先只调 `P_GAIN`（摆振就减、跟不上就加），再动 `D_GAIN`。
+
+> **2026-11-18 参数调整（P 40→72、D 24→40）**：原 `P_GAIN=40` 在 pos=7 时只有 280 计数
+> （23% 占空比），`sum_lim` 的 ±`BASE_DUTY`(600) 限幅永远碰不到，两轮只能在 300~900 之间
+> 变化，急弯内侧轮降不到低速。改成 72 后 pos=7 → 504 计数（42%），限幅才真正起作用。
+>
+> **同时修的两个缺陷**：
+> 1. **重新压线时 D 项打尖峰**：`track_line` 丢线时把 `pos` 强制清 0，而 `track_pid` 每拍都
+>    执行 `pos_d <= pos`，于是丢线期间 `pos_d` 被拖到 0；重新压线那一拍 `err_d` 突变成 5~7 格，
+>    D 项打出 200~280 计数（≈20% 占空比）的尖峰，车会猛甩一下。修法：`pos_d <= pos` 移进
+>    非丢线分支冻结，并新增 `lost_d` 把恢复后第一拍的 D 项清零。
+> 2. **积分几乎不起作用**：`i_acc` 钳在 ±I_LIMIT=640，右移 `I_SHIFT=5` 后最大 ±20 计数
+>    （1.7% 占空比），而总修正量是 ±500 量级 —— 等于没有积分。当前按 PD 用（循迹用 PD 本身
+>    没问题），要消一侧电机偏慢的稳态偏差时再把 `I_LIMIT` 放大到 8000 量级。
+
+> **2026-11-18 起跑安全锁**：`car_fsm` 新增 `START_REQUIRE_LINE`（默认 1），起跑条件从
+> 「上电计时 START_MS」改为「**连续压线 START_MS**」。电机接上后，旧逻辑会让上电 2 s 的车
+> 在桌面/箱子里自己窜出去（没线就走 RUN→LOST→SEARCH 原地打转）。现在没压线会一直停在
+> IDLE、`motor_stby=0`，把车放到线上才算"钥匙"。`START_REQUIRE_LINE=0` 可退回旧行为，
+> 仅台架/专项测试用。
 
 ### 遗留
 
@@ -1946,8 +1970,9 @@ tools\flash.bat       # 固化进 SPI Flash（三步：bridge → 写入 → 回
 暂做不了、等电机/编码器到货再验的：**左轮 25% 转动**（PWM→TB6612 通路）、
 **手转轮看 `LED[0]` 闪**（编码器 AB 相，能提前发现接反/缺上拉）。
 
-当前顶层是台架态：`FpgaCar.v:153` `PWM_BENCH_TEST = 1'b1`（`ml_in1`/`motor_stby` 直接绑它，
-=1 时 TB6612 一上电就工作）。**电机到货、车架上地之前必须改回 `0`。**
+~~当前顶层是台架态~~ —— **已过期**：`FpgaCar.v:142` 现为 `PWM_BENCH_TEST = 1'b0`，
+闭环已接管（2026-11-16 起）。台架态（`=1`，左轮 25% 常转）只在需要单独验 PWM→TB6612 通路时
+临时打开，且**开着时右轮 IN1/IN2 恒 0 不转**。
 
 ### 第 2 步：下一段 RTL = `sccb_cfg.v`（理由：零新硬件依赖 + 卡 45 分）
 
