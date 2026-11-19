@@ -44,7 +44,7 @@ module car_fsm #(
     parameter integer AVOID_EN    = 1,      // 1 = 遇障碍执行避障；0 = 旧行为（原地停，障碍消失即走）
     parameter integer AVOID_BACK_MS = 400,  // 后退时长
     parameter integer AVOID_BACK_DUTY = 500,// 后退占空比
-    parameter integer AVOID_TURN_MS = 600,  // 原地转时长
+    parameter integer AVOID_TURN_MS = 600,  // 出线转向和摆正的原地转时长
     parameter integer AVOID_TURN_DUTY = 600,// 原地转占空比
     parameter integer AVOID_PROBE_MS = 400, // 试探前进时长
     parameter integer AVOID_PROBE_DUTY = 450,// 试探前进占空比
@@ -72,7 +72,8 @@ module car_fsm #(
     // 不保持的话，一次转弯只有 1~2 ms 的脉冲，OLED 每 100 ms 才采一次样，
     // 基本抓不到；但一直保持又会让直道上也显示"正在左转"，反而看不懂。
     // 1500 ms 覆盖整个 S_SEARCH（SEARCH_MS=1500），之后自动熄灭。
-    parameter integer TURN_DIR_HOLD_MS = 1500
+    parameter integer TURN_DIR_HOLD_MS = 1500,
+    parameter integer AVOID_TURN_IN_MS = AVOID_TURN_MS // 绕过障碍后朝黑线原地转的时长
 ) (
     input  wire              clk,
     input  wire              rst_n,
@@ -161,19 +162,33 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     reg [2:0] bypass_step;
     reg bypass_left_line;
     reg [15:0] bypass_line_cnt, bypass_block_cnt;
+    wire avoid_backing = (state == S_AVOID_BACK);
+    wire avoid_turning_out = (state == S_AVOID_TURN);
+    wire avoid_active = avoid_backing || avoid_turning_out || (state == S_AVOID_PROBE);
     wire bypass_active = (AVOID_ROUTE_EN != 0) && (state == S_AVOID_PROBE);
     wire bypass_forward = (bypass_step == BY_OUT || bypass_step == BY_PASS || bypass_step == BY_REJOIN);
-    wire bypass_dir_l = bypass_forward || avoid_left;
-    wire bypass_dir_r = bypass_forward || !avoid_left;
-    wire bypass_blocked = bypass_forward && obstacle;
-    wire bypass_dirs_ready = (dir_l == bypass_dir_l) && (dir_r == bypass_dir_r);
+    wire bypass_blocked = bypass_active && bypass_forward && obstacle;
     wire bypass_has_line = on_line && !lost && !wide;
-    wire [10:0] bypass_duty = !bypass_forward ? AVOID_TURN_DUTY[10:0] :
-                             (bypass_step == BY_REJOIN ? AVOID_REJOIN_DUTY[10:0] : AVOID_PROBE_DUTY[10:0]);
+
+    // 出线朝绕行的一侧转，摆正和回线转向则朝相反一侧转。
+    // 转向统一让一轮正转、另一轮反转，两轮使用相同的转向占空比。
+    wire avoid_pivot = avoid_turning_out || (bypass_active && !bypass_forward);
+    wire avoid_turn_left = avoid_turning_out ? avoid_left : !avoid_left;
+    wire avoid_forward = (state == S_AVOID_PROBE) && !avoid_pivot;
+    wire avoid_dir_l = avoid_forward || (avoid_pivot && !avoid_turn_left);
+    wire avoid_dir_r = avoid_forward || (avoid_pivot && avoid_turn_left);
+    wire [10:0] avoid_duty = avoid_backing ? AVOID_BACK_DUTY[10:0] :
+                            avoid_pivot ? AVOID_TURN_DUTY[10:0] :
+                            (bypass_active && bypass_step == BY_REJOIN) ? AVOID_REJOIN_DUTY[10:0] :
+                            AVOID_PROBE_DUTY[10:0];
+    // 每段只在死区结束、两轮方向和占空比就绪后计时。
+    wire avoid_dirs_ready = !dead && !bypass_blocked &&
+                            (dir_l == avoid_dir_l) && (dir_r == avoid_dir_r);
+    wire avoid_drive = avoid_dirs_ready && (duty_l == avoid_duty) && (duty_r == avoid_duty);
 
     wire en_run = (state == S_RUN)   || (state == S_LOST)     || (state == S_SEARCH)
-               || (state == S_AVOID_BACK) || (state == S_AVOID_TURN) || (state == S_AVOID_PROBE);
-    assign en = en_run && !dead && (!bypass_active || (!bypass_blocked && bypass_dirs_ready));
+               || avoid_active;
+    assign en = en_run && !dead && (!avoid_active || avoid_drive);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -250,6 +265,12 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
 
             // ---- 主状态机（1 ms 步进）----
             if (ms_tick) begin
+                if (avoid_active) begin
+                    dir_l_des <= avoid_dir_l;
+                    dir_r_des <= avoid_dir_r;
+                    duty_l <= avoid_dirs_ready ? avoid_duty : 11'd0;
+                    duty_r <= avoid_dirs_ready ? avoid_duty : 11'd0;
+                end
                 if (!bypass_active) begin
                     bypass_step <= BY_OUT;
                     bypass_left_line <= 1'b0;
@@ -469,34 +490,24 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                 //   用尽后进 S_STOP 等障碍消失，避免顶死在墙角反复撞。
                 // ----------------------------------------------------------
                 S_AVOID_BACK: begin
-                    // 后退：两轮同向反转
-                    dir_l_des <= 1'b0;
-                    dir_r_des <= 1'b0;
-                    if (!dead) begin
-                        duty_l <= AVOID_BACK_DUTY[10:0];
-                        duty_r <= AVOID_BACK_DUTY[10:0];
-                    end
-                    if (ms_cnt >= AVOID_BACK_MS - 1) begin
-                        ms_cnt <= 16'd0;
-                        state  <= S_AVOID_TURN;
-                    end else begin
-                        ms_cnt <= ms_cnt + 16'd1;
+                    if (avoid_drive) begin
+                        if (ms_cnt >= AVOID_BACK_MS - 1) begin
+                            ms_cnt <= 16'd0;
+                            state  <= S_AVOID_TURN;
+                        end else begin
+                            ms_cnt <= ms_cnt + 16'd1;
+                        end
                     end
                 end
 
                 S_AVOID_TURN: begin
-                    // 原地转：一侧前进、一侧后退。方向按 avoid_left 定。
-                    dir_l_des <= avoid_left ? 1'b0 : 1'b1;  // 往左绕：左轮后退
-                    dir_r_des <= avoid_left ? 1'b1 : 1'b0;
-                    if (!dead) begin
-                        duty_l <= AVOID_TURN_DUTY[10:0];
-                        duty_r <= AVOID_TURN_DUTY[10:0];
-                    end
-                    if (ms_cnt >= AVOID_TURN_MS - 1) begin
-                        ms_cnt <= 16'd0;
-                        state  <= S_AVOID_PROBE;
-                    end else begin
-                        ms_cnt <= ms_cnt + 16'd1;
+                    if (avoid_drive) begin
+                        if (ms_cnt >= AVOID_TURN_MS - 1) begin
+                            ms_cnt <= 16'd0;
+                            state  <= S_AVOID_PROBE;
+                        end else begin
+                            ms_cnt <= ms_cnt + 16'd1;
+                        end
                     end
                 end
 
@@ -504,13 +515,9 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                     if (AVOID_ROUTE_EN != 0) begin
                         // 向外驶离 → 摆正 → 侧边超越 → 转向线内 → 低速回线。
                         // 这几段由避障控制，途中看到黑线也不能提前交回普通找线。
-                        dir_l_des <= bypass_dir_l;
-                        dir_r_des <= bypass_dir_r;
                         if (lost) bypass_left_line <= 1'b1;
 
                         if (bypass_blocked) begin
-                            duty_l <= 11'd0;
-                            duty_r <= 11'd0;
                             bypass_line_cnt <= 16'd0;
                             if (bypass_block_cnt >= AVOID_BLOCK_MS - 1) begin
                                 final_stop <= 1'b1;
@@ -518,10 +525,8 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             end else begin
                                 bypass_block_cnt <= bypass_block_cnt + 16'd1;
                             end
-                        end else if (!dead && bypass_dirs_ready) begin
+                        end else if (avoid_drive) begin
                             bypass_block_cnt <= 16'd0;
-                            duty_l <= bypass_duty;
-                            duty_r <= bypass_duty;
                             ms_cnt <= ms_cnt + 16'd1;
                             case (bypass_step)
                                 BY_OUT: if (ms_cnt >= AVOID_PROBE_MS - 1) begin
@@ -541,7 +546,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                                         state <= S_STOP;
                                     end
                                 end
-                                BY_TURN_IN: if (ms_cnt >= AVOID_TURN_MS - 1) begin
+                                BY_TURN_IN: if (ms_cnt >= AVOID_TURN_IN_MS - 1) begin
                                     ms_cnt <= 16'd0;
                                     bypass_step <= BY_REJOIN;
                                 end
@@ -562,14 +567,8 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                                 end
                             endcase
                         end
-                    end else begin
+                    end else if (avoid_drive) begin
                         // 传统试探段供原有调用方式使用。
-                        dir_l_des <= 1'b1;
-                        dir_r_des <= 1'b1;
-                        if (!dead) begin
-                            duty_l <= AVOID_PROBE_DUTY[10:0];
-                            duty_r <= AVOID_PROBE_DUTY[10:0];
-                        end
                         // 前 AVOID_PROBE_SETTLE_MS 不判障碍：刚转完身障碍还在正前方是
                         // 正常的，要等车真的往前探一段再判断"还堵着没"。
                         if (obstacle && (ms_cnt >= AVOID_PROBE_SETTLE_MS[15:0])) begin
