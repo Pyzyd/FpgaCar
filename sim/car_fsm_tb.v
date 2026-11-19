@@ -120,6 +120,10 @@ module car_fsm_tb;
     wire              en4, dir_l4, dir_r4;
     wire [10:0]       duty_l4, duty_r4;
     wire [2:0]        state4;
+    localparam integer AVOID_TEST_DEAD_MS = 3, AVOID_TEST_MOVE_MS = 8;
+    // 包含方向请求、完整死区、PWM 装载和轮询对齐的余量。
+    localparam integer AVOID_STAGE_TIMEOUT_US = 1000 * (AVOID_TEST_MOVE_MS + AVOID_TEST_DEAD_MS + 3);
+    localparam integer AVOID_RETRY_TIMEOUT_US = 2 * AVOID_STAGE_TIMEOUT_US;
 
     car_fsm #(
         .CLK_FREQ     (24_000_000),
@@ -129,13 +133,13 @@ module car_fsm_tb;
         .SEARCH_MS    (10),
         .SEARCH_DUTY  (500),
         .SEARCH_FAIL_TO_IDLE (1),
-        .DIR_DEAD_MS  (3),                      // 3 ms 死区 > 1 拍，必须等它走完
+        .DIR_DEAD_MS  (AVOID_TEST_DEAD_MS),
         .AVOID_EN     (1),
-        .AVOID_BACK_MS   (8),                   // 每段 8 ms，给死区留出余量
+        .AVOID_BACK_MS   (AVOID_TEST_MOVE_MS),
         .AVOID_BACK_DUTY (400),
-        .AVOID_TURN_MS   (8),
+        .AVOID_TURN_MS   (AVOID_TEST_MOVE_MS),
         .AVOID_TURN_DUTY (400),
-        .AVOID_PROBE_MS  (8),
+        .AVOID_PROBE_MS  (AVOID_TEST_MOVE_MS),
         .AVOID_PROBE_DUTY(350),
         .AVOID_PROBE_SETTLE_MS (2),             // 静默窗 2 ms，用例 10/11 才能看到试探段
         .AVOID_TRIES  (2)
@@ -355,15 +359,13 @@ module car_fsm_tb;
         end
     endtask
 
-    // 轮询等"方向 + 双轮占空比"三者同时到位。
-    // 不能只看 duty：进新一段时本段 duty 会先装载一次，随后换相死区把 duty
-    // 压到 0 再放开，中间会出现"duty 已是新值、dir 还是旧值"的窗口。
+    // 等待动作实际使能，且两轮的方向、占空比都符合本段要求。
     task wait_avoid (input dl_want, input dr_want, input [10:0] d_want,
                      input integer timeout_us);
         integer n;
         begin
             n = 0;
-            while ((dir_l4 !== dl_want || dir_r4 !== dr_want ||
+            while ((en4 !== 1'b1 || dir_l4 !== dl_want || dir_r4 !== dr_want ||
                     duty_l4 != d_want || duty_r4 != d_want) && n < timeout_us) begin
                 wait_us(100);
                 n = n + 100;
@@ -476,10 +478,8 @@ module car_fsm_tb;
 
         // ---- 9) 避障三段：障碍 -> BACK -> TURN -> PROBE -> RUN ----
         // 两个坑：
-        //   a) 进新一段时先改 dir_*_des，换相死区（DIR_DEAD_MS=3 ms）会把
-        //      dir/duty 压住 3 ms，断言方向/占空比必须等到 duty 真正装载；
-        //   b) PROBE 期间若障碍仍在会立刻重试，PROBE 只停留约 1 ms。
-        // 所以一律用 wait_state4 / wait_duty4 轮询，不用定长延时。
+        // 换向和 PWM 装载结束后才计入每段时长。用轮询捕捉各段，
+        // 重试时也给前一段余下动作和试探静默窗留出时间。
         lost4 = 1'b0; on4 = 1'b1;
         wait_state4(S_RUN, 5000);
         chk4(state4 == S_RUN && en4 === 1'b1, "avoid: in RUN");
@@ -491,20 +491,20 @@ module car_fsm_tb;
         chk4(dir_l4 === 1'b0 && dir_r4 === 1'b0, "avoid: BACK both reverse");
         chk4(duty_l4 == 11'd400 && duty_r4 == 11'd400, "avoid: BACK duty 400");
 
-        wait_state4(S_AVOID_TURN, 12000);
+        wait_state4(S_AVOID_TURN, AVOID_STAGE_TIMEOUT_US);
         chk4(state4 == S_AVOID_TURN, "avoid: BACK -> TURN");
         wait_avoid(1'b0, 1'b1, 11'd400, 9000);
         chk4(dir_l4 === 1'b0 && dir_r4 === 1'b1, "avoid: TURN left wheel back");
         chk4(duty_l4 == 11'd400 && duty_r4 == 11'd400, "avoid: TURN duty 400");
 
         obs4 = 1'b0;                       // 转完把障碍拿开，试探应成功
-        wait_state4(S_AVOID_PROBE, 12000);
+        wait_state4(S_AVOID_PROBE, AVOID_STAGE_TIMEOUT_US);
         chk4(state4 == S_AVOID_PROBE, "avoid: TURN -> PROBE");
         wait_avoid(1'b1, 1'b1, 11'd350, 9000);
         chk4(dir_l4 === 1'b1 && dir_r4 === 1'b1, "avoid: PROBE forward");
         chk4(duty_l4 == 11'd350 && duty_r4 == 11'd350, "avoid: PROBE duty 350");
 
-        wait_state4(S_RUN, 12000);
+        wait_state4(S_RUN, AVOID_STAGE_TIMEOUT_US);
         chk4(state4 == S_RUN, "avoid: PROBE -> RUN");
 
         // ---- 10) 试探仍被挡 -> 重来一轮，第二次转向与第一次相反 ----
@@ -512,23 +512,23 @@ module car_fsm_tb;
         wait_state4(S_AVOID_BACK, 2000);
         chk4(state4 == S_AVOID_BACK, "retry: BACK again");
 
-        wait_state4(S_AVOID_TURN, 12000);
+        wait_state4(S_AVOID_TURN, AVOID_STAGE_TIMEOUT_US);
         chk4(state4 == S_AVOID_TURN, "retry: TURN again");
         wait_avoid(1'b0, 1'b1, 11'd400, 9000);
         chk4(dir_l4 === 1'b0 && dir_r4 === 1'b1, "retry: TURN same side");
 
         // 第一轮试探被挡后会翻向，回到 BACK 再来一遍
-        wait_state4(S_AVOID_BACK, 12000);
+        wait_state4(S_AVOID_BACK, AVOID_RETRY_TIMEOUT_US);
         chk4(state4 == S_AVOID_BACK, "retry: flip -> BACK");
 
-        wait_state4(S_AVOID_TURN, 12000);
+        wait_state4(S_AVOID_TURN, AVOID_STAGE_TIMEOUT_US);
         chk4(state4 == S_AVOID_TURN, "retry: TURN after flip");
         wait_avoid(1'b1, 1'b0, 11'd400, 9000);
         chk4(dir_l4 === 1'b1 && dir_r4 === 1'b0, "retry: TURN flips side");
 
         // ---- 11) 次数用尽 -> STOP；障碍消失后自动回 RUN ----
         // AVOID_TRIES=2：这一轮 PROBE 仍被挡即放弃。
-        wait_state4(S_STOP, 20000);
+        wait_state4(S_STOP, AVOID_RETRY_TIMEOUT_US);
         chk4(state4 == S_STOP && en4 === 1'b0, "retry2: tries used -> STOP");
 
         obs4 = 1'b0;
