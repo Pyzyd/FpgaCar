@@ -7,7 +7,7 @@ from album import mkdir
 
 
 class RunRecorder:
-    def __init__(self,session,config):
+    def __init__(self,session,config,source_files=None,software='FpgaCar-K230-v1.6.1',screen_offset=60):
         self.path=session+'/analysis'
         mkdir(self.path)
         mkdir(self.path+'/images')
@@ -30,9 +30,9 @@ class RunRecorder:
                 value=getattr(config,name)
                 if isinstance(value,(str,int,float,bool,tuple,list)) or value is None:
                     settings[name]=value
-        manifest=json.dumps({'schema':1,'software':'FpgaCar-K230-v1.6.1',
+        manifest=json.dumps({'schema':1,'software':software,
                 'firmware':sys.version,'board':list(os.uname()),'config':settings,
-                'coordinates':'detections/tracks: 640x360; screen y offset +60',
+                'coordinates':'detections/tracks: 640x360; screen y offset +%d'%screen_offset,
                 'images':'raw 640x360 periodic/key frames; NOT complete video',
                 'durability':'buffer <= 500ms normally; sync <=2s; critical events sync immediately'})
         self._space(len(manifest.encode('utf-8')))
@@ -42,14 +42,16 @@ class RunRecorder:
         self._open()
         # Save exact deployed sources for reproducing this run's analysis.
         mkdir(self.path+'/source')
-        for name in ('main.py','config.py','detector.py','arrow_core.py','arrow_templates.py',
-                     'color_core.py','color_detector.py','multi_tracker.py','run_recorder.py','gpio_link.py','album.py'):
+        if source_files is None:
+            source_files=('main.py','config.py','detector.py','arrow_core.py','arrow_templates.py',
+                          'color_core.py','color_detector.py','multi_tracker.py','run_recorder.py','gpio_link.py','album.py')
+        for name in source_files:
             try:
                 with open('/sdcard/car_vision/'+name,'r') as src:
                     data=src.read()
                 size=len(data.encode('utf-8'))
                 self._space(size)
-                with open(self.path+'/source/'+name,'w') as dst:
+                with open(self.path+'/source/'+name.replace('/','__'),'w') as dst:
                     dst.write(data)
                 self.bytes+=size
             except OSError:

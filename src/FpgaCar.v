@@ -121,9 +121,8 @@ module FpgaCar (
     // K230 视觉链路：颜色事件的来源改由它提供（USE_CAMERA 才是 OV5640 那条路）。
     // 两者互斥地驱动同一组 cam_color/cam_color_evt 也可以，但没必要 ——
     // 赛场上 K230 是主方案，OV5640 只作退路，用一个开关明确二选一更不容易出错。
-    // 2026-11-18 起临时关闭：K230 尚未接线，k230_off 恒 1 会让 OLED 右上角一直画叉号，
-    // 看起来像故障。只测循迹期间关掉；接回 K230 时改回 1'b1。
-    localparam USE_K230   = 1'b0;
+    // 前视联调分支：启用固定 K230 GPIO 线束，转向仍等待 Ti60 循迹确认。
+    localparam USE_K230   = 1'b1;
 
     // ------------------------------------------------------------------
     // 复位同步化：异步有效、同步释放
@@ -366,6 +365,7 @@ module FpgaCar (
         .SEARCH_FAIL_TO_IDLE (1),
         .DIR_DEAD_MS  (10),
         .TURN_MS      (700),
+        .TURN_WAIT_FOR_CORNER (USE_K230),
         .TURN_DUTY    (700),
         // 避障三段：后退 → 原地转 → 试探前进，最多 3 轮，用尽则停车等障碍消失。
         // 只测循迹不想让车绕行时把 AVOID_EN 改成 0（退回"遇障碍原地停"）。
@@ -583,7 +583,7 @@ module FpgaCar (
     wire       seq_valid;
     wire       seq_full;
 
-    color_seq u_seq (
+    color_seq #(.DEDUP_COLORS(!USE_K230)) u_seq (
         .clk       (clk),
         .rst_n     (sys_rst_n),
         .color_in  (color_in_mux),

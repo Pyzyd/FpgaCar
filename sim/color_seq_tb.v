@@ -30,6 +30,14 @@ module color_seq_tb;
         .cnt(cnt), .seq_valid(seq_valid), .complete(complete)
     );
 
+    wire [2:0] passage0, passage1, passage2, passage3;
+    wire passage_full;
+    color_seq #(.DEDUP_COLORS(0)) u_passages (
+        .clk(clk), .rst_n(rst_n), .color_in(color_in), .new_color(new_color), .clr(clr),
+        .seq0(passage0), .seq1(passage1), .seq2(passage2), .seq3(passage3),
+        .cnt(), .seq_valid(), .complete(passage_full)
+    );
+
     integer pulses = 0;
     always @(posedge clk) if (seq_valid) pulses = pulses + 1;
 
@@ -79,6 +87,9 @@ module color_seq_tb;
         expect_seq(1, 3, 2, 4, 4, "green/yellow fill");
         if (complete === 1'b1) $display("PASS: complete asserted after 4 colors");
         else                   $display("FAIL: complete = %0b after 4 colors", complete);
+        if ({passage0, passage1, passage2, passage3, passage_full} ===
+            {3'd1, 3'd3, 3'd1, 3'd2, 1'b1}) $display("PASS: K230 counts separate same-color passages");
+        else $fatal(1, "FAIL: K230 discarded a separate same-color passage");
 
         push(3'd2);                     // 满了以后的重复/新颜色都不该动
         push(3'd3);

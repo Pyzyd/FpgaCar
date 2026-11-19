@@ -194,6 +194,7 @@ module oled_driver #(
             tb2     <= 8'h00;
             e_busy  <= 1'b0;
             e_done  <= 1'b0;
+            ack_err   <= 1'b0;
             nack_seen <= 1'b0;      // 只在复位时清，运行中永不回落
             scl     <= 1'b1;
             sda_out <= 1'b1;
@@ -451,8 +452,6 @@ module oled_driver #(
             dbg_turn_r  <= 2'd0;
             dbg_lost_r  <= 1'b0;
             dbg_cnt     <= 26'd0;
-            ack_err     <= 1'b0;      // 复位后到首笔事务之间不能是 X
-            nack_seen   <= 1'b0;
             frame_done  <= 1'b0;
             frame_pend  <= 1'b0;
             x_req       <= 1'b0;

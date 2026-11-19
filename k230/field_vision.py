@@ -1,0 +1,170 @@
+"""K230 front camera: traffic arrows and passing color blocks."""
+
+import config as C
+from color_detector import detect_multi_colors
+from multi_tracker import MultiTracker
+from turn_detector import detect as detect_turn
+from turn_shape import StableEvent
+
+
+VERSION = 'FpgaCar-field-vision-v1'
+EVENT_CODES = {'left':1, 'right':2, 'red':3, 'green':4, 'blue':5, 'yellow':6}
+LABELS = {'left':'左转', 'right':'右转', 'red':'红', 'green':'绿', 'blue':'蓝', 'yellow':'黄'}
+SOURCES = ('field_vision.py','config.py','color_detector.py','color_core.py','arrow_core.py',
+           'arrow_templates.py','multi_tracker.py','gpio_link.py','album.py','run_recorder.py',
+           'turn_verify/turn_detector.py','turn_verify/turn_shape.py','turn_verify/turn_templates.py')
+
+
+class FieldVision:
+    def __init__(self):
+        self.turn_gate = StableEvent(confirm=3, rearm=6)
+        self.tracker = MultiTracker(width=C.PREVIEW_WIDTH, arm=C.FIELD_ARM_EDGE,
+                                    commit=C.FIELD_PASS_EDGE, min_travel=C.FIELD_MIN_TRAVEL,
+                                    hold_ms=C.FIELD_EDGE_HOLD_MS, edge_pass=True)
+        self.last_turn = None
+
+    def update(self, img, now):
+        turn = detect_turn(img)
+        direction = self.turn_gate.update(turn['label'], turn['present'])
+        events = []
+        if direction:
+            self.last_turn = direction
+            events.append({'kind':'turn','label':direction})
+
+        sign_box = turn['box'] if turn['present'] else None
+        colors = detect_multi_colors(img, field=True, sign_box=sign_box)
+        tracking = self.tracker.update(colors['candidates'], now)
+        for passage in tracking['events']:
+            if passage['included']:
+                events.append({'kind':'color','label':passage['label'],'track':passage['track']})
+        return {'turn':turn, 'last_turn':self.last_turn, 'colors':colors,
+                'tracking':tracking, 'sequence':tracking['sequence'], 'events':events}
+
+
+def open_recorder():
+    from album import Album
+    from run_recorder import RunRecorder
+
+    for root in ('/data/field_vision_runs', '/sdcard/field_vision_runs'):
+        try:
+            session = Album(root, C.LOG_MIN_FREE_BYTES).path
+            return RunRecorder(session, C, source_files=SOURCES, software=VERSION, screen_offset=0)
+        except OSError as exc:
+            print('[SD]', root, exc)
+    return None
+
+
+def main(send_gpio=False):
+    import gc
+    import image
+    import os
+    import time
+    from media.sensor import Sensor, CAM_CHN_ID_0, CAM_CHN_ID_1
+    from media.display import Display
+    from media.media import MediaManager
+
+    sensor = None
+    display_ready = media_ready = sensor_running = False
+    link = recorder = None
+    os.exitpoint(os.EXITPOINT_ENABLE)
+    try:
+        sensor = Sensor()
+        sensor.reset()
+        width,height = C.PREVIEW_WIDTH,C.PREVIEW_HEIGHT
+        sensor.set_framesize(width=width,height=height,chn=CAM_CHN_ID_0)
+        sensor.set_pixformat(Sensor.RGB565,chn=CAM_CHN_ID_0)
+        sensor.set_framesize(width=width,height=height,chn=CAM_CHN_ID_1)
+        sensor.set_pixformat(Sensor.YUV420SP,chn=CAM_CHN_ID_1)
+        sensor.set_hmirror(C.HMIRROR)
+        sensor.set_vflip(C.VFLIP)
+        Display.bind_layer(**sensor.bind_info(x=0,y=0,chn=CAM_CHN_ID_1),layer=Display.LAYER_VIDEO1)
+        Display.init(Display.ST7701,width=C.WIDTH,height=C.HEIGHT,to_ide=False,osd_num=1)
+        display_ready = True
+        MediaManager.init()
+        media_ready = True
+        sensor.run()
+        sensor_running = True
+        if send_gpio:
+            try:
+                from gpio_link import GpioLink
+                link = GpioLink()
+            except Exception as exc:
+                print('[GPIO] disabled:',exc)
+        recorder = open_recorder()
+        vision = FieldVision()
+        panels = [image.Image(width,C.HEIGHT-height,image.RGB888) for _ in range(3)]
+        index = frame_id = rate_count = 0
+        fps = 0.
+        warmed_at = rate_at = last_draw = time.ticks_ms()
+        print('[FIELD]', VERSION, 'GPIO:', bool(link), 'SD:', recorder.path if recorder else 'off')
+        while True:
+            os.exitpoint()
+            started = time.ticks_ms()
+            try:
+                frame = sensor.snapshot(chn=CAM_CHN_ID_0,timeout=120)
+            except RuntimeError:
+                if link:
+                    link.poll()
+                time.sleep_ms(10)
+                continue
+            now = time.ticks_ms()
+            result = None
+            events = []
+            if time.ticks_diff(now,warmed_at)>=1500:
+                result = vision.update(frame,now)
+                events = result['events']
+                for event in events:
+                    ok = link.send(EVENT_CODES[event['label']]) if link else False
+                    event['gpio'] = 'sent_no_ack' if ok else 'fault' if send_gpio else 'preview_only'
+                    print('[FIELD EVENT]',event)
+                if recorder:
+                    saved = recorder.image(frame,frame_id,bool(events))
+                    recorder.write({'kind':'frame','ticks_ms':now,'frame':frame_id,'mode':'field',
+                                    'detection':{'turn':result['turn'],'colors':result['colors']},
+                                    'tracking':result['tracking'],'sequence':result['sequence'],
+                                    'events':events,'image':saved},bool(events))
+            if link:
+                link.poll()
+            del frame
+            rate_count += 1
+            elapsed = time.ticks_diff(now,rate_at)
+            if elapsed>=1000:
+                fps = rate_count*1000/elapsed
+                rate_count,rate_at = 0,now
+                gc.collect()
+            if frame_id==0 or events or time.ticks_diff(now,last_draw)>=300:
+                panel = panels[index]
+                panel.draw_rectangle(0,0,width,C.HEIGHT-height,color=(13,26,41),fill=True)
+                arrow = LABELS.get(vision.last_turn,'--')
+                sequence = '  '.join(LABELS[c] for c in vision.tracker.sequence) or '--'
+                tx = 'GPIO已启用' if link and not link.error else 'GPIO未输出'
+                panel.draw_string_advanced(12,8,30,'转向 '+arrow+'    色序 '+sequence,color=(241,246,251))
+                status = '预热中' if result is None else '顺序待复核' if vision.tracker.sequence_uncertain else tx
+                if recorder and recorder.error:
+                    status = 'SD记录停止'
+                panel.draw_string_advanced(12,55,23,'%s    %.1f FPS' % (status,fps),color=(180,217,242))
+                Display.show_image(panel,y=height,layer=Display.LAYER_OSD0)
+                index = (index+1)%len(panels)
+                last_draw = now
+            frame_id += 1
+            delay = C.FIELD_PERIOD_MS-time.ticks_diff(time.ticks_ms(),started)
+            if delay>0:
+                time.sleep_ms(delay)
+    except KeyboardInterrupt:
+        print('[FIELD] stopped')
+    finally:
+        if link:
+            link.close()
+        if recorder:
+            recorder.write({'kind':'end','ticks_ms':time.ticks_ms()},True)
+            recorder.close()
+        if sensor_running:
+            sensor.stop()
+        if display_ready:
+            Display.deinit()
+        if media_ready:
+            MediaManager.deinit()
+
+
+if __name__ == '__main__':
+    main()

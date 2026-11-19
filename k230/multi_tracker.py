@@ -20,7 +20,7 @@ class MultiTracker:
     def __init__(self, width=640, arm=.72, commit=.88, confirm_ms=250,
                  confirm_hits=3, hold_ms=140, hold_hits=2, lost_ms=800,
                  match_distance=70, min_travel=55, jitter=8,
-                 common_jump=22, shake_hold_ms=350, max_tracks=12):
+                 common_jump=22, shake_hold_ms=350, max_tracks=12, edge_pass=False):
         if not 0<arm<commit<1:
             raise ValueError('Tracker gates must satisfy 0 < arm < commit < 1')
         self.width=width
@@ -31,6 +31,7 @@ class MultiTracker:
         self.min_travel,self.jitter=min_travel,jitter
         self.common_jump,self.shake_hold_ms=common_jump,shake_hold_ms
         self.max_tracks=max_tracks
+        self.edge_pass=edge_pass
         self.next_id=1
         self.epoch=0
         self.clock=0
@@ -75,6 +76,36 @@ class MultiTracker:
         self.tracks.append(t)
         self.notes.append({'kind':'new','track':t['id']})
         return t
+
+    def _edge_step(self,t,d,old_box,dt,now,suspended,ready):
+        """Latch at the right edge while the passing block is still identifiable."""
+        x, _, w, _ = t['box']
+        old_x, _, old_w, _ = old_box
+        edge, old_edge = x+w, old_x+old_w
+        confirmed=t['hits']>=self.confirm_hits and now-t['born']>=self.confirm_ms and t['color']!='unknown'
+        if confirmed and not suspended and not d.get('clipped') and edge<=self.arm:
+            if not t['armed']:
+                t['armed'],t['arm_x']=True,edge
+                self.notes.append({'kind':'armed','track':t['id']})
+            t['arm_x']=min(t['arm_x'],edge)
+        if not confirmed or not t['armed']:
+            return
+        if edge<self.commit-self.jitter or dt>400:
+            t['cross_at'],t['beyond_hits']=None,0
+        if suspended or dt>400:
+            return
+        if t['cross_at'] is None:
+            advancing = (edge>old_edge+2 or x>old_x+2)
+            at_edge = edge>=self.commit and edge-t['arm_x']>=self.min_travel
+            if not (at_edge and advancing):
+                return
+            # Use the observed crossing time to preserve event order across tracks.
+            t['cross_at']=now
+            self.notes.append({'kind':'crossing','track':t['id']})
+        if edge>=self.commit-self.jitter:
+            t['beyond_hits']+=1
+            if now-t['cross_at']>=self.hold_ms and t['beyond_hits']>=self.hold_hits:
+                ready.append(t)
 
     def update(self,detections,raw_ms):
         now=self._clock(raw_ms)
@@ -124,7 +155,10 @@ class MultiTracker:
             x,y=center(d['box'])
             dt=max(1,now-t['seen'])
             old_x,old_y=t['x'],t['y']
-            if dt<=250:
+            old_box=t['box']
+            if self.edge_pass and dt<=400:
+                motions.append(((x-old_x)*100/dt,(y-old_y)*100/dt))
+            elif not self.edge_pass and dt<=250:
                 motions.append((x-old_x,y-old_y))
             t['vx']=.5*t['vx']+.5*(x-old_x)/dt
             t['vy']=.5*t['vy']+.5*(y-old_y)/dt
@@ -132,7 +166,7 @@ class MultiTracker:
             t['seen'],t['hits'],t['observed']=now,t['hits']+1,True
             if not d.get('clipped'):
                 self._vote(t,d['label'])
-            matched.append((t,d,old_x,dt))
+            matched.append((t,d,old_x,old_box,dt))
         shake=False
         common=[0.,0.]
         if len(motions)>=2:
@@ -144,8 +178,11 @@ class MultiTracker:
                 self.notes.append({'kind':'common_jump','dx':common[0],'dy':common[1]})
         suspended=now<self.hold_until or bool(ambiguous)
         ready=[]
-        for t,d,old_x,dt in matched:
+        for t,d,old_x,old_box,dt in matched:
             if t['counted'] or t['blocked']:
+                continue
+            if self.edge_pass:
+                self._edge_step(t,d,old_box,dt,now,suspended,ready)
                 continue
             confirmed=t['hits']>=self.confirm_hits and now-t['born']>=self.confirm_ms and t['color']!='unknown'
             if confirmed and not d.get('clipped') and t['x']<=self.arm:

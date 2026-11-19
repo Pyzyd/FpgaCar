@@ -40,11 +40,16 @@ class GpioLink:
                 raise RuntimeError('GPIO%d is already assigned to function %s; refusing to steal it'%
                                    (row['pin'],row['function']))
         self.data=[]
-        for n in C.DATA_PINS:
-            self.mux.set_function(n,getattr(FPIOA,'GPIO%d'%n))
-            self.data.append(Pin(n,Pin.OUT,value=0))
-        self.mux.set_function(C.STROBE_PIN,getattr(FPIOA,'GPIO%d'%C.STROBE_PIN))
-        self.stb=Pin(C.STROBE_PIN,Pin.OUT,value=0)
+        self.stb=None
+        try:
+            self.mux.set_function(C.STROBE_PIN,getattr(FPIOA,'GPIO%d'%C.STROBE_PIN))
+            self.stb=Pin(C.STROBE_PIN,Pin.OUT,value=0)
+            for n in C.DATA_PINS:
+                self.mux.set_function(n,getattr(FPIOA,'GPIO%d'%n))
+                self.data.append(Pin(n,Pin.OUT,value=0))
+        except Exception:
+            self.close()
+            raise
         self.state,self.error='idle',''
         self.sent_frames=0
         self.last_sent=time.ticks_ms()
@@ -84,6 +89,8 @@ class GpioLink:
             self._send(7,1)
 
     def close(self):
-        self.stb.value(0)
-        for pin in self.data: pin.value(0)
+        pins=([self.stb] if self.stb is not None else [])+self.data
+        for pin in pins:
+            try: pin.value(0)
+            except Exception: pass
         self.state='closed'

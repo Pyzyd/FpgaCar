@@ -13,12 +13,13 @@
 //
 // 【为什么不用「每帧都写一次」】摄像头每帧都会给出 new_color，同一色块会被
 // 反复报告上百次。若不去重，顺序会被同一个颜色淹掉（变成 红红红红）。
-// 去重比较直接和 4 个槽比：空槽恒为 0，而 color_in 进到这里时已经非 0，
-// 所以不会误判成重复。
+// 默认按颜色去重。K230 以已去重的过车事件输入时，允许两块独立目标同色。
 // =============================================================================
 `timescale 1ns/1ns
 
-module color_seq (
+module color_seq #(
+    parameter integer DEDUP_COLORS = 1 // Continuous camera samples need dedup; passage events do not.
+) (
     input  wire       clk,
     input  wire       rst_n,
     // ---- 来自 color_detect（clk 域）----
@@ -58,7 +59,8 @@ module color_seq (
                 seq2 <= 3'd0;
                 seq3 <= 3'd0;
                 cnt  <= 3'd0;
-            end else if (new_color && (color_in != 3'd0) && (cnt < 3'd4) && !dup) begin
+            end else if (new_color && (color_in != 3'd0) && (cnt < 3'd4) &&
+                         ((DEDUP_COLORS == 0) || !dup)) begin
                 case (cnt)
                 3'd0:    seq0 <= color_in;
                 3'd1:    seq1 <= color_in;

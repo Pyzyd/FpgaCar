@@ -38,6 +38,8 @@ module car_fsm #(
     parameter integer DIR_DEAD_MS   = 10,     // 方向切换死区
     parameter integer TURN_MS       = 700,    // 交通牌强制转向持续时长
     parameter integer TURN_DUTY     = 700,    // 强制转向时的占空比
+    parameter integer TURN_WAIT_FOR_CORNER = 0, // 1: 先存方向，宽黑后丢线才执行
+    parameter integer TURN_REQUEST_MS = 12000,  // 转向牌等待岔口的上限
     // ---- 避障（BACK → TURN → PROBE 三段）----
     parameter integer AVOID_EN    = 1,      // 1 = 遇障碍执行避障；0 = 旧行为（原地停，障碍消失即走）
     parameter integer AVOID_BACK_MS = 400,  // 后退时长
@@ -119,7 +121,8 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     reg        turning;             // 1 = 正在按交通牌转向
     reg [15:0] turn_cnt;            // 转向剩余 ms
     reg        turn_left;           // 1 = 左转（左轮后退、右轮前进）
-    reg        turn_req;            // 已收到转向请求，等下一个 ms_tick 处理
+    reg        turn_req;            // 已收到转向请求
+    reg [15:0] turn_request_left;
 
     // ---------------- 拐角兜底（没有 K230 时的默认左转）----------------
     // 直角/菱形拐角在八路阵列上表现为"先宽黑、后全丢线"。宽黑出现后
@@ -128,6 +131,8 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     // 不做这个区分的话，正常右弯跑偏丢线也会被强制左转，车会往反方向找线。
     reg  [15:0] corner_cnt;         // 距离上次宽黑还有多少 ms
     reg  [15:0] turn_dir_cnt;       // 转向指示还要亮多久（0 = 灭）
+    wire turn_allowed = (TURN_WAIT_FOR_CORNER == 0) ||
+                        (lost && !wide && (corner_cnt != 0) && (turn_request_left != 0));
 
     // ---------------- 方向死区 ----------------
     reg        dead;
@@ -165,6 +170,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
             turn_cnt    <= 16'd0;
             turn_left   <= 1'b0;
             turn_req    <= 1'b0;
+            turn_request_left <= 16'd0;
             avoid_tries <= 4'd0;
             avoid_left  <= 1'b0;
             corner_cnt   <= 16'd0;
@@ -195,19 +201,19 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
 
             // ---- 交通牌事件锁存 ----
             // dir_evt 是单周期脉冲，而主状态机 1 ms 才走一步，直接在里面判会漏。
-            // 这里先记住请求，等 ms_tick 再消费；直行牌（3）用来取消尚未完成的转向。
-            if (dir_evt == 3'd1) begin
+            // 前视联调模式在循迹确认岔口前只锁存方向，超时自动丢弃。
+            if ((dir_evt == 3'd1 || dir_evt == 3'd2) &&
+                ((TURN_WAIT_FOR_CORNER == 0) || !turning)) begin
                 turn_req  <= 1'b1;
-                turn_left <= 1'b1;
-                turn_dir  <= 2'd1;
-                turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
-            end else if (dir_evt == 3'd2) begin
-                turn_req  <= 1'b1;
-                turn_left <= 1'b0;
-                turn_dir  <= 2'd2;
-                turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
+                turn_left <= dir_evt == 3'd1;
+                turn_request_left <= TURN_REQUEST_MS[15:0];
+                if (TURN_WAIT_FOR_CORNER == 0) begin
+                    turn_dir <= (dir_evt == 3'd1) ? 2'd1 : 2'd2;
+                    turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
+                end
             end else if (dir_evt == 3'd3) begin
                 turn_req  <= 1'b0;
+                turn_request_left <= 16'd0;
                 turning   <= 1'b0;
                 turn_cnt  <= 16'd0;
                 turn_dir  <= 2'd0;      // 直行牌 = 取消转向，指示也一并灭掉
@@ -217,6 +223,10 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
 
             // ---- 主状态机（1 ms 步进）----
             if (ms_tick) begin
+                if ((TURN_WAIT_FOR_CORNER != 0) && turn_req && dir_evt == 3'd0) begin
+                    if (turn_request_left != 0) turn_request_left <= turn_request_left - 16'd1;
+                    if (turn_request_left <= 16'd1) turn_req <= 1'b0;
+                end
                 // ---- 拐角记忆 ----
                 // 直角/菱形拐角会让八路同时压线（wide=1），随后整条线消失。
                 // 记住"刚过拐角"这段时间，找线时才能区分"拐角"和"普通跑偏"。
@@ -295,8 +305,10 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             duty_r <= pid_r;
                         end
                         // 收到转向请求：转入强制转向
-                        if (turn_req) begin
+                        if (turn_req && turn_allowed &&
+                            ((TURN_WAIT_FOR_CORNER == 0) || (!obstacle && dir_evt == 3'd0))) begin
                             turn_req <= 1'b0;
+                            turn_request_left <= 16'd0;
                             turning  <= 1'b1;
                             turn_cnt <= TURN_MS[15:0];
                             turn_dir <= turn_left ? 2'd1 : 2'd2;
@@ -330,7 +342,8 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                         avoid_tries <= 4'd0;
                         avoid_left  <= !last_pos_neg;
                         state  <= (AVOID_EN != 0) ? S_AVOID_BACK : S_STOP;
-                    end else if (ms_cnt >= LOST_HOLD_MS - 1) begin
+                    end else if (ms_cnt >= LOST_HOLD_MS - 1 &&
+                                 ((TURN_WAIT_FOR_CORNER == 0) || dir_evt == 3'd0)) begin
                         ms_cnt <= 16'd0;
                         // ---- 找线方向决策（三级优先级）----
                         // ① 有转向牌事件（K230 识别到左/右转）：完全按牌走。
@@ -339,14 +352,17 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                         //    没识别到牌"时的兜底，菱形那两段各触发一次。
                         // ③ 其余情况（普通跑偏丢线）：线在哪边就往哪边转，
                         //    否则正常赛道上一旦偏出去就会朝反方向找，越找越远。
-                        if (turn_req) begin
+                        if (turn_req && turn_allowed &&
+                            ((TURN_WAIT_FOR_CORNER == 0) || dir_evt == 3'd0)) begin
                             turn_req  <= 1'b0;
+                            turn_request_left <= 16'd0;
                             dir_l_des <= turn_left ? 1'b0 : 1'b1;
                             dir_r_des <= turn_left ? 1'b1 : 1'b0;
                             turn_dir  <= turn_left ? 2'd1 : 2'd2;
                             turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
                             corner_cnt <= 16'd0;
-                        end else if ((DEFAULT_TURN_LEFT != 0) && (corner_cnt != 16'd0)) begin
+                        end else if ((DEFAULT_TURN_LEFT != 0) && (corner_cnt != 16'd0) &&
+                                     ((TURN_WAIT_FOR_CORNER == 0) || !wide)) begin
                             // 拐角兜底：默认左转（左轮后退、右轮前进）
                             dir_l_des <= 1'b0;
                             dir_r_des <= 1'b1;

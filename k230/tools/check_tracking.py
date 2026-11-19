@@ -95,5 +95,21 @@ class Checks(unittest.TestCase):
         self.assertEqual(events,[])
         self.assertGreater(tracker.next_id,old_id)
 
+    def test_field_edge_counts_near_block_before_clipped_center_crosses(self):
+        tracker=MultiTracker(arm=.94,commit=.98,min_travel=40,hold_ms=100,edge_pass=True)
+        events=[]
+        for i,(left,right) in enumerate(((470,565),(472,573),(475,585),(482,603),
+                                        (490,627),(493,640),(500,640),(504,640))):
+            d={'box':(left,180,right-left,90),'label':'green','pixels':3500,'clipped':right==640}
+            events+=tracker.update([d],i*252)['events']
+        self.assertEqual([e['label'] for e in events],['green'])
+
+    def test_field_edge_does_not_count_a_common_jump_with_no_followup_motion(self):
+        tracker=MultiTracker(arm=.94,commit=.98,min_travel=40,hold_ms=100,edge_pass=True)
+        events=[]
+        for i,x in enumerate([490,500,510,520,540,570,610,610,610,610,610,610]):
+            events+=tracker.update([detection(x),detection(x-140,'blue')],i*100)['events']
+        self.assertEqual(events,[])
+
 
 if __name__=='__main__': unittest.main(verbosity=2)

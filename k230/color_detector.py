@@ -8,9 +8,9 @@ DEFAULT_LAB = ((20,100,21,127,5,127), (15,95,-128,-16,-5,100),
                (5,80,-10,100,-128,-16), (35,100,-15,20,30,127))
 
 
-def roi_rect(width,height,tracking=False):
-    rx,ry,rw,rh = (getattr(C,"TRACK_ROI",(.05,.10,.95,.85)) if tracking else
-                   getattr(C,"COLOR_ROI",(.20,.25,.60,.65)))
+def roi_rect(width,height,tracking=False,field=False):
+    coords = C.FIELD_COLOR_ROI if field else (C.TRACK_ROI if tracking else C.COLOR_ROI)
+    rx,ry,rw,rh = coords
     if rx<0 or ry<0 or rw<=0 or rh<=0 or rx+rw>1 or ry+rh>1:
         raise ValueError("COLOR_ROI must fit normalized image coordinates")
     return int(rx*width),int(ry*height),int(rw*width),int(rh*height)
@@ -24,8 +24,8 @@ def looks_like_arrow(img,box):
     return classify(mask,TEMPLATES,.40,.05)["label"] != "unknown"
 
 
-def detect_colors(img,tracking=False):
-    roi = roi_rect(img.width(),img.height(),tracking)
+def detect_colors(img,tracking=False,field=False,sign_box=None):
+    roi = roi_rect(img.width(),img.height(),tracking,field)
     minimum = getattr(C,"COLOR_MIN_PIXELS",500)
     blobs = img.find_blobs(list(getattr(C,"COLOR_LAB",DEFAULT_LAB)),roi=roi,
                           pixels_threshold=minimum,area_threshold=minimum,
@@ -54,6 +54,12 @@ def detect_colors(img,tracking=False):
             reject('mixed_threshold')
             continue
         label = COLORS[(1,2,4,8).index(code)]
+        if field and label == "blue" and sign_box:
+            sx,sy,sw,sh = sign_box
+            cx,cy = b.x()+b.w()/2,b.y()+b.h()/2
+            if sx <= cx < sx+sw and sy <= cy < sy+sh:
+                reject('arrow_sign')
+                continue
         if label=="blue" and not clipped and looks_like_arrow(img,b.rect()):
             reject('arrow_sign')
             continue
@@ -74,5 +80,5 @@ def detect_colors(img,tracking=False):
     return result
 
 
-def detect_multi_colors(img):
-    return detect_colors(img,tracking=True)
+def detect_multi_colors(img,field=False,sign_box=None):
+    return detect_colors(img,tracking=True,field=field,sign_box=sign_box)
