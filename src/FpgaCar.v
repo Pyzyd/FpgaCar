@@ -377,19 +377,20 @@ module FpgaCar (
         .TURN_MS      (700),
         .TURN_WAIT_FOR_CORNER (USE_K230),
         .TURN_DUTY    (700),
-        // 避障三段：后退 → 原地转 → 试探前进，最多 3 轮，用尽则停车等障碍消失。
-        // 只测循迹不想让车绕行时把 AVOID_EN 改成 0（退回"遇障碍原地停"）。
+        // 现场初值：先让车驶到障碍侧边，再摆正超越，最后低速斜切回线。
         .AVOID_EN         (1),
+        .AVOID_ROUTE_EN   (1),
         .AVOID_BACK_MS    (400),
         .AVOID_BACK_DUTY  (500),
         .AVOID_TURN_MS    (600),
         .AVOID_TURN_DUTY  (600),
-        .AVOID_PROBE_MS   (400),
+        .AVOID_PROBE_MS   (550),
         .AVOID_PROBE_DUTY (450),
-        // 进试探段后先静默 100 ms 不判障碍：刚转完身障碍必然还在正前方，
-        // 第一拍就判会把"试探前进"变成只跑 1 ms，3 轮配额瞬间烧光。
-        .AVOID_PROBE_SETTLE_MS (100),
-        .AVOID_TRIES      (3),
+        .AVOID_PASS_MS    (900),
+        .AVOID_REJOIN_MS  (1200),
+        .AVOID_REJOIN_DUTY (400),
+        .AVOID_LINE_MS    (20),
+        .AVOID_BLOCK_MS   (250),
         // 转向指示（串口 S= / OLED 左转右转格）保持 1500 ms 后自动熄灭。
         // 保持太短 OLED 每 100 ms 采样一次抓不到；太长直道上也显示"正在转弯"。
         .TURN_DIR_HOLD_MS (1500)

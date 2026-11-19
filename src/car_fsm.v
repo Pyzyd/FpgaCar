@@ -54,6 +54,12 @@ module car_fsm #(
     // 3 轮配额瞬间耗尽 —— 避障退化成"原地左右各抖 600 ms 再停车"。
     parameter integer AVOID_PROBE_SETTLE_MS = 100,
     parameter integer AVOID_TRIES = 3,      // 最多连续尝试次数，用尽则停车等待
+    parameter integer AVOID_ROUTE_EN = 0,  // 启用侧绕并定向回线；0 保留三段试探
+    parameter integer AVOID_PASS_MS = 900, // 车头摆正后沿障碍侧边直行
+    parameter integer AVOID_REJOIN_MS = 1200,
+    parameter integer AVOID_REJOIN_DUTY = 400,
+    parameter integer AVOID_LINE_MS = 20,  // 回线时黑线需稳定出现
+    parameter integer AVOID_BLOCK_MS = 250,// 前方受阻先停，再等超声更新
     // ---- 拐角兜底（没有 K230 / 没识别到转向牌时怎么走）----
     // 1 = 判到"直角/菱形拐角"而没有任何转向牌事件时，一律向左转；
     // 0 = 退回旧行为（按最后看到线的方位转，线在左就左转、在右就右转）。
@@ -148,9 +154,24 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     reg [3:0]  avoid_tries;         // 本次障碍已尝试几轮
     reg        avoid_left;          // 1 = 这次往左绕（按最后看到线的方位反着走）
 
+    localparam [2:0] BY_OUT = 3'd0, BY_ALIGN = 3'd1, BY_PASS = 3'd2,
+                     BY_TURN_IN = 3'd3, BY_REJOIN = 3'd4;
+    reg [2:0] bypass_step;
+    reg bypass_left_line;
+    reg [15:0] bypass_line_cnt, bypass_block_cnt;
+    wire bypass_active = (AVOID_ROUTE_EN != 0) && (state == S_AVOID_PROBE);
+    wire bypass_forward = (bypass_step == BY_OUT || bypass_step == BY_PASS || bypass_step == BY_REJOIN);
+    wire bypass_dir_l = bypass_forward || avoid_left;
+    wire bypass_dir_r = bypass_forward || !avoid_left;
+    wire bypass_blocked = bypass_forward && obstacle;
+    wire bypass_dirs_ready = (dir_l == bypass_dir_l) && (dir_r == bypass_dir_r);
+    wire bypass_has_line = on_line && !lost && !wide;
+    wire [10:0] bypass_duty = !bypass_forward ? AVOID_TURN_DUTY[10:0] :
+                             (bypass_step == BY_REJOIN ? AVOID_REJOIN_DUTY[10:0] : AVOID_PROBE_DUTY[10:0]);
+
     wire en_run = (state == S_RUN)   || (state == S_LOST)     || (state == S_SEARCH)
                || (state == S_AVOID_BACK) || (state == S_AVOID_TURN) || (state == S_AVOID_PROBE);
-    assign en   = en_run & ~dead;
+    assign en = en_run && !dead && (!bypass_active || (!bypass_blocked && bypass_dirs_ready));
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -173,6 +194,10 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
             turn_request_left <= 16'd0;
             avoid_tries <= 4'd0;
             avoid_left  <= 1'b0;
+            bypass_step <= BY_OUT;
+            bypass_left_line <= 1'b0;
+            bypass_line_cnt <= 16'd0;
+            bypass_block_cnt <= 16'd0;
             corner_cnt   <= 16'd0;
             turn_dir     <= 2'd0;
             turn_dir_cnt <= 16'd0;
@@ -223,6 +248,12 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
 
             // ---- 主状态机（1 ms 步进）----
             if (ms_tick) begin
+                if (!bypass_active) begin
+                    bypass_step <= BY_OUT;
+                    bypass_left_line <= 1'b0;
+                    bypass_line_cnt <= 16'd0;
+                    bypass_block_cnt <= 16'd0;
+                end
                 if ((TURN_WAIT_FOR_CORNER != 0) && turn_req && dir_evt == 3'd0) begin
                     if (turn_request_left != 0) turn_request_left <= turn_request_left - 16'd1;
                     if (turn_request_left <= 16'd1) turn_req <= 1'b0;
@@ -235,7 +266,9 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                 // corner_cnt 还没衰减完，拐角兜底会把刚按牌子做的转向反着执行一遍
                 // （牌要求右转 → 兜底强制左转），直接违反"有牌就完全按牌走"。
                 // 当前 USE_K230=0 时 turning 永远进不去，这条是接回 K230 后的保险。
-                if (!turning && wide && CORNER_WIDE_MS > 0) begin
+                if ((AVOID_ROUTE_EN != 0) && (state >= S_AVOID_BACK)) begin
+                    corner_cnt <= 16'd0;
+                end else if (!turning && wide && CORNER_WIDE_MS > 0) begin
                     corner_cnt <= CORNER_WIDE_MS[15:0];
                 end else if (corner_cnt != 16'd0) begin
                     corner_cnt <= corner_cnt - 16'd1;
@@ -467,35 +500,98 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                 end
 
                 S_AVOID_PROBE: begin
-                    // 试探前进：用较低占空比慢慢靠近，看障碍还在不在
-                    dir_l_des <= 1'b1;
-                    dir_r_des <= 1'b1;
-                    if (!dead) begin
-                        duty_l <= AVOID_PROBE_DUTY[10:0];
-                        duty_r <= AVOID_PROBE_DUTY[10:0];
-                    end
-                    // 前 AVOID_PROBE_SETTLE_MS 不判障碍：刚转完身障碍还在正前方是
-                    // 正常的，要等车真的往前探一段再判断"还堵着没"。
-                    if (obstacle && (ms_cnt >= AVOID_PROBE_SETTLE_MS[15:0])) begin
-                        // 还堵着：动作已经做完，再来一轮（或放弃）
-                        ms_cnt <= 16'd0;
-                        if (avoid_tries >= AVOID_TRIES - 1) begin
-                            avoid_tries <= 4'd0;
-                            state <= S_STOP;
-                        end else begin
-                            avoid_tries <= avoid_tries + 4'd1;
-                            avoid_left  <= ~avoid_left;   // 换个方向再试
-                            state <= S_AVOID_BACK;
+                    if (AVOID_ROUTE_EN != 0) begin
+                        // 向外驶离 → 摆正 → 侧边超越 → 转向线内 → 低速回线。
+                        // 这几段由避障控制，途中看到黑线也不能提前交回普通找线。
+                        dir_l_des <= bypass_dir_l;
+                        dir_r_des <= bypass_dir_r;
+                        if (lost) bypass_left_line <= 1'b1;
+
+                        if (bypass_blocked) begin
+                            duty_l <= 11'd0;
+                            duty_r <= 11'd0;
+                            bypass_line_cnt <= 16'd0;
+                            if (bypass_block_cnt >= AVOID_BLOCK_MS - 1) begin
+                                final_stop <= 1'b1;
+                                state <= S_STOP;
+                            end else begin
+                                bypass_block_cnt <= bypass_block_cnt + 16'd1;
+                            end
+                        end else if (!dead && bypass_dirs_ready) begin
+                            bypass_block_cnt <= 16'd0;
+                            duty_l <= bypass_duty;
+                            duty_r <= bypass_duty;
+                            ms_cnt <= ms_cnt + 16'd1;
+                            case (bypass_step)
+                                BY_OUT: if (ms_cnt >= AVOID_PROBE_MS - 1) begin
+                                    ms_cnt <= 16'd0;
+                                    bypass_step <= BY_ALIGN;
+                                end
+                                BY_ALIGN: if (ms_cnt >= AVOID_TURN_MS - 1) begin
+                                    ms_cnt <= 16'd0;
+                                    bypass_step <= BY_PASS;
+                                end
+                                BY_PASS: if (ms_cnt >= AVOID_PASS_MS - 1) begin
+                                    ms_cnt <= 16'd0;
+                                    if (bypass_left_line && lost) begin
+                                        bypass_step <= BY_TURN_IN;
+                                    end else begin
+                                        final_stop <= 1'b1;
+                                        state <= S_STOP;
+                                    end
+                                end
+                                BY_TURN_IN: if (ms_cnt >= AVOID_TURN_MS - 1) begin
+                                    ms_cnt <= 16'd0;
+                                    bypass_step <= BY_REJOIN;
+                                end
+                                BY_REJOIN: begin
+                                    if (bypass_has_line && bypass_line_cnt >= AVOID_LINE_MS - 1) begin
+                                        ms_cnt <= 16'd0;
+                                        state <= S_RUN;
+                                    end else if (ms_cnt >= AVOID_REJOIN_MS - 1) begin
+                                        final_stop <= 1'b1;
+                                        state <= S_STOP;
+                                    end else begin
+                                        bypass_line_cnt <= bypass_has_line ? (bypass_line_cnt + 16'd1) : 16'd0;
+                                    end
+                                end
+                                default: begin
+                                    final_stop <= 1'b1;
+                                    state <= S_STOP;
+                                end
+                            endcase
                         end
-                    end else if (ms_cnt >= AVOID_PROBE_MS - 1) begin
-                        // 试探时间到。**不能无条件回 RUN**：绕行结束时车体朝向与线的
-                        // 相对关系已经完全变了，按"线就在脚下"进 RUN 会用一份过期
-                        // 的 pid 值瞎跑。压在线上才回 RUN，否则交给 S_LOST 找线。
-                        ms_cnt      <= 16'd0;
-                        avoid_tries <= 4'd0;
-                        state       <= (!lost && on_line) ? S_RUN : S_LOST;
                     end else begin
-                        ms_cnt <= ms_cnt + 16'd1;
+                        // 传统试探段供原有调用方式使用。
+                        dir_l_des <= 1'b1;
+                        dir_r_des <= 1'b1;
+                        if (!dead) begin
+                            duty_l <= AVOID_PROBE_DUTY[10:0];
+                            duty_r <= AVOID_PROBE_DUTY[10:0];
+                        end
+                        // 前 AVOID_PROBE_SETTLE_MS 不判障碍：刚转完身障碍还在正前方是
+                        // 正常的，要等车真的往前探一段再判断"还堵着没"。
+                        if (obstacle && (ms_cnt >= AVOID_PROBE_SETTLE_MS[15:0])) begin
+                            // 还堵着：动作已经做完，再来一轮（或放弃）
+                            ms_cnt <= 16'd0;
+                            if (avoid_tries >= AVOID_TRIES - 1) begin
+                                avoid_tries <= 4'd0;
+                                state <= S_STOP;
+                            end else begin
+                                avoid_tries <= avoid_tries + 4'd1;
+                                avoid_left  <= ~avoid_left;   // 换个方向再试
+                                state <= S_AVOID_BACK;
+                            end
+                        end else if (ms_cnt >= AVOID_PROBE_MS - 1) begin
+                            // 试探时间到。**不能无条件回 RUN**：绕行结束时车体朝向与线的
+                            // 相对关系已经完全变了，按"线就在脚下"进 RUN 会用一份过期
+                            // 的 pid 值瞎跑。压在线上才回 RUN，否则交给 S_LOST 找线。
+                            ms_cnt      <= 16'd0;
+                            avoid_tries <= 4'd0;
+                            state       <= (!lost && on_line) ? S_RUN : S_LOST;
+                        end else begin
+                            ms_cnt <= ms_cnt + 16'd1;
+                        end
                     end
                 end
 
