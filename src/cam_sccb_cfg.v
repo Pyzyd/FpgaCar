@@ -24,7 +24,8 @@
 module cam_sccb_cfg #(
     parameter integer CLK_FREQ = 24_000_000,
     parameter integer I2C_FREQ = 100_000,      // SCCB 时钟，100 kHz 最稳
-    parameter [7:0]   DEV_ADDR = 8'h78         // OV5640 SCCB 写地址（0x3C << 1）
+    parameter [7:0]   DEV_ADDR = 8'h78,        // OV5640 SCCB 写地址（0x3C << 1）
+    parameter         FULL_FOV_VGA = 1'b0
 ) (
     input  wire clk,
     input  wire rst_n,        // 系统复位（已同步化）
@@ -45,11 +46,39 @@ module cam_sccb_cfg #(
     wire [23:0] lut_data;
     wire [7:0]  lut_size;
 
-    I2C_OV5640_1280720_Config u_lut (
+    I2C_OV5640_1280720_Config #(
+        .IMAGE_WIDTH (FULL_FOV_VGA ? 16'd640 : 16'd1280),
+        .IMAGE_HEIGHT(FULL_FOV_VGA ? 16'd480 : 16'd720)
+    ) u_lut (
         .LUT_INDEX (lut_index),
         .LUT_DATA  (lut_data),
         .LUT_SIZE  (lut_size)
     );
+
+    wire [23:0] mode_lut_data;
+    generate if (FULL_FOV_VGA) begin : g_full_fov
+        // Read the full 4:3 sensor window (including the ISP margins).
+        // Keep the existing RGB565 format, PLL and DVP polarity.
+        reg [7:0] value;
+        always @* begin
+            value = lut_data[7:0];
+            case (lut_data[23:8])
+                16'h3803: value = 8'h00; // Y start = 0; X already starts at 0
+                16'h3806: value = 8'h07; // Y end = 0x079f (1951); X already ends at 2623
+                16'h3807: value = 8'h9f;
+                16'h380d: value = 8'h68; // HTS = 1896
+                16'h380e: value = 8'h04; // VTS = 1080, enough for the full binned scan
+                16'h380f: value = 8'h38;
+                16'h3813: value = 8'h08; // Vertical ISP margin after binning
+                16'h3820: value = lut_data[7:0] | 8'h01; // Vertical binning
+                16'h5001: value = lut_data[7:0] | 8'h20; // Enable ISP scaling to VGA
+                default: ;
+            endcase
+        end
+        assign mode_lut_data = {lut_data[23:8], value};
+    end else begin : g_720p
+        assign mode_lut_data = lut_data;
+    end endgenerate
 
     // ------------------------------------------------------------------
     // 官方 SCCB 时序引擎
@@ -72,7 +101,7 @@ module cam_sccb_cfg #(
         .i2c_sdat_OE      (sdat_oe),
         .i2c_config_size  (lut_size),
         .i2c_config_index (cfg_index),
-        .i2c_config_data  ({DEV_ADDR, lut_data}),
+        .i2c_config_data  ({DEV_ADDR, mode_lut_data}),
         .i2c_config_done  (cfg_done),
         .i2c_rdata        (cfg_rdata)
     );

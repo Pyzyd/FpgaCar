@@ -1,19 +1,25 @@
 `timescale 1ns/1ns
 
-// 1280x720 RGB565 DVP in, 160x90 Y8 snapshot out.
+// RGB565 DVP in, one Y8 sample per square block out.
 // PCLK writes one complete frame, then stops until the LCD returns ownership.
-module ov5640_preview_frame (
+module ov5640_preview_frame #(
+    parameter integer INPUT_WIDTH = 1280,
+    parameter integer INPUT_HEIGHT = 720,
+    parameter integer SAMPLE_LOG2 = 3
+) (
     input wire clk, rst_n,
     input wire pclk, href, vsync,
     input wire [7:0] data,
     input wire frame_release,
     output wire frame_valid,
-    input wire [13:0] read_addr,
+    input wire [14:0] read_addr,
     output reg [7:0] read_y
 );
-    localparam [11:0] LINE_BYTES = 12'd2560;
-    localparam [9:0] FRAME_LINES = 10'd720;
-    localparam [13:0] FRAME_SAMPLES = 14'd14400;
+    localparam [11:0] LINE_BYTES = INPUT_WIDTH * 2;
+    localparam [9:0] FRAME_LINES = INPUT_HEIGHT;
+    localparam [14:0] FRAME_SAMPLES = (INPUT_WIDTH >> SAMPLE_LOG2) *
+                                      (INPUT_HEIGHT >> SAMPLE_LOG2);
+    localparam integer SAMPLE_CENTER = 1 << (SAMPLE_LOG2 - 1);
 
     reg request, ack;
     reg [1:0] pclk_reset;
@@ -39,11 +45,11 @@ module ov5640_preview_frame (
     end
     assign frame_valid = ack_sync[1] == request;
 
-    reg [7:0] frame [0:14399];
+    reg [7:0] frame [0:FRAME_SAMPLES-1];
     reg href_prev, vsync_prev, capturing, bad_line;
     reg [11:0] byte_count;
     reg [9:0] line_count;
-    reg [13:0] write_addr;
+    reg [14:0] write_addr;
     reg [7:0] high_byte;
     wire new_frame = vsync && !vsync_prev;
     wire line_end = href_prev && !href;
@@ -51,9 +57,10 @@ module ov5640_preview_frame (
     wire all_lines = !href && ((!line_end && line_count == FRAME_LINES) ||
                      (line_end && line_count == FRAME_LINES - 1 && byte_count == LINE_BYTES));
 
-    // Take x=4,12,... and y=4,12,..., the center of each 8x8 block.
+    // Write one center pixel from each sample block, scanning the entire input frame.
     wire sample_pixel = pclk_ready && capturing && href && !new_frame &&
-                        line_count[2:0] == 3'd4 && byte_count[3:0] == 4'd9 &&
+                        line_count[SAMPLE_LOG2-1:0] == SAMPLE_CENTER &&
+                        byte_count[SAMPLE_LOG2:0] == 2 * SAMPLE_CENTER + 1 &&
                         byte_count < LINE_BYTES && line_count < FRAME_LINES &&
                         write_addr < FRAME_SAMPLES;
 

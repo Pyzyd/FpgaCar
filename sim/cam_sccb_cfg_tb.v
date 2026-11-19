@@ -37,6 +37,22 @@ module cam_sccb_cfg_tb;
         .done(done)
     );
 
+    wire done_vga;
+    cam_sccb_cfg #(.I2C_FREQ(2_400_000), .FULL_FOV_VGA(1'b1)) u_vga (
+        .clk(clk), .rst_n(rst_n), .start(start), .sclk(), .sdat_in(sdat_in),
+        .sdat_out(), .sdat_oe(), .done(done_vga)
+    );
+
+    // Observe the register words handed to the SCCB sender in the VGA profile.
+    reg [7:0] vga_timing [0:33];
+    reg [7:0] vga_isp;
+    wire [15:0] vga_reg = u_vga.mode_lut_data[23:8];
+    always @(negedge clk) if (start && !done_vga) begin
+        if (vga_reg >= 16'h3800 && vga_reg <= 16'h3821)
+            vga_timing[vga_reg - 16'h3800] <= u_vga.mode_lut_data[7:0];
+        if (vga_reg == 16'h5001) vga_isp <= u_vga.mode_lut_data[7:0];
+    end
+
     integer sclk_edges = 0;
     always @(posedge sclk) sclk_edges = sclk_edges + 1;
 
@@ -61,6 +77,15 @@ module cam_sccb_cfg_tb;
         else                      $display("PASS: SCLK edges = %0d", sclk_edges);
         if (sclk !== 1'b1)        $display("FAIL: sclk not idle high after done");
         else                      $display("PASS: sclk idle high after config");
+
+        if (done_vga !== 1'b1 ||
+            {vga_timing[0], vga_timing[1], vga_timing[2], vga_timing[3]} !== 32'h00000000 ||
+            {vga_timing[4], vga_timing[5], vga_timing[6], vga_timing[7]} !== 32'h0a3f079f ||
+            {vga_timing[8], vga_timing[9], vga_timing[10], vga_timing[11]} !== 32'h028001e0 ||
+            {vga_timing[12], vga_timing[13], vga_timing[14], vga_timing[15]} !== 32'h07680438 ||
+            vga_timing[32][0] !== 1'b1 || vga_timing[33][0] !== 1'b1 || vga_isp[5] !== 1'b1)
+            $fatal(1, "FAIL: VGA full-field register sequence");
+        else $display("PASS: VGA full-field window, output size, timing, binning and scaling");
 
         $display("INFO: cam_sccb_cfg_tb done at %0t", $time);
         $finish;

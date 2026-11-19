@@ -27,23 +27,22 @@ module Ov5640LcdBench (
         .clk(clk), .rst_n(ready), .vsync(cmos_vsync), .ready(sccb_start),
         .vs_cnt(), .vs_act(vs_active)
     );
-    cam_sccb_cfg cfg (
+    cam_sccb_cfg #(.FULL_FOV_VGA(1'b1)) cfg (
         .clk(clk), .rst_n(ready), .start(sccb_start), .done(sccb_done),
         .sclk(cmos_sclk), .sdat_in(cmos_sdat_IN),
         .sdat_out(cmos_sdat_OUT), .sdat_oe(cmos_sdat_OE)
     );
 
     wire [8:0] x, y;
-    wire show_image = y >= 9'd30 && y < 9'd210;
-    wire [8:0] image_y = y - 9'd30;
-    wire [13:0] sample_row = {6'b0, image_y[8:1]};
-    // Landscape screen is 320x240. Double each sample and add 30 black rows above and below.
-    wire [13:0] sample_addr = show_image ?
-        (sample_row << 7) + (sample_row << 5) + {6'b0, x[8:1]} : 14'd0;
+    wire [14:0] sample_row = {7'b0, y[8:1]};
+    // Double every 160x120 sample to fill 320x240 without cropping or stretching.
+    wire [14:0] sample_addr = (sample_row << 7) + (sample_row << 5) + {7'b0, x[8:1]};
     wire [7:0] gray;
     wire frame_valid, frame_release, preview_used;
     wire capture_ready = ready && sccb_done;
-    ov5640_preview_frame capture (
+    ov5640_preview_frame #(
+        .INPUT_WIDTH(640), .INPUT_HEIGHT(480), .SAMPLE_LOG2(2)
+    ) capture (
         .clk(clk), .rst_n(capture_ready), .pclk(cmos_pclk),
         .href(cmos_href), .vsync(cmos_vsync), .data(cmos_data),
         .frame_release(frame_release), .frame_valid(frame_valid),
@@ -51,7 +50,7 @@ module Ov5640LcdBench (
     );
 
     wire [5:0] panel_led;
-    wire [15:0] preview_pixel = show_image ? {gray[7:3], gray[7:2], gray[7:3]} : 16'h0000;
+    wire [15:0] preview_pixel = {gray[7:3], gray[7:2], gray[7:3]};
     st7789_panel #(.LANDSCAPE(1'b1), .MADCTL(8'h60), .INVERSION_CMD(8'h20)) panel (
         .clk(clk), .rst_n(rst_n), .preview_valid(capture_ready && frame_valid),
         .preview_pixel(preview_pixel), .x(x), .y(y), .preview_used(preview_used),
