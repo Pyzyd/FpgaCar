@@ -387,10 +387,10 @@ module FpgaCar (
         .AVOID_TURN_IN_MS (650),     // 超越障碍后左转朝向原线
         .AVOID_TURN_DUTY  (540),     // PWM 周期 1200 计数，两轮各 45%
         .AVOID_PROBE_MS   (2400),
-        .AVOID_PROBE_DUTY (420),     // 外探和侧边直行均为 35%
+        .AVOID_PROBE_DUTY (600),     // 外探和侧边直行均为 50%
         .AVOID_PASS_MS    (1500),
         .AVOID_REJOIN_MS  (2500),
-        .AVOID_REJOIN_DUTY (380),
+        .AVOID_REJOIN_DUTY (600),
         .AVOID_LINE_MS    (20),
         .AVOID_BLOCK_MS   (250),
         // 转向指示（串口 S= / OLED 左转右转格）保持 1500 ms 后自动熄灭。
