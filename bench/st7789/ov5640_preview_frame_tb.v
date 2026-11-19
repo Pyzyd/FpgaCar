@@ -5,6 +5,7 @@ module ov5640_preview_frame_tb;
     always #7 clk = ~clk;
     always #5 pclk = ~pclk;
     reg rst_n = 0, href = 0, vsync = 0, frame_release = 0;
+    reg active_low_vsync = 0;
     reg [7:0] data = 0;
     reg [13:0] addr = 0;
     wire frame_valid;
@@ -32,9 +33,9 @@ module ov5640_preview_frame_tb;
 
     task frame_boundary;
         begin
-            @(negedge pclk); vsync = 1;
+            @(negedge pclk); vsync = !active_low_vsync;
             repeat (4) @(negedge pclk);
-            vsync = 0;
+            vsync = active_low_vsync;
         end
     endtask
 
@@ -96,6 +97,7 @@ module ov5640_preview_frame_tb;
         @(negedge clk); frame_release = 1;
         @(negedge clk); frame_release = 0;
         if (frame_valid !== 0) $fatal(1, "Release did not invalidate old snapshot");
+        active_low_vsync = 1;
         repeat (8) @(negedge pclk);
         frame_boundary;
         send_frame(3, 1'b0);

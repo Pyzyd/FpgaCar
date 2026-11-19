@@ -46,9 +46,13 @@ module ov5640_preview_frame (
     reg [13:0] write_addr;
     reg [7:0] high_byte;
     wire new_frame = vsync && !vsync_prev;
+    wire line_end = href_prev && !href;
+    // Accept the last HREF falling on the same clock as the frame boundary.
+    wire all_lines = !href && ((!line_end && line_count == FRAME_LINES) ||
+                     (line_end && line_count == FRAME_LINES - 1 && byte_count == LINE_BYTES));
 
     // Take x=4,12,... and y=4,12,..., the center of each 8x8 block.
-    wire sample_pixel = pclk_ready && capturing && href && !vsync &&
+    wire sample_pixel = pclk_ready && capturing && href && !new_frame &&
                         line_count[2:0] == 3'd4 && byte_count[3:0] == 4'd9 &&
                         byte_count < LINE_BYTES && line_count < FRAME_LINES &&
                         write_addr < FRAME_SAMPLES;
@@ -84,7 +88,7 @@ module ov5640_preview_frame (
                 line_count <= 0;
                 write_addr <= 0;
                 bad_line <= 1'b0;
-                if (capturing && !bad_line && line_count == FRAME_LINES &&
+                if (capturing && !bad_line && all_lines &&
                     write_addr == FRAME_SAMPLES) begin
                     ack <= request_sync[1];
                     capturing <= 1'b0;
@@ -92,12 +96,13 @@ module ov5640_preview_frame (
                     // Retry at the next VSYNC if the previous DVP frame was malformed.
                     capturing <= request_sync[1] != ack;
                 end
-            end else if (capturing && !vsync) begin
+            end else if (capturing) begin
+                // HREF delimits valid bytes for either VSYNC blanking polarity.
                 if (href) begin
                     if (!byte_count[0]) high_byte <= data;
                     if (byte_count <= LINE_BYTES) byte_count <= byte_count + 1'b1;
                     if (sample_pixel) write_addr <= write_addr + 1'b1;
-                end else if (href_prev) begin
+                end else if (line_end) begin
                     if (byte_count != LINE_BYTES || line_count >= FRAME_LINES)
                         bad_line <= 1'b1;
                     byte_count <= 0;
