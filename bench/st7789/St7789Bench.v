@@ -3,7 +3,7 @@
 // Standalone 240x320 LCD checkout. All motor inputs are held low.
 module St7789Bench #(
     parameter integer CLK_HZ = 24_000_000,
-    parameter integer SPI_HALF_CYCLES = 4,
+    parameter integer SPI_HALF_CYCLES = 16,
     parameter [7:0] MADCTL = 8'h00,
     parameter [7:0] INVERSION_CMD = 8'h21
 ) (
@@ -17,10 +17,9 @@ module St7789Bench #(
     localparam integer RESET_CYCLES = (CLK_HZ / 1000) * 20;
     localparam integer WAKE_CYCLES = (CLK_HZ / 1000) * 120;
     localparam integer PAUSE_CYCLES = CLK_HZ / 2;
-    localparam [3:0] RESET_LCD = 0, AFTER_RESET = 1, SLEEP_OUT = 2,
-                     WAIT_SLEEP_BYTE = 3, WAKE_DELAY = 4, INIT_LCD = 5,
-                     START_FRAME = 6, PIXELS = 7, END_FRAME = 8,
-                     DISPLAY_ON = 9, END_DISPLAY_ON = 10, PAUSE = 11;
+    localparam [3:0] RESET_LCD = 0, AFTER_RESET = 1, INIT_WRITE = 2,
+                     END_INIT_WRITE = 3, INIT_DELAY = 4,
+                     START_FRAME = 6, PIXELS = 7, END_FRAME = 8, PAUSE = 11;
 
     reg [2:0] reset_pipe = 3'b000;
     always @(posedge clk or negedge rst_n)
@@ -31,7 +30,7 @@ module St7789Bench #(
     reg [3:0] state;
     reg [31:0] wait_count;
     reg [23:0] heartbeat;
-    reg [3:0] init_index;
+    reg [4:0] init_index;
     reg [7:0] x;
     reg [8:0] y;
     reg low_byte, marker, first_frame_done;
@@ -39,6 +38,11 @@ module St7789Bench #(
     reg [8:0] byte_word; // bit 8 is D/C, bits 7:0 are sent MSB first
     wire byte_ready;
     wire send = byte_valid && byte_ready;
+    wire init_write_done = init_index == 0 || init_index == 1 || init_index == 3 ||
+                           init_index == 5 || init_index == 6 || init_index == 11 ||
+                           init_index == 16 || init_index == 17 || init_index == 18;
+    wire [31:0] init_delay_cycles = init_index < 2 ? WAKE_CYCLES :
+                                    init_index == 18 ? RESET_CYCLES : 2;
 
     reg [15:0] pixel;
     wire [2:0] gray = x[7:5];
@@ -66,28 +70,29 @@ module St7789Bench #(
         byte_word = 9'h000;
         byte_valid = 1'b1;
         case (state)
-            SLEEP_OUT:   byte_word = {1'b0, 8'h11};
-            INIT_LCD: begin
+            INIT_WRITE: begin
                 case (init_index)
-                    0:  byte_word = {1'b0, 8'h36}; // MADCTL
-                    1:  byte_word = {1'b1, MADCTL};
+                    0:  byte_word = {1'b0, 8'h01}; // SWRESET
+                    1:  byte_word = {1'b0, 8'h11}; // SLPOUT
                     2:  byte_word = {1'b0, 8'h3a}; // COLMOD
                     3:  byte_word = {1'b1, 8'h55}; // RGB565
-                    4:  byte_word = {1'b0, INVERSION_CMD};
-                    5:  byte_word = {1'b0, 8'h13}; // NORON
-                    6:  byte_word = {1'b0, 8'h2a}; // CASET
-                    7, 8, 9: byte_word = {1'b1, 8'h00};
-                    10: byte_word = {1'b1, 8'hef}; // last column 239
-                    11: byte_word = {1'b0, 8'h2b}; // RASET
-                    12, 13: byte_word = {1'b1, 8'h00};
-                    14: byte_word = {1'b1, 8'h01};
-                    15: byte_word = {1'b1, 8'h3f}; // last row 319
+                    4:  byte_word = {1'b0, 8'h36}; // MADCTL
+                    5:  byte_word = {1'b1, MADCTL};
+                    6:  byte_word = {1'b0, INVERSION_CMD};
+                    7:  byte_word = {1'b0, 8'h2a}; // CASET
+                    8, 9, 10: byte_word = {1'b1, 8'h00};
+                    11: byte_word = {1'b1, 8'hef}; // last column 239
+                    12: byte_word = {1'b0, 8'h2b}; // RASET
+                    13, 14: byte_word = {1'b1, 8'h00};
+                    15: byte_word = {1'b1, 8'h01};
+                    16: byte_word = {1'b1, 8'h3f}; // last row 319
+                    17: byte_word = {1'b0, 8'h13}; // NORON
+                    18: byte_word = {1'b0, 8'h29}; // DISPON
                     default: byte_word = 9'h000;
                 endcase
             end
             START_FRAME: byte_word = {1'b0, 8'h2c};
             PIXELS:      byte_word = {1'b1, low_byte ? pixel[7:0] : pixel[15:8]};
-            DISPLAY_ON:  byte_word = {1'b0, 8'h29};
             default:     byte_valid = 1'b0;
         endcase
     end
@@ -123,24 +128,27 @@ module St7789Bench #(
                 AFTER_RESET: begin
                     if (wait_count == WAKE_CYCLES - 1) begin
                         lcd_cs_n <= 1'b0;
-                        state <= SLEEP_OUT;
+                        state <= INIT_WRITE;
                     end else wait_count <= wait_count + 1'b1;
                 end
-                SLEEP_OUT: if (send) state <= WAIT_SLEEP_BYTE;
-                WAIT_SLEEP_BYTE: if (byte_ready) begin
+                INIT_WRITE: if (send) begin
+                    if (init_write_done) state <= END_INIT_WRITE;
+                    else init_index <= init_index + 1'b1;
+                end
+                END_INIT_WRITE: if (byte_ready) begin
                     lcd_cs_n <= 1'b1;
                     wait_count <= 0;
-                    state <= WAKE_DELAY;
+                    state <= INIT_DELAY;
                 end
-                WAKE_DELAY: begin
-                    if (wait_count == WAKE_CYCLES - 1) begin
+                INIT_DELAY: begin
+                    if (wait_count == init_delay_cycles - 1) begin
                         lcd_cs_n <= 1'b0;
-                        state <= INIT_LCD;
+                        if (init_index == 18) state <= START_FRAME;
+                        else begin
+                            init_index <= init_index + 1'b1;
+                            state <= INIT_WRITE;
+                        end
                     end else wait_count <= wait_count + 1'b1;
-                end
-                INIT_LCD: if (send) begin
-                    if (init_index == 15) state <= START_FRAME;
-                    else init_index <= init_index + 1'b1;
                 end
                 START_FRAME: if (send) state <= PIXELS;
                 PIXELS: if (send) begin
@@ -156,15 +164,6 @@ module St7789Bench #(
                     end
                 end
                 END_FRAME: if (byte_ready) begin
-                    if (!first_frame_done) state <= DISPLAY_ON;
-                    else begin
-                        lcd_cs_n <= 1'b1;
-                        wait_count <= 0;
-                        state <= PAUSE;
-                    end
-                end
-                DISPLAY_ON: if (send) state <= END_DISPLAY_ON;
-                END_DISPLAY_ON: if (byte_ready) begin
                     lcd_cs_n <= 1'b1;
                     first_frame_done <= 1'b1;
                     wait_count <= 0;
