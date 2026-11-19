@@ -51,3 +51,28 @@ vvp .scratch/st7789.vvp
 
 仿真从 SPI 引脚重组命令和像素，检查完整第一帧、第二帧变化的小方块、复位等待和电机输出。
 初始化命令和 SPI 时序依据 [Sitronix ST7789V 数据手册](https://dl.espressif.com/dl/schematics/ST7789V_SPEC_V1.0.pdf)。
+
+## OV5640 灰度预览
+
+断电时把匹配这块底板的 OV5640 模组接到 `DVP Sensor`。LCD 沿用上表，电机侧保持断电。
+在仓库根目录生成独立工程，在 Efinity 编译 `Ov5640LcdBench.xml` 后用 JTAG 临时下载。
+
+```powershell
+python bench/st7789/make_project.py --camera .scratch/ov5640-lcd-bench
+tools\dl.bat .scratch\ov5640-lcd-bench\outflow\Ov5640LcdBench.bit
+```
+
+OV5640 沿用原工程的 1280×720 RGB565 配置。FPGA 每 8×8 像素取一个样本并转成 Y8，缓存整张 160×90 图。
+LCD 横向显示 320×180 的 16∶9 图像，上下各留 30 行黑边。预览在 750 kHz 下约每 1.8 秒刷新一帧。
+如果暂时没有完整有效的摄像头帧，LCD 显示原有的彩色条纹测试图。
+
+| 指示灯 | 含义 |
+| --- | --- |
+| LED5 慢闪 | FPGA 程序运行 |
+| LED0 亮 | 已发送完一张 LCD 画面 |
+| LED1 亮 | SCCB 配置表已发送完 |
+| LED2 亮 | 最近的统计窗口内收到过 OV5640 的 VSYNC |
+| LED3 亮 | 已发送完至少一张有效灰度图 |
+
+对着摄像头移动手或纸，等待几次刷新，检查图像内容是否随之改变。
+仿真用例 `ov5640_preview_frame_tb.v` 覆盖了非法行长、14,400 个灰度样本和显示锁帧期间的缓存保护。
