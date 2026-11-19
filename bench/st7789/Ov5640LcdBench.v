@@ -52,7 +52,7 @@ module Ov5640LcdBench (
 
     wire [5:0] panel_led;
     wire [15:0] preview_pixel = show_image ? {gray[7:3], gray[7:2], gray[7:3]} : 16'h0000;
-    st7789_panel #(.LANDSCAPE(1'b1), .MADCTL(8'h60)) panel (
+    st7789_panel #(.LANDSCAPE(1'b1), .MADCTL(8'h60), .INVERSION_CMD(8'h20)) panel (
         .clk(clk), .rst_n(rst_n), .preview_valid(capture_ready && frame_valid),
         .preview_pixel(preview_pixel), .x(x), .y(y), .preview_used(preview_used),
         .preview_release(frame_release), .lcd_rst_n(lcd_rst_n), .lcd_cs_n(lcd_cs_n),
