@@ -19,7 +19,7 @@
 module FpgaCar_tb;
 
     reg         clk   = 1'b0;
-    reg         rst_n = 1'b0;
+    reg         key_start_n = 1'b1, key_stop_n = 1'b1;
 
     reg  [7:0]  track;
     wire        hc_trig;
@@ -54,12 +54,6 @@ module FpgaCar_tb;
     // 24 MHz -> 周期 41.667 ns
     always #20.833 clk = ~clk;
 
-    // 上电复位保持 1 us 后释放
-    initial begin
-        rst_n = 1'b0;
-        #1000 rst_n = 1'b1;
-    end
-
     // 输入空闲值
     initial begin
         track      = 8'hFF;                 // 全白（不压线），ACTIVE_HIGH=0 时 line=0
@@ -84,7 +78,8 @@ module FpgaCar_tb;
 
     FpgaCar u_dut (
         .clk          (clk),
-        .rst_n        (rst_n),
+        .key_start_n  (key_start_n),
+        .key_stop_n   (key_stop_n),
         .track        (track),
         .hc_trig      (hc_trig),
         .hc_echo      (hc_echo),
@@ -125,8 +120,7 @@ module FpgaCar_tb;
 
     // ------------------------------------------------------------------
     // 自检：上电安全性 + 循迹通道 + 心跳
-    // 闭环已接入（PWM_BENCH_TEST=0）：上电先 IDLE 2 s，这段时间电机必须完全断电。
-    // RUN 之后的行为由 car_fsm_tb / track_pid_tb 覆盖（否则本 tb 要跑 2 秒仿真）。
+    // 上电进入待机，按键逻辑由 car_panel_tb 补充覆盖。
     // ------------------------------------------------------------------
     integer high_cnt, n;
 
@@ -172,6 +166,36 @@ module FpgaCar_tb;
             $display("FAIL: ml_pwm high for %0d/1200 during IDLE (expect 0)", high_cnt);
         else
             $display("PASS: ml_pwm idle low during IDLE (0/1200)");
+
+        // 加速面板节拍，保留真顶层的循迹、状态机与电机门控。
+        force u_dut.u_panel.ms_tick = 1'b1;
+        @(negedge clk); track = 8'b11100111;
+        #6_000_000;
+        if (motor_stby === 1'b0) $display("PASS: on-line alone does not start the car");
+        else $display("FAIL: on-line alone started the car");
+
+        @(negedge clk); key_start_n = 1'b0;
+        repeat (24) @(negedge clk);
+        key_start_n = 1'b1;
+        #2_000_000;
+        if (motor_stby === 1'b1 && u_dut.panel_status == 2'd1)
+            $display("PASS: K1 starts the on-line car");
+        else $display("FAIL: K1 did not start the on-line car");
+
+        @(negedge clk); force u_dut.k_color = 4'd2;
+        @(negedge clk); release u_dut.k_color;
+        key_stop_n = 1'b0;
+        repeat (4) @(negedge clk);
+        if ({motor_stby, ml_pwm, mr_pwm, ml_in1, ml_in2, mr_in1, mr_in2} === 7'd0 &&
+            u_dut.panel_status == 2'd2 && u_dut.seq_cnt == 3'd1)
+            $display("PASS: K2 immediately disables both motors and preserves color order");
+        else $display("FAIL: K2 stop or color order retention failed");
+
+        repeat (1002) @(negedge clk);
+        if (motor_stby === 1'b0 && u_dut.panel_status == 2'd0 && u_dut.seq_cnt == 0)
+            $display("PASS: K2 hold clears the color order while stopped");
+        else $display("FAIL: K2 hold clear failed");
+        release u_dut.u_panel.ms_tick;
 
         $display("INFO: FpgaCar smoke test done, heartbeat=%0d", u_dut.heartbeat);
         $finish;

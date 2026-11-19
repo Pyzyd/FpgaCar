@@ -41,7 +41,7 @@ for n in range(1,41):
     else: note=row[2].split()[-1] if not is_power else '电源 / 地'
     text(x+420,y+6,note,17,'#586775')
 text(55,1205,'蓝：K230通信　黄：SPI屏预留　红：电源/地；User_IO14–17保留给编码器。',21)
-text(55,1240,'真源：FpgaCar.peri.xml + docs/引脚分配表.md；pin40不是当前rst_n。',19)
+text(55,1240,'真源：FpgaCar.peri.xml + docs/引脚分配表.md；P4-1/2 与板载 K2/K1 复用。',19)
 output=ROOT/'docs/引脚分配图.png'
 im.save(output)
 print(output)

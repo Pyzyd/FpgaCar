@@ -101,7 +101,8 @@ FpgaCar/
 | 顶层端口 | 引脚 | bank / 电平 | 说明 |
 |---|---|---|---|
 | clk | GPIOL_11 | TL corner / 3.3V | 24MHz 晶振，conn_type=pll_clkin（加 PLL 后告警消失） |
-| rst_n | GPIOT_P_11 (User_IO35) | 2B / 1.8V | 上拉 |
+| key_start_n | N2 / GPIOL_P_02 (K1 / User_IO1) | 1A / 1.8V | 低有效，启动 |
+| key_stop_n | M2 / GPIOL_N_02 (K2 / User_IO0) | 1A / 1.8V | 低有效，停车；长按清空色序 |
 | track[0..7] | GPIOL_N_06/P_06/N_08/P_08/N_05/P_05/N_04/P_04 (User_IO2–9) | 1A / 1.8V | YB-MUX04 八路 |
 | hc_trig / hc_echo | GPIOL_N_12 / P_12 (User_IO10/11) | 1B / 1.8V | HC-SR04。**2026-11-18 起 Vcc 改 3.3 V 供电，Echo 随之为 3.3 V，pin 14 直连、不分压**（若改回 5 V 供电则必须 1kΩ 串 + 2kΩ 下地 → 3.33 V，TXS0108E 的 B 侧绝对最大仅 4.6 V）。详见 §3.21、§3.23 与 [docs/模块接线说明.md](docs/模块接线说明.md) §3 |
 | ir_l / ir_r | GPIOL_N_15 / P_15 (User_IO26/27) | 1B / 1.8V | E18-D80NK 红外光电开关 ×2（避障冗余；NPN 低有效=检测到）。**接法修正（联网查证）**：开集输出空闲时内部 10K 上拉为 **5V 高电平，不可直连 1.8V bank**——弃内部上拉，外部 10K 上拉到 D3V3 + 1K/1.2K 分压至约 1.8V。**2026-11-17：现阶段不用，`USE_IR = 1'b0` 不参与障碍判定**，接线与 RTL 保留，见 §3.9 A2 |
@@ -117,7 +118,7 @@ FpgaCar/
 30=GPIOL_N_17 (C2)、31=GPIOL_P_17 (B1)、32=GPIOL_N_18 (A2)、33=GPIOL_P_18 (B2)、34=GPIOT_N_11 (A9)，
 全部落在 1B / 2B 的 1.8V bank（已对 `outflow/FpgaCar.pinout.csv` 逐球核对，Signal Name 列全空）。
 **其中 User_IO25 / 28 / 29 / 34 已分配给 K230 视觉模块的 4 线并行口（见 §3.18）**，30–33 四根仍预留；
-**User_IO0/1（GPIOL_N/P_02）不用**（与核心板 KEY 复用）。
+**P4-1、P4-2 留空**，对应核心板 K2、K1。前视联调版操作见 [小车使用说明](docs/小车使用说明.md)。
 
 > **按物理针号排的完整对照表见 [docs/引脚分配表.md](docs/引脚分配表.md)**（2026-11-16 新增）：
 > `User_IO(n)` 固定在 pin **n+1**，四个电源脚 pin 11 = D5V0 / 12 = GND / 29 = D3V3 / 30 = GND。

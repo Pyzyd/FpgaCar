@@ -54,6 +54,7 @@ module color_seq #(
             seq_valid <= 1'b0;
 
             if (clr) begin
+                seq_valid <= (cnt != 3'd0);
                 seq0 <= 3'd0;
                 seq1 <= 3'd0;
                 seq2 <= 3'd0;

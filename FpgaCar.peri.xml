@@ -159,14 +159,12 @@
         <efxpt:comp_gpio name="mr_pwm" gpio_def="GPIOL_P_09" mode="output" bus_name="" io_standard="1.8 V LVCMOS">
             <efxpt:output_config name="mr_pwm" name_ddio_lo="" register_option="none" clock_name="" is_clock_inverted="false" is_slew_rate="false" tied_option="none" ddio_type="none" delay="0" is_serial="false" drive_strength="4" fastclk_name=""/>
         </efxpt:comp_gpio>
-        <!-- 2026-11-16 改绑：rst_n 原来是 GPIOT_P_11(User_IO35, P4 排针 pin 40)，
-             那是扩展排针，板上复位键根本没接过去，按键按下去 rst_n 一直保持弱上拉高电平，
-             所以 OLED 白闪自检只在真正上电时跑过一次、按键永远重触发不了。
-             现改为 GPIOL_P_02 = 核心板 KEY[0]（引脚定义表：N2 / GPIOL_P_02 / KEY[0] /
-             「和核心板复用了，Default 上拉了」）。按键按下接地 -> 低有效，与 RTL 一致。
-             注：GPIOL_P_02 同时是 P4 排针 pin 2 (User_IO1)，本项目不用那根针。 -->
-        <efxpt:comp_gpio name="rst_n" gpio_def="GPIOL_P_02" mode="input" bus_name="" io_standard="1.8 V LVCMOS">
-            <efxpt:input_config name="rst_n" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="weak pullup" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="rst_n_PULL_UP_ENA" dyn_delay_en_name="rst_n_DLY_ENA" dyn_delay_reset_name="rst_n_DLY_RST" dyn_delay_ctrl_name="rst_n_DLY_CTRL" clkmux_buf_name=""/>
+        <!-- 核心板 K1、K2 均低有效，分别与 P4-2、P4-1 复用。 -->
+        <efxpt:comp_gpio name="key_start_n" gpio_def="GPIOL_P_02" mode="input" bus_name="" io_standard="1.8 V LVCMOS">
+            <efxpt:input_config name="key_start_n" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="weak pullup" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="key_start_n_PULL_UP_ENA" dyn_delay_en_name="key_start_n_DLY_ENA" dyn_delay_reset_name="key_start_n_DLY_RST" dyn_delay_ctrl_name="key_start_n_DLY_CTRL" clkmux_buf_name=""/>
+        </efxpt:comp_gpio>
+        <efxpt:comp_gpio name="key_stop_n" gpio_def="GPIOL_N_02" mode="input" bus_name="" io_standard="1.8 V LVCMOS">
+            <efxpt:input_config name="key_stop_n" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="weak pullup" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="key_stop_n_PULL_UP_ENA" dyn_delay_en_name="key_stop_n_DLY_ENA" dyn_delay_reset_name="key_stop_n_DLY_RST" dyn_delay_ctrl_name="key_stop_n_DLY_CTRL" clkmux_buf_name=""/>
         </efxpt:comp_gpio>
         <efxpt:comp_gpio name="track[0]" gpio_def="GPIOL_N_06" mode="input" bus_name="track" io_standard="1.8 V LVCMOS">
             <efxpt:input_config name="track[0]" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="none" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="track_PULL_UP_ENA[0]" dyn_delay_en_name="track_DLY_ENA[0]" dyn_delay_reset_name="track_DLY_RST[0]" dyn_delay_ctrl_name="track_DLY_CTRL[0]" clkmux_buf_name=""/>

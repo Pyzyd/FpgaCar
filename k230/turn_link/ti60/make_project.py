@@ -45,6 +45,12 @@ def generate(dst):
     q = "{" + PERI + "}"
     gpio_info = peri.find(q + "gpio_info")
     for gpio in list(gpio_info):
+        if gpio.tag == q + "comp_gpio" and gpio.get("name") == "key_start_n":
+            # The standalone link bench still uses K1 as its logic reset.
+            for node in gpio.iter():
+                for key, value in node.attrib.items():
+                    if value.startswith("key_start_n"):
+                        node.set(key, value.replace("key_start_n", "rst_n", 1))
         retained = (gpio.tag == q + "global_unused_config" or
                     (gpio.tag == q + "bus" and gpio.get("name") in {"led", "k230_d"}) or
                     (gpio.tag == q + "comp_gpio" and gpio.get("name") in GPIOS))

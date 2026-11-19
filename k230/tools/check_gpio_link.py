@@ -144,7 +144,8 @@ class Checks(unittest.TestCase):
             self.assertIn(row['gpio_def'],cells[2])
         p4=[r['ti60_p4_pin'] for r in contract['signals']+contract['lcd_reserved']]
         self.assertEqual(len(p4),len(set(p4)))
-        self.assertEqual(by_name['rst_n']['gpio_def'],'GPIOL_P_02')
+        self.assertEqual(by_name['key_start_n']['gpio_def'],'GPIOL_P_02')
+        self.assertEqual(by_name['key_stop_n']['gpio_def'],'GPIOL_N_02')
 
 
 def rtl_replay(compiler_dir):

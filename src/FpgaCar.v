@@ -13,10 +13,9 @@
 //
 // 【管脚怎么分配】Titanium 的管脚不在 HDL 里写 LOC，全部在 Interface Designer 里分配：
 //   - 可分配资源查 04_原理图&PIN TCL/Ti60_Board_引脚定义-20230703-V1.0.xlsx 的 "DC3-40" 页
-//   - User_IO1 (GPIOL_P_02) 已用作板载按键 KEY[0] -> rst_n（调试专用逻辑复位）；
-//     User_IO0 (GPIOL_N_02) 是 KEY[1]，仍在排针上复用，不要再分配
+//   - User_IO1 (GPIOL_P_02) / K1 启动，User_IO0 (GPIOL_N_02) / K2 停车，排针不外接
 //   - 核心板第三个按键 K3 走 CRESET_N（Configuration 专用脚），RTL 碰不到，
-//     按下等于整片重新配置；调试复位用 K1，验证上电自启动才用 K3
+//     按下等于整片重新配置并回到待机
 //   - OV5640 走板上独立 DVP 排针，不占 DC3-40 的 36 个 User_IO
 //   - 板上 6 个 LED / CH340N 串口是固定引脚，也不占 DC3-40
 //   - 摄像头停用后 cmos_* 的管脚分配保持原样（只把输出打常量），
@@ -40,10 +39,10 @@
 
 module FpgaCar (
 
-    // ---------------- 时钟 / 复位 ----------------
+    // ---------------- 时钟 / 板载按键 ----------------
     input  wire         clk,            // 24 MHz, GPIOL_11
-    input  wire         rst_n,          // 低有效复位（核心板 K1 / KEY[0] / GPIOL_P_02）
-                                        //   调试专用：只复位用户逻辑，不动配置、不掉位流
+    input  wire         key_start_n,    // K1 / KEY[0] / GPIOL_P_02，低有效
+    input  wire         key_stop_n,     // K2 / KEY[1] / GPIOL_N_02，低有效
 
     // ---------------- 循迹 20 分：YB-MUX04 八路循迹 ----------------
     input  wire [7:0]   track,
@@ -125,22 +124,19 @@ module FpgaCar (
     localparam USE_K230   = 1'b1;
 
     // ------------------------------------------------------------------
-    // 复位同步化：异步有效、同步释放
+    // FPGA 配置后先保持内部复位几个周期，再随系统时钟释放。
     // ------------------------------------------------------------------
-    reg [1:0] rst_sync;
-    wire      sys_rst_n = rst_sync[1];
+    reg [3:0] power_on = 4'b0000;
+    wire      sys_rst_n = power_on[3];
 
-    always @(posedge clk or negedge rst_n)
-        if (!rst_n) rst_sync <= 2'b00;
-        else        rst_sync <= {rst_sync[0], 1'b1};
+    always @(posedge clk)
+        power_on <= {power_on[2:0], 1'b1};
 
     // ------------------------------------------------------------------
     // 运动闭环（track_pid + car_fsm）接线
     // ------------------------------------------------------------------
     // 【台架开关】PWM_BENCH_TEST = 1 时绕过闭环：左轮 25% 常转，用于验证
-    //   "PWM 波形真的出来、电机真的转、TB6612 接线对"。
-    //   默认 0 = 走闭环；上电后会先 IDLE 2 s（留时间把车摆正）再起跑。
-    //   【接 TB6612 之前务必确认这里是 0】，否则上电即走。
+    //   用来核对 PWM 和 TB6612 接线。两种模式都受 K1/K2 控制。
     localparam        PWM_BENCH_TEST = 1'b0;
     localparam [10:0] BENCH_DUTY     = 11'd300;     // 300/1200 = 25%
 
@@ -150,8 +146,12 @@ module FpgaCar (
     wire [10:0]       pid_duty_l, pid_duty_r;
     wire signed [10:0] pid_corr;
     wire [2:0]        car_state;                     // 0 IDLE 1 RUN 2 LOST 3 SEARCH 4 STOP
+    wire [1:0]        panel_status;
+    wire              run_enable, clear_result;
+    wire              motion_rst_n = sys_rst_n && run_enable;
+    wire [2:0]        reported_state = (panel_status == 2'd2) ? 3'd4 : car_state;
 
-    wire        motor_en = PWM_BENCH_TEST ? 1'b1 : ctrl_en;
+    wire        motor_en = motion_rst_n && (PWM_BENCH_TEST || ctrl_en);
     wire [10:0] ml_duty  = PWM_BENCH_TEST ? BENCH_DUTY : ctrl_duty_l;
     wire [10:0] mr_duty  = PWM_BENCH_TEST ? BENCH_DUTY : ctrl_duty_r;
 
@@ -326,7 +326,7 @@ module FpgaCar (
         .I_LIMIT   (640)
     ) u_pid (
         .clk     (clk),
-        .rst_n   (sys_rst_n),
+        .rst_n   (motion_rst_n),
         .en      (ctrl_en),
         .pos     (line_pos),
         .on_line (line_on),
@@ -354,15 +354,25 @@ module FpgaCar (
     wire [2:0] dir_evt_mux = USE_K230 ? k_dir : 3'd0;   // K230 停用时恒 0，转向走 car_fsm 的拐角兜底
     wire [1:0] turn_dir;                                // 最近一次转向方向（0 无 1 左 2 右），串口 S= 用
 
+    car_panel u_panel (
+        .clk            (clk),
+        .rst_n          (sys_rst_n),
+        .key_start_n    (key_start_n),
+        .key_stop_n     (key_stop_n),
+        .line_ready     (line_on && !line_lost),
+        .motion_stopped (car_state == 3'd4 || (car_state == 3'd0 && line_lost)),
+        .run_enable     (run_enable),
+        .clear_result   (clear_result),
+        .status         (panel_status)
+    );
+
     car_fsm #(
         .CLK_FREQ     (24_000_000),
-        .START_MS     (2000),
+        .START_MS     (1),           // K1 已确认；状态机再确认一次压线启动
         .LOST_HOLD_MS (300),
         .SEARCH_MS    (1500),
         .SEARCH_DUTY  (500),
-        // 1 = 找线超时回 IDLE（把车放回线上 2 s 就重新起跑），桌面反复调试用。
-        // 正式比赛改回 0：找线失败直接永久停车。
-        .SEARCH_FAIL_TO_IDLE (1),
+        .SEARCH_FAIL_TO_IDLE (0),    // 找线失败后由按键面板锁停
         .DIR_DEAD_MS  (10),
         .TURN_MS      (700),
         .TURN_WAIT_FOR_CORNER (USE_K230),
@@ -385,7 +395,7 @@ module FpgaCar (
         .TURN_DIR_HOLD_MS (1500)
     ) u_car (
         .clk      (clk),
-        .rst_n    (sys_rst_n),
+        .rst_n    (motion_rst_n),
         .on_line  (line_on),
         .lost     (line_lost),
         .obstacle (obstacle),
@@ -404,10 +414,10 @@ module FpgaCar (
     );
 
     // TB6612 方向脚：使能时才驱动，且 IN1/IN2 永不同时为 1（否则短路刹车）
-    assign ml_in1     = PWM_BENCH_TEST ? 1'b1     : (motor_en &  ctrl_dir_l);
-    assign ml_in2     = PWM_BENCH_TEST ? 1'b0     : (motor_en & ~ctrl_dir_l);
-    assign mr_in1     = PWM_BENCH_TEST ? 1'b0     : (motor_en &  ctrl_dir_r);
-    assign mr_in2     = PWM_BENCH_TEST ? 1'b0     : (motor_en & ~ctrl_dir_r);
+    assign ml_in1     = motor_en & (PWM_BENCH_TEST |  ctrl_dir_l);
+    assign ml_in2     = motor_en & (~PWM_BENCH_TEST & ~ctrl_dir_l);
+    assign mr_in1     = motor_en & (~PWM_BENCH_TEST &  ctrl_dir_r);
+    assign mr_in2     = motor_en & (~PWM_BENCH_TEST & ~ctrl_dir_r);
     assign motor_stby = motor_en;
 
     // ------------------------------------------------------------------
@@ -587,8 +597,8 @@ module FpgaCar (
         .clk       (clk),
         .rst_n     (sys_rst_n),
         .color_in  (color_in_mux),
-        .new_color (color_evt_mux),
-        .clr       (1'b0),              // TODO: 接整机状态机的「新一轮」信号
+        .new_color (color_evt_mux && run_enable),
+        .clr       (clear_result),
         .seq0      (seq0),
         .seq1      (seq1),
         .seq2      (seq2),
@@ -638,7 +648,8 @@ module FpgaCar (
             // ---- 屏幕调试区（page1 循迹条 / page6-7 距离+状态+标志）----
             .dbg_dist   (dist_cm),      // 16'hFFFF = 无回波，屏上显示 ---
             .dbg_line   (line_bits),    // bit0 = 车体最左 X1
-            .dbg_state  (car_state),
+            .dbg_state  (reported_state),
+            .panel_status (panel_status),
             .dbg_obs    (obstacle),
             // 左/右红外模块已从车上卸下，原来的两格改显示转向方向 S
             .dbg_turn   (turn_dir),     // 0 无 / 1 左 / 2 右，与串口 S= 同源
@@ -677,7 +688,7 @@ module FpgaCar (
         .wide       (line_wide),
         .turn_dir   (turn_dir),
         .obstacle   (obstacle),
-        .state      (car_state),
+        .state      (reported_state),
         .enc_l      (enc_l_pos),
         .enc_r      (enc_r_pos),
         .spd_l      (spd_l),
@@ -693,10 +704,9 @@ module FpgaCar (
     // ------------------------------------------------------------------
     reg [23:0] heartbeat;
 
-    always @(posedge clk or negedge rst_n)
-        if (!rst_n)          heartbeat <= 24'd0;
-        else if (!sys_rst_n) heartbeat <= 24'd0;
-        else                 heartbeat <= heartbeat + 1'b1;
+    always @(posedge clk or negedge sys_rst_n)
+        if (!sys_rst_n) heartbeat <= 24'd0;
+        else            heartbeat <= heartbeat + 1'b1;
 
     // ------------------------------------------------------------------
     // LED（6 个，低电平点亮）：摄像头与 OLED 停用后，这是板上唯一的现场指示
@@ -706,6 +716,6 @@ module FpgaCar (
     //   LED[1]    有障碍（超声近距或任一路红外）
     //   LED[0]    全丢线
     // ------------------------------------------------------------------
-    assign led = ~{heartbeat[23], car_state, obstacle, line_lost};
+    assign led = ~{heartbeat[23], reported_state, obstacle, line_lost};
 
 endmodule

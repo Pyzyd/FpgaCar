@@ -103,6 +103,8 @@ module color_seq_tb;
         @(posedge clk); #1; clr = 1'b0;
         @(posedge clk); #1;
         expect_seq(0, 0, 0, 0, 0, "cleared");
+        if (pulses == 5) $display("PASS: clear pulses seq_valid so OLED erases the result");
+        else             $display("FAIL: clear did not notify the OLED");
         if (complete === 1'b0) $display("PASS: complete deasserted after clear");
         else                   $display("FAIL: complete still high after clear");
 

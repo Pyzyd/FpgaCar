@@ -81,6 +81,7 @@ module oled_driver #(
     input  wire [15:0] dbg_dist,   // 超声距离 cm，16'hFFFF = 无回波
     input  wire [7:0]  dbg_line,   // 八路循迹，bit0 = 车体最左（X1）
     input  wire [2:0]  dbg_state,  // 车状态 0..7
+    input  wire [1:0]  panel_status, // 0 READY / 1 RUN / 2 STOP / 3 LINE
     input  wire        dbg_obs,    // 障碍：1 = 有（当前只看超声近距；红外已拆）
     input  wire [1:0]  dbg_turn,   // 转向方向（0 无 / 1 左 / 2 右），与串口 S= 同源
     //                                （左/右红外模块已从车上卸下，不再显示）
@@ -394,19 +395,21 @@ module oled_driver #(
     reg [4:0]  rc;            // col 0..31
     reg [1:0]  pk;            // 推送步进：0=列窗 1=页窗 2=数据流
 
-    // 调试区：dk 是绘制步进（0..431），dbg_*_r 是采样锁存值
+    // 调试区：dk 是绘制步进（0..471），dbg_*_r 是采样锁存值
     // 绘制分五段，边界必须写在状态机之前（S_DBG 用 DK_END 判结束）
     localparam [8:0] DK_SEG2 = 9'd128,   // 段1 结束：page1 循迹条 128 字节
                      DK_SEG3 = 9'd224,   // 段2 结束：page6/7 三位距离 96 字节
                      DK_SEG4 = 9'd272,   // 段3 结束：'cm' 16 + 状态号 32 = 48 字节
                      DK_SEG5 = 9'd368,   // 段4 结束：四标志格 96 字节
-                     DK_END  = 9'd432;   // 段5 结束：page0 八位二进制串 64 字节
+                     DK_SEG6 = 9'd432,   // 段5 结束：page0 八位二进制串 64 字节
+                     DK_END  = 9'd472;   // 段6 结束：page0 操作状态 40 字节
     reg [8:0]  dk;
     reg [9:0]  dbg_addr;      // 调试区显存地址（组合）
     reg [7:0]  dbg_data;      // 调试区字节（组合）
     reg [15:0] dbg_dist_r;
     reg [7:0]  dbg_line_r;
     reg [2:0]  dbg_state_r;
+    reg [1:0]  panel_status_r;
     reg        dbg_obs_r, dbg_lost_r;
     reg [1:0]  dbg_turn_r;
     reg [25:0] dbg_cnt;
@@ -448,6 +451,7 @@ module oled_driver #(
             dbg_dist_r  <= 16'hFFFF;
             dbg_line_r  <= 8'h00;
             dbg_state_r <= 3'd0;
+            panel_status_r <= 2'd0;
             dbg_obs_r   <= 1'b0;
             dbg_turn_r  <= 2'd0;
             dbg_lost_r  <= 1'b0;
@@ -491,12 +495,13 @@ module oled_driver #(
                              : CLK_FREQ / 1000 * DBG_SAMPLE_MS - 1)) begin
                 dbg_cnt <= 26'd0;
                 if (dbg_dist_r != dbg_dist || dbg_line_r != dbg_line ||
-                    dbg_state_r != dbg_state || dbg_obs_r != dbg_obs ||
+                    dbg_state_r != dbg_state || panel_status_r != panel_status || dbg_obs_r != dbg_obs ||
                     dbg_turn_r != dbg_turn ||
                     dbg_lost_r != dbg_lost) begin
                     dbg_dist_r  <= dbg_dist;
                     dbg_line_r  <= dbg_line;
                     dbg_state_r <= dbg_state;
+                    panel_status_r <= panel_status;
                     dbg_obs_r   <= dbg_obs;
                     dbg_turn_r  <= dbg_turn;
                     dbg_lost_r  <= dbg_lost;
@@ -755,6 +760,36 @@ module oled_driver #(
         dgt0 = dist_tmp[3:0];
     end
 
+    // 5x7 字模按列存放，最低字节为最左列。
+    function [39:0] panel_glyph;
+        input [7:0] letter;
+        begin
+            case (letter)
+                "A": panel_glyph = 40'h7E1111117E;
+                "D": panel_glyph = 40'h3E4141417F;
+                "E": panel_glyph = 40'h414949497F;
+                "I": panel_glyph = 40'h00417F4100;
+                "L": panel_glyph = 40'h404040407F;
+                "N": panel_glyph = 40'h7F1008047F;
+                "O": panel_glyph = 40'h3E4141413E;
+                "P": panel_glyph = 40'h060909097F;
+                "R": panel_glyph = 40'h462919097F;
+                "S": panel_glyph = 40'h3249494926;
+                "T": panel_glyph = 40'h01017F0101;
+                "U": panel_glyph = 40'h3F4040403F;
+                "Y": panel_glyph = 40'h0304780403;
+                default: panel_glyph = 40'd0;
+            endcase
+        end
+    endfunction
+
+    wire [39:0] panel_word = (panel_status_r == 2'd1) ? " RUN " :
+                             (panel_status_r == 2'd2) ? "STOP " :
+                             (panel_status_r == 2'd3) ? "LINE " : "READY";
+    wire [5:0] panel_col = dk - DK_SEG6;
+    wire [7:0] panel_letter = panel_word[39 - 8 * panel_col[5:3] -: 8];
+    wire [39:0] panel_bitmap = panel_glyph(panel_letter);
+
     always @(*) begin
         dbg_addr = 10'd0;
         dbg_data = 8'h00;
@@ -825,7 +860,7 @@ module oled_driver #(
             if (cix == 7'd0 || cix == 7'd11) dbg_data = 8'hFF;
             else if (pgh == 1'b0)            dbg_data = setv ? 8'hFF : 8'h01;
             else                             dbg_data = setv ? 8'hFF : 8'h80;
-        end else begin
+        end else if (dk < DK_SEG6) begin
             // ---- page 0 col8..71：八位二进制串，自左向右 = line[7]..line[0] ----
             // 与串口 T= 的字符序一致（uart_report 也是 bit7 在前），可以逐字对照抄。
             // page 0 的 col0..7（存活标记）与 col120..127（K230 叉号）由 S_MARK 写，
@@ -834,6 +869,10 @@ module oled_driver #(
             dga      = (dbg_line_r[7'd7 - dk[5:3]] ? 10'd408 : 10'd400)
                        + {7'd0, dk[2:0]};             // '0'=400, '1'=408
             dbg_data = dg_q;
+        end else begin
+            // ---- page 0 col76..115：操作状态 ----
+            dbg_addr = 10'd76 + {4'd0, panel_col};
+            dbg_data = (panel_col[2:0] < 3'd5) ? panel_bitmap[8 * panel_col[2:0] +: 8] : 8'h00;
         end
     end
 

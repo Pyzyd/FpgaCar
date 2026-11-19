@@ -37,6 +37,7 @@ module oled_driver_tb;
     reg [15:0] dbg_dist  = 16'hFFFF;     // 16'hFFFF = 无回波，屏上显示 "---"
     reg [7:0]  dbg_line  = 8'h00;
     reg [2:0]  dbg_state = 3'd0;
+    reg [1:0]  panel_status = 2'd0;
     reg        dbg_obs   = 1'b0;
     reg [1:0]  dbg_turn  = 2'd0;         // 转向方向 0 无 / 1 左 / 2 右
     reg        dbg_lost  = 1'b0;
@@ -60,6 +61,7 @@ module oled_driver_tb;
         .busy(busy), .ack_err(ack_err), .frame_done(frame_done),
         .nack_seen(nack_seen),
         .dbg_dist(dbg_dist), .dbg_line(dbg_line), .dbg_state(dbg_state),
+        .panel_status(panel_status),
         .dbg_obs(dbg_obs), .dbg_turn(dbg_turn),
         .dbg_lost(dbg_lost)
     );
@@ -198,6 +200,7 @@ module oled_driver_tb;
         reg [15:0] dv;
         reg [3:0]  d2, d1, d0;
         reg        sv;
+        reg [319:0] expected_panel;
         begin
             // ---- page 1：循迹条 ----
             for (ln = 0; ln < 8; ln = ln + 1)
@@ -245,6 +248,15 @@ module oled_driver_tb;
                 end
 
             // ---- 四个标志格：page6/7 col80..127 ----
+            case (panel_status)
+                2'd1: expected_panel = 320'h0000000000000000_7f09192946000000_3f4040403f000000_7f0408107f000000_0000000000000000;
+                2'd2: expected_panel = 320'h2649494932000000_01017f0101000000_3e4141413e000000_7f09090906000000_0000000000000000;
+                2'd3: expected_panel = 320'h7f40404040000000_00417f4100000000_7f0408107f000000_7f49494941000000_0000000000000000;
+                default: expected_panel = 320'h7f09192946000000_7f49494941000000_7e1111117e000000_7f4141413e000000_0304780403000000;
+            endcase
+            for (cl = 0; cl < 40; cl = cl + 1)
+                exp_fb[76 + cl] = expected_panel[319 - 8 * cl -: 8];
+
             for (pg = 0; pg < 2; pg = pg + 1)
                 for (cl = 0; cl < 48; cl = cl + 1) begin
                     flg = cl / 12;
@@ -469,6 +481,7 @@ module oled_driver_tb;
         dbg_dist  = 16'd123;
         dbg_line  = 8'b10000001;
         dbg_state = 3'd2;
+        panel_status = 2'd1;
         dbg_obs   = 1'b1;
         dbg_turn  = 2'd2;              // 右转：点亮最后一格，覆盖新布局
         dbg_lost  = 1'b0;
@@ -485,12 +498,19 @@ module oled_driver_tb;
         // 「fl=2 接成了恒 0 或丢线」。这里再要一帧，让左转格真正点亮。
         $display("PHASE: waiting left-turn frame at %0t", $time); $fflush(0);
         dbg_turn = 2'd1;
+        panel_status = 2'd2;
         @(posedge frame_done);
         @(posedge clk);
         $display("PHASE: left-turn frame arrived at %0t", $time); $fflush(0);
         build_exp;
         check_fb("left turn (dbg_turn=1)");
         check_flags(1'b1, 1'b0, 1'b1, 1'b0, "left turn (dbg_turn=1)");
+
+        panel_status = 2'd3;
+        @(posedge frame_done);
+        @(posedge clk);
+        build_exp;
+        check_fb("LINE panel-only redraw");
 
         if (nack !== 0) $display("FAIL: slave model saw %0d address NACKs", nack);
         else            $display("PASS: every transaction addressed 0x3C correctly");
