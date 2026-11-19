@@ -41,9 +41,11 @@
 //     page 6/7 col0..47 : 超声距离，三位 16x16 数字（col 0/16/32）；
 //                         无回波（16'hFFFF）显示 "---"，超过 999 饱和成 999。
 //     page 7 col48..63  : 小字 "cm"（8x8）。
-//     page 6/7 col64..79: 车状态号 0=IDLE 1=RUN 2=LOST 3=SEARCH 4=STOP。
+//     page 6/7 col64..79: 车状态号 0=IDLE 1=RUN 2=LOST 3=SEARCH 4=STOP
+//                         5=AVOID_BACK 6=AVOID_TURN 7=AVOID_PROBE（一位数字，0..7）。
 //     page 6/7 col80..127: 四个标志格，每格 12 px（实心 10 px），
-//                         自左向右 = 障碍 / 左红外 / 右红外 / 丢线；
+//                         自左向右 = 障碍 / 丢线 / 左转 / 右转；
+//                         （左/右红外模块已从车上卸下，不再显示）
 //     page 0 col8..71   : 八路循迹的八位二进制串（8 个 8x8 数字，每字 8 列），
 //                         自左向右 = line[7]..line[0]，与串口 T= 的字符序一致。
 //                         page 0 两端 col0..7 / col120..127 归 S_MARK，不冲突。
@@ -78,10 +80,10 @@ module oled_driver #(
     // ---- 调试区输入（画在空闲的 page 1 与 page 6/7）----
     input  wire [15:0] dbg_dist,   // 超声距离 cm，16'hFFFF = 无回波
     input  wire [7:0]  dbg_line,   // 八路循迹，bit0 = 车体最左（X1）
-    input  wire [2:0]  dbg_state,  // 车状态 0..4
-    input  wire        dbg_obs,    // 障碍：1 = 有（超声近距 或 任一路红外）
-    input  wire        dbg_irl,    // 左红外检测到障碍（1 = 有，已取反成高有效）
-    input  wire        dbg_irr,    // 右红外
+    input  wire [2:0]  dbg_state,  // 车状态 0..7
+    input  wire        dbg_obs,    // 障碍：1 = 有（当前只看超声近距；红外已拆）
+    input  wire [1:0]  dbg_turn,   // 转向方向（0 无 / 1 左 / 2 右），与串口 S= 同源
+    //                                （左/右红外模块已从车上卸下，不再显示）
     input  wire        dbg_lost,   // 丢线
     // ---- I2C 物理层（三态拆线）----
     output reg        scl,
@@ -404,7 +406,8 @@ module oled_driver #(
     reg [15:0] dbg_dist_r;
     reg [7:0]  dbg_line_r;
     reg [2:0]  dbg_state_r;
-    reg        dbg_obs_r, dbg_irl_r, dbg_irr_r, dbg_lost_r;
+    reg        dbg_obs_r, dbg_lost_r;
+    reg [1:0]  dbg_turn_r;
     reg [25:0] dbg_cnt;
 
     // 当前槽颜色（供显存写入与 ROM 地址共用）
@@ -445,10 +448,11 @@ module oled_driver #(
             dbg_line_r  <= 8'h00;
             dbg_state_r <= 3'd0;
             dbg_obs_r   <= 1'b0;
-            dbg_irl_r   <= 1'b0;
-            dbg_irr_r   <= 1'b0;
+            dbg_turn_r  <= 2'd0;
             dbg_lost_r  <= 1'b0;
             dbg_cnt     <= 26'd0;
+            ack_err     <= 1'b0;      // 复位后到首笔事务之间不能是 X
+            nack_seen   <= 1'b0;
             frame_done  <= 1'b0;
             frame_pend  <= 1'b0;
             x_req       <= 1'b0;
@@ -489,14 +493,13 @@ module oled_driver #(
                 dbg_cnt <= 26'd0;
                 if (dbg_dist_r != dbg_dist || dbg_line_r != dbg_line ||
                     dbg_state_r != dbg_state || dbg_obs_r != dbg_obs ||
-                    dbg_irl_r != dbg_irl || dbg_irr_r != dbg_irr ||
+                    dbg_turn_r != dbg_turn ||
                     dbg_lost_r != dbg_lost) begin
                     dbg_dist_r  <= dbg_dist;
                     dbg_line_r  <= dbg_line;
                     dbg_state_r <= dbg_state;
                     dbg_obs_r   <= dbg_obs;
-                    dbg_irl_r   <= dbg_irl;
-                    dbg_irr_r   <= dbg_irr;
+                    dbg_turn_r  <= dbg_turn;
                     dbg_lost_r  <= dbg_lost;
                     dirty       <= 1'b1;
                     refresh_cnt <= 26'd0;
@@ -721,14 +724,15 @@ module oled_driver #(
     //   dk 128..223  page 6/7 三位距离数字，s = k[6:5] 选百/十/个位
     //   dk 224..271  page 7 'cm' 16 列 + page 6/7 车状态号 32 列
     //   dk 272..367  page 6/7 四个标志格，每格 12 列（实心 10 列 + 两侧边框）
-    // 全部 368 个字节每次无条件重写，不依赖旧显存，改布局不会留残影。
+    //                自左向右 = 障碍 / 丢线 / 左转 / 右转（左/右红外模块已卸）
+    // 全部 432 个字节（dk 0..431）每次无条件重写，不依赖旧显存，改布局不会留残影。
     // ------------------------------------------------------------------
     reg [9:0] dga;          // oled_digits 地址（异步读，组合给出）
     reg [6:0] kk;           // 段内偏移
     reg [6:0] ci;           // 标志段：页内列号 0..47
     reg [6:0] cix;          // 标志段：格内列号 0..11
     reg [5:0] k2;           // 状态号段：段内偏移 0..31
-    reg [1:0] fl;           // 标志序号 0=障碍 1=左红外 2=右红外 3=丢线
+    reg [1:0] fl;           // 标志序号 0=障碍 1=丢线 2=左转 3=右转
     reg       pgh;          // 目标页：0 = page 6，1 = page 7
     reg       setv;         // 该标志是否置位
 
@@ -802,7 +806,7 @@ module oled_driver #(
                 dbg_data = dg_q;
             end
         end else if (dk < DK_SEG5) begin
-            // ---- page 6/7 col80..127：四个标志格，自左向右 障碍/左红外/右红外/丢线 ----
+            // ---- page 6/7 col80..127：四个标志格，自左向右 障碍/丢线/左转/右转 ----
             kk = dk - DK_SEG4;                   // 0..95
             pgh = (kk >= 7'd48);
             ci  = pgh ? (kk - 7'd48) : kk;       // 0..47
@@ -812,9 +816,10 @@ module oled_driver #(
             else                  begin fl = 2'd0; cix = ci;          end
             case (fl)
             2'd0:    setv = dbg_obs_r;
-            2'd1:    setv = dbg_irl_r;
-            2'd2:    setv = dbg_irr_r;
-            default: setv = dbg_lost_r;
+            2'd1:    setv = dbg_lost_r;
+            2'd2:    setv = (dbg_turn_r == 2'd1);   // 左转
+            2'd3:    setv = (dbg_turn_r == 2'd2);   // 右转
+            default: setv = 1'b0;                  // fl 只有 0..3，兜底不点亮
             endcase
             dbg_addr = 10'd768 + (pgh ? 10'd128 : 10'd0) + 10'd80 + {3'd0, ci};
             // 列 0 与 11 是边框（常亮），中间 10 列置位时整格实心、清零时只留上下沿

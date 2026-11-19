@@ -307,7 +307,10 @@ module FpgaCar (
     wire hc_near  = (dist_cm != 16'hFFFF) && (dist_cm <= OBSTACLE_CM);
     wire ir_l_det = ~ir_l;                      // NPN 低有效
     wire ir_r_det = ~ir_r;
-    wire ir_det   = ir_l_det | ir_r_det;        // 原始判定，始终可观测（屏上四个标志格）
+    // 注意：OLED 的四格已改成 障碍/丢线/左转/右转（红外模块已卸下），
+    // 所以 ir_l_det / ir_r_det 现在只在 USE_IR=1 时参与 obstacle，没有观测出口。
+    // 要排查红外接线只能用串口或示波器；重装红外时记得先把 USE_IR 改回 1。
+    wire ir_det   = ir_l_det | ir_r_det;
     wire obstacle = (USE_ULTRA ? hc_near : 1'b0) | (USE_IR & ir_det);
 
     // ------------------------------------------------------------------
@@ -349,7 +352,8 @@ module FpgaCar (
     wire       k_alive;                 // 2 s 内收到过合法消息
     wire [7:0] k_err;                   // 协议异常计数，OLED 诊断用
 
-    wire [2:0] dir_evt_mux = USE_K230 ? k_dir : 3'd0;
+    wire [2:0] dir_evt_mux = USE_K230 ? k_dir : 3'd0;   // K230 停用时恒 0，转向走 car_fsm 的拐角兜底
+    wire [1:0] turn_dir;                                // 最近一次转向方向（0 无 1 左 2 右），串口 S= 用
 
     car_fsm #(
         .CLK_FREQ     (24_000_000),
@@ -372,13 +376,21 @@ module FpgaCar (
         .AVOID_TURN_DUTY  (600),
         .AVOID_PROBE_MS   (400),
         .AVOID_PROBE_DUTY (450),
-        .AVOID_TRIES      (3)
+        // 进试探段后先静默 100 ms 不判障碍：刚转完身障碍必然还在正前方，
+        // 第一拍就判会把"试探前进"变成只跑 1 ms，3 轮配额瞬间烧光。
+        .AVOID_PROBE_SETTLE_MS (100),
+        .AVOID_TRIES      (3),
+        // 转向指示（串口 S= / OLED 左转右转格）保持 1500 ms 后自动熄灭。
+        // 保持太短 OLED 每 100 ms 采样一次抓不到；太长直道上也显示"正在转弯"。
+        .TURN_DIR_HOLD_MS (1500)
     ) u_car (
         .clk      (clk),
         .rst_n    (sys_rst_n),
         .on_line  (line_on),
         .lost     (line_lost),
         .obstacle (obstacle),
+        .wide     (line_wide),
+        .turn_dir (turn_dir),
         .pos      (line_pos),
         .dir_evt  (dir_evt_mux),    // 交通牌方向：K230 提供，停用时恒 0
         .pid_l    (pid_duty_l),
@@ -628,8 +640,8 @@ module FpgaCar (
             .dbg_line   (line_bits),    // bit0 = 车体最左 X1
             .dbg_state  (car_state),
             .dbg_obs    (obstacle),
-            .dbg_irl    (ir_l_det),    // 原始电平，不看 USE_IR：接没接一眼可见
-            .dbg_irr    (ir_r_det),
+            // 左/右红外模块已从车上卸下，原来的两格改显示转向方向 S
+            .dbg_turn   (turn_dir),     // 0 无 / 1 左 / 2 右，与串口 S= 同源
             .dbg_lost   (line_lost)
         );
     end else begin : g_no_oled
@@ -663,6 +675,7 @@ module FpgaCar (
         .duty_l     (ctrl_duty_l),
         .duty_r     (ctrl_duty_r),
         .wide       (line_wide),
+        .turn_dir   (turn_dir),
         .obstacle   (obstacle),
         .state      (car_state),
         .enc_l      (enc_l_pos),

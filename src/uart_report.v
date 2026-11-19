@@ -4,7 +4,7 @@
 // 每来一个 dist_valid 脉冲（hc_sr04 每 60 ms 一帧）打两行，格式固定：
 //
 //     D=123cm T=00011000 P=+02 O=0 M=01          (35 字节)
-//     L=00000123 R=00000123 VL=0005 VR=0005 ...  (71 字节)
+//     L=00000123 R=00000123 VL=0005 VR=0005 ...  (79 字节，含 W= 与 S=)
 //
 //   D=xxxcm : 超声波距离；--- 表示无回波/超量程
 //   T=      : 8 路循迹探头，bit7..bit0 对应 track[7]..track[0]，1=压线
@@ -26,13 +26,17 @@
 //             track_line 不采信它的位置并保持上一拍 pos；持续超过 WIDE_MS
 //             会降级成丢线（此时 T= 仍然有多个 1，但 M 会走 02 LOST）。
 //             这是夜里被自己影子/灯影骗到时唯一能一眼看出来的字段。
+//   S=      : 最近一次转向方向：0 无 / 1 左 / 2 右。找线只有 1.5 s，光看车往
+//             哪开分不清是"拐角兜底左转"还是"按原逻辑右转"，这一项能一眼分开。
+//             没装 K230 时过拐角应恒为 1（见 PROJECT_PLAN §3.31）。
 //
 // 【为什么里程用十六进制】编码器计数是 32 位有符号，十进制要套 8 次 div10，
 // 组合逻辑代价比信息价值大；解析时按行首字母分流，主机侧再换算即可。
 // 【为什么加 M=】此前串口只能看到"车不动了"，分不清是 IDLE 没起跑、SEARCH
 // 原地找线、还是 STOP 永久停车 —— 这三种情况现场处置完全不同。
 //
-// 115200 波特下两行约 6.5 ms，而一帧 60 ms，永远发得完，不需要队列。
+// 115200 波特下 10 位/字节：35 + 79 = 114 字节约 9.9 ms，而一帧 60 ms，
+// 永远发得完，不需要队列。
 // REPORT_EN=0 时整行静音（UART 保持空闲高），正式跑车可关掉省电/防干扰。
 // =============================================================================
 `timescale 1ns/1ns
@@ -53,6 +57,7 @@ module uart_report #(
     input  wire [10:0] duty_l,          // 实际下发占空比左（DL=）
     input  wire [10:0] duty_r,          // 实际下发占空比右（DR=）
     input  wire        wide,       // 宽黑标志（影子防护，W=）
+    input  wire [1:0]  turn_dir,   // 最近一次转向方向（0 无 / 1 左 / 2 右，S=）
     input  wire        obstacle,   // 障碍标志
     input  wire [2:0]  state,      // 状态机状态（M=）
     input  wire [31:0] enc_l,      // 左编码器累计（二补码）
@@ -63,7 +68,7 @@ module uart_report #(
 );
 
     localparam integer MSG_LEN  = 35;   // 第一行：D=/T=/P=/O=/M=
-    localparam integer MSG2_LEN = 75;   // 第二行：L=/R=/VL=/VR=/X=/C=/DL=/DR=/W=
+    localparam integer MSG2_LEN = 79;   // 第二行：L=/R=/VL=/VR=/X=/C=/DL=/DR=/W=/S=
 
     // ------------------------------------------------------------------
     // 无符号除以 10（移位-减法，10 次迭代，纯组合）
@@ -119,7 +124,7 @@ module uart_report #(
     reg  [7:0]  msg  [0:MSG_LEN-1];
     reg  [7:0]  msg2 [0:MSG2_LEN-1];
     reg  [6:0]  idx;        // 7 位：MSG_LEN=35，6 位够用，但保持 7 位与历史一致
-    reg  [6:0]  idx2;       // 第二行游标（0..39）
+    reg  [6:0]  idx2;       // 第二行游标（0..MSG2_LEN-1，当前 0..78）
 
     reg  [9:0]  v10;         // 距离（0..999）
     reg         bad;         // 距离无效
@@ -129,6 +134,7 @@ module uart_report #(
     reg  [10:0] dl, dr;      // 锁存的实际占空比
     reg  signed [4:0] pz;    // 锁存的位置
     reg         wid;         // 锁存的宽黑标志
+    reg  [1:0]  td;          // 锁存的转向方向（S=）
     reg         obst;        // 锁存的障碍标志
     reg  [2:0]  st;          // 锁存的状态
     reg  [31:0] el, er;      // 锁存的编码器里程
@@ -156,7 +162,7 @@ module uart_report #(
     wire [7:0]  c_tt  = c_t - c_h * 8'd10;
     wire [7:0]  c_uu  = c_mag - c_t * 8'd10;             // |corr|<=600，个位
 
-    // 状态两位十进制（0..99，当前只用到 0..4）
+    // 状态两位十进制（0..99，当前只用到 0..7）
     wire [7:0]  m_t   = div10u({2'b00, 5'd0, st});
     wire [7:0]  m_uu  = {5'd0, st} - m_t * 8'd10;
 
@@ -184,6 +190,7 @@ module uart_report #(
             dr       <= 11'd0;
             pz       <= 5'sd0;
             wid      <= 1'b0;
+            td       <= 2'd0;
             obst     <= 1'b0;
             st       <= 3'd0;
             el       <= 32'd0;
@@ -211,6 +218,7 @@ module uart_report #(
                 dr   <= duty_r;
                 pz   <= pos;
                 wid  <= wide;
+                td   <= turn_dir;
                 obst <= obstacle;
                 st   <= state;
                 el   <= enc_l;
@@ -382,8 +390,13 @@ module uart_report #(
         msg2[70] = 8'h57;                                  // 'W'
         msg2[71] = 8'h3D;
         msg2[72] = wid ? 8'h31 : 8'h30;
-        msg2[73] = 8'h0D;
-        msg2[74] = 8'h0A;
+        // ---- S= 最近一次转向方向（0 无 / 1 左 / 2 右）----
+        msg2[73] = 8'h20;
+        msg2[74] = 8'h53;                                  // 'S'
+        msg2[75] = 8'h3D;
+        msg2[76] = (td == 2'd0) ? 8'h30 : ((td == 2'd1) ? 8'h31 : 8'h32);
+        msg2[77] = 8'h0D;
+        msg2[78] = 8'h0A;
     end
 
 endmodule

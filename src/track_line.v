@@ -37,7 +37,7 @@
 module track_line #(
     parameter integer CLK_FREQ    = 24_000_000,
     parameter integer SAMPLE_KHZ  = 1,         // 消抖采样率，单位 kHz（1 = 1 ms 一次）
-    parameter integer DEBOUNCE_N  = 4,         // 连续一致次数
+    parameter integer DEBOUNCE_N  = 4,         // 连续一致次数（真正参与逻辑，>=2）
     parameter         ACTIVE_HIGH = 0,         // 1=高电平压线，0=低电平压线
     parameter [4:0]   WIDE_CNT_TH = 5'd5,      // 压线数 >= 此值判"宽黑"（0=关闭）
     parameter integer WIDE_MS     = 200        // 宽黑持续多久后降级成丢线
@@ -81,27 +81,37 @@ module track_line #(
     // ------------------------------------------------------------------
     // 八路异步输入同步 + 消抖（连续 DEBOUNCE_N 次一致才更新）
     // ------------------------------------------------------------------
+    // 【2026-11-19 修两处】
+    // 1) DEBOUNCE_N 此前只是声明、从未被引用：dbuf 固定 [0:3]、比较固定写 4 项，
+    //    改这个参数对硬件毫无影响，顶层传 DEBOUNCE_N(4) 是空转。现在真正参数化。
+    // 2) 此前比较里 dbuf[0] 是非阻塞赋值，同一拍读到的还是上一拍的值，
+    //    所以"连续 4 次一致"实际要等第 5 个 tick 才认账。现在改成
+    //    "本拍采样 trk_s2 + 最近 N-1 拍历史"，正好 N 个采样。
+    localparam integer DN = (DEBOUNCE_N < 2) ? 2 : DEBOUNCE_N;
+
     reg [7:0] trk_s1, trk_s2;          // 两级同步
-    reg [7:0] dbuf [0:3];              // 最近 4 次采样
+    reg [7:0] dbuf [0:DN-1];           // 最近 DN-1 拍历史（dbuf[0] 最新）
     reg [7:0] trk_stable;              // 消抖后原始电平
 
     integer k;
+    reg     dbg_same;
     always @(posedge clk or negedge rst_n)
         if (!rst_n) begin
             trk_s1     <= 8'h00;
             trk_s2     <= 8'h00;
             trk_stable <= 8'h00;
-            for (k = 0; k < 4; k = k + 1) dbuf[k] <= 8'h00;
+            for (k = 0; k < DN; k = k + 1) dbuf[k] <= 8'h00;
         end else begin
             trk_s1 <= track;
             trk_s2 <= trk_s1;
             if (tick) begin
-                for (k = 3; k > 0; k = k - 1) dbuf[k] <= dbuf[k-1];
+                // 本拍 + 最近 DN-1 拍，共 DN 个采样全相同才认
+                dbg_same = 1'b1;
+                for (k = 0; k < DN - 1; k = k + 1)
+                    if (dbuf[k] != trk_s2) dbg_same = 1'b0;
+                for (k = DN - 1; k > 0; k = k - 1) dbuf[k] <= dbuf[k-1];
                 dbuf[0] <= trk_s2;
-                // 4 次采样全部相同才认
-                if (dbuf[0] == trk_s2 && dbuf[1] == trk_s2 &&
-                    dbuf[2] == trk_s2 && dbuf[3] == trk_s2)
-                    trk_stable <= trk_s2;
+                if (dbg_same) trk_stable <= trk_s2;
             end
         end
 
@@ -197,10 +207,12 @@ module track_line #(
                 pos <= 5'sd0;                   // 丢线时位置输出 0，由 lost 标志决定策略
             else if (wide_now)
                 pos <= pos;                     // 宽黑但还没超时：不采信新位置，保持上一拍
+            // pmag 实际最大 7（单探头），取 [3:0] 即可。用 [4:0] 会留下
+            // "pmag=16 时被当成 -16"的隐患：现在到不了，但改权重就危险了。
             else if (wsum[5])
-                pos <= -$signed({1'b0, pmag[4:0]});   // 左负
+                pos <= -$signed({1'b0, pmag[3:0]});   // 左负
             else
-                pos <=  $signed({1'b0, pmag[4:0]});   // 右正
+                pos <=  $signed({1'b0, pmag[3:0]});   // 右正
         end
 
 endmodule
