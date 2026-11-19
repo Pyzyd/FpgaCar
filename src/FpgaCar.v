@@ -372,6 +372,9 @@ module FpgaCar (
         .AVOID_TURN_DUTY  (600),
         .AVOID_PROBE_MS   (400),
         .AVOID_PROBE_DUTY (450),
+        // 进试探段后先静默 100 ms 不判障碍：刚转完身障碍必然还在正前方，
+        // 第一拍就判会把"试探前进"变成只跑 1 ms，3 轮配额瞬间烧光。
+        .AVOID_PROBE_SETTLE_MS (100),
         .AVOID_TRIES      (3),
         // 转向指示（串口 S= / OLED 左转右转格）保持 1500 ms 后自动熄灭。
         // 保持太短 OLED 每 100 ms 采样一次抓不到；太长直道上也显示"正在转弯"。

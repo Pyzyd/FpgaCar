@@ -46,6 +46,11 @@ module car_fsm #(
     parameter integer AVOID_TURN_DUTY = 600,// 原地转占空比
     parameter integer AVOID_PROBE_MS = 400, // 试探前进时长
     parameter integer AVOID_PROBE_DUTY = 450,// 试探前进占空比
+    // 进 PROBE 后的静默观察窗：这段时间内不判 obstacle。
+    // 为什么必须有：从 TURN 转进 PROBE 时障碍通常还在正前方（车还没动），
+    // 若第一拍就判 obstacle，"试探前进"这一步只跑 1 ms 就被打回 BACK，
+    // 3 轮配额瞬间耗尽 —— 避障退化成"原地左右各抖 600 ms 再停车"。
+    parameter integer AVOID_PROBE_SETTLE_MS = 100,
     parameter integer AVOID_TRIES = 3,      // 最多连续尝试次数，用尽则停车等待
     // ---- 拐角兜底（没有 K230 / 没识别到转向牌时怎么走）----
     // 1 = 判到"直角/菱形拐角"而没有任何转向牌事件时，一律向左转；
@@ -208,6 +213,8 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                 turn_req  <= 1'b0;
                 turning   <= 1'b0;
                 turn_cnt  <= 16'd0;
+                turn_dir  <= 2'd0;      // 直行牌 = 取消转向，指示也一并灭掉
+                turn_dir_cnt <= 16'd0;
             end
 
             // ---- 主状态机（1 ms 步进）----
@@ -308,6 +315,15 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                     if (!lost && on_line) begin
                         ms_cnt <= 16'd0;
                         state  <= S_RUN;
+                    end else if (obstacle) begin
+                        // 【盲区补漏】obstacle 原来只在 S_RUN 与 S_AVOID_PROBE 里检查。
+                        // S_LOST 会按上一刻占空比继续前进 LOST_HOLD_MS(300 ms)，
+                        // 按 0.4 m/s 约 10 cm —— 在 25 cm 阈值下完全来得及撞上去。
+                        // 这里补上，与 S_RUN 走同一套避障入口。
+                        ms_cnt <= 16'd0;
+                        avoid_tries <= 4'd0;
+                        avoid_left  <= !last_pos_neg;
+                        state  <= (AVOID_EN != 0) ? S_AVOID_BACK : S_STOP;
                     end else if (ms_cnt >= LOST_HOLD_MS - 1) begin
                         ms_cnt <= 16'd0;
                         // ---- 找线方向决策（三级优先级）----
@@ -354,6 +370,14 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                     if (!lost && on_line) begin
                         ms_cnt <= 16'd0;
                         state  <= S_RUN;
+                    end else if (obstacle) begin
+                        // 【盲区补漏】原地图旋转找线期间完全不看障碍，而这段时间
+                        // 车身一侧在反转、最长持续 SEARCH_MS(1.5 s)，贴着障碍转
+                        // 很容易蹭上（细则 4.3.2 明确不得触碰）。同样转避障。
+                        ms_cnt <= 16'd0;
+                        avoid_tries <= 4'd0;
+                        avoid_left  <= !last_pos_neg;
+                        state  <= (AVOID_EN != 0) ? S_AVOID_BACK : S_STOP;
                     end else if (ms_cnt >= SEARCH_MS - 1) begin
                         ms_cnt <= 16'd0;
                         // 桌面/小场地反复测试时，永久停车只能断电才能解除，非常难用。
@@ -428,7 +452,9 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                         duty_l <= AVOID_PROBE_DUTY[10:0];
                         duty_r <= AVOID_PROBE_DUTY[10:0];
                     end
-                    if (obstacle) begin
+                    // 前 AVOID_PROBE_SETTLE_MS 不判障碍：刚转完身障碍还在正前方是
+                    // 正常的，要等车真的往前探一段再判断"还堵着没"。
+                    if (obstacle && (ms_cnt >= AVOID_PROBE_SETTLE_MS[15:0])) begin
                         // 还堵着：动作已经做完，再来一轮（或放弃）
                         ms_cnt <= 16'd0;
                         if (avoid_tries >= AVOID_TRIES - 1) begin
@@ -440,10 +466,12 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             state <= S_AVOID_BACK;
                         end
                     end else if (ms_cnt >= AVOID_PROBE_MS - 1) begin
-                        // 探出去了：绕过障碍，回正常循迹
+                        // 试探时间到。**不能无条件回 RUN**：绕行结束时车体朝向与线的
+                        // 相对关系已经完全变了，按"线就在脚下"进 RUN 会用一份过期
+                        // 的 pid 值瞎跑。压在线上才回 RUN，否则交给 S_LOST 找线。
                         ms_cnt      <= 16'd0;
                         avoid_tries <= 4'd0;
-                        state       <= S_RUN;
+                        state       <= (!lost && on_line) ? S_RUN : S_LOST;
                     end else begin
                         ms_cnt <= ms_cnt + 16'd1;
                     end

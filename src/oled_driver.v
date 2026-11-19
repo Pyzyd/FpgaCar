@@ -79,7 +79,7 @@ module oled_driver #(
     // ---- 调试区输入（画在空闲的 page 1 与 page 6/7）----
     input  wire [15:0] dbg_dist,   // 超声距离 cm，16'hFFFF = 无回波
     input  wire [7:0]  dbg_line,   // 八路循迹，bit0 = 车体最左（X1）
-    input  wire [2:0]  dbg_state,  // 车状态 0..4
+    input  wire [2:0]  dbg_state,  // 车状态 0..7
     input  wire        dbg_obs,    // 障碍：1 = 有（当前只看超声近距；红外已拆）
     input  wire [1:0]  dbg_turn,   // 转向方向（0 无 / 1 左 / 2 右），与串口 S= 同源
     //                                （左/右红外模块已从车上卸下，不再显示）

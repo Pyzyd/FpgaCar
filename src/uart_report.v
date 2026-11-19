@@ -123,7 +123,7 @@ module uart_report #(
     reg  [7:0]  msg  [0:MSG_LEN-1];
     reg  [7:0]  msg2 [0:MSG2_LEN-1];
     reg  [6:0]  idx;        // 7 位：MSG_LEN=35，6 位够用，但保持 7 位与历史一致
-    reg  [6:0]  idx2;       // 第二行游标（0..39）
+    reg  [6:0]  idx2;       // 第二行游标（0..MSG2_LEN-1，当前 0..78）
 
     reg  [9:0]  v10;         // 距离（0..999）
     reg         bad;         // 距离无效
@@ -161,7 +161,7 @@ module uart_report #(
     wire [7:0]  c_tt  = c_t - c_h * 8'd10;
     wire [7:0]  c_uu  = c_mag - c_t * 8'd10;             // |corr|<=600，个位
 
-    // 状态两位十进制（0..99，当前只用到 0..4）
+    // 状态两位十进制（0..99，当前只用到 0..7）
     wire [7:0]  m_t   = div10u({2'b00, 5'd0, st});
     wire [7:0]  m_uu  = {5'd0, st} - m_t * 8'd10;
 

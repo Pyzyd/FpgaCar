@@ -134,6 +134,7 @@ module car_fsm_tb;
         .AVOID_TURN_DUTY (400),
         .AVOID_PROBE_MS  (8),
         .AVOID_PROBE_DUTY(350),
+        .AVOID_PROBE_SETTLE_MS (2),             // 静默窗 2 ms，用例 10/11 才能看到试探段
         .AVOID_TRIES  (2)
     ) u_dut4 (
         .clk (clk), .rst_n (rst_n),
@@ -177,6 +178,48 @@ module car_fsm_tb;
         .duty_l (duty_l5), .duty_r (duty_r5), .state (state5), .turn_dir (td5)
     );
 
+    // 第六个实例：专门盯本轮补的三处逻辑 ——
+    //   ① S_LOST 期间遇障碍要立刻转避障（原来会继续前进 300 ms）
+    //   ② S_SEARCH 期间遇障碍同样要转避障（原来贴着障碍原地转 1.5 s）
+    //   ③ PROBE 结束后不在线上应转 S_LOST，而不是无条件回 RUN
+    // 用独立激励，避免被前面用例留下的状态干扰。
+    reg               on6 = 1'b0;
+    reg               lost6 = 1'b0;
+    reg               obs6 = 1'b0;
+    wire              en6, dir_l6, dir_r6;
+    wire [10:0]       duty_l6, duty_r6;
+    wire [2:0]        state6;
+    wire [1:0]        td6;
+
+    car_fsm #(
+        .CLK_FREQ     (24_000_000),
+        .START_MS     (1),
+        .START_REQUIRE_LINE (1),
+        .LOST_HOLD_MS (200),                   // 拉长到 200 ms：必须在 LOST 里就转避障，
+                                               // 否则会先超时进 SEARCH 再绕回 BACK，
+                                               // 那样测不出 S_LOST 这条分支
+        .SEARCH_MS    (10),
+        .SEARCH_DUTY  (500),
+        .SEARCH_FAIL_TO_IDLE (1),
+        .DIR_DEAD_MS  (1),
+        .AVOID_EN     (1),
+        .AVOID_BACK_MS   (8),
+        .AVOID_BACK_DUTY (400),
+        .AVOID_TURN_MS   (8),
+        .AVOID_TURN_DUTY (400),
+        .AVOID_PROBE_MS  (20),                 // 试探段拉长到 20 ms，便于观察静默窗
+        .AVOID_PROBE_DUTY(350),
+        .AVOID_PROBE_SETTLE_MS (5),            // 前 5 ms 不判障碍
+        .AVOID_TRIES  (3),
+        .DEFAULT_TURN_LEFT (0)                 // 本实例不测拐角兜底
+    ) u_dut6 (
+        .clk (clk), .rst_n (rst_n),
+        .on_line (on6), .lost (lost6), .obstacle (obs6), .wide (1'b0), .pos (5'sd0),
+        .pid_l (11'd700), .pid_r (11'd500),
+        .en (en6), .dir_l (dir_l6), .dir_r (dir_r6),
+        .duty_l (duty_l6), .duty_r (duty_r6), .state (state6), .turn_dir (td6)
+    );
+
     task wait_state5 (input [2:0] want, input integer timeout_us);
         integer n;
         begin
@@ -197,6 +240,29 @@ module car_fsm_tb;
     endtask
 
     integer fails = 0;
+
+    task chk6 (input integer cond, input [8*28-1:0] msg);
+        begin
+            if (cond) $display("PASS: %0s", msg);
+            else begin
+                $display("FAIL: %0s | st6=%0d en6=%b dir6=%b%b d6=%0d/%0d",
+                         msg, state6, en6, dir_l6, dir_r6, duty_l6, duty_r6);
+                fails = fails + 1;
+            end
+        end
+    endtask
+
+    task wait_state6 (input [2:0] want, input integer timeout_us);
+        integer n;
+        begin
+            n = 0;
+            while (state6 !== want && n < timeout_us) begin
+                wait_us(100);
+                n = n + 100;
+            end
+            #1;
+        end
+    endtask
 
     task chk (input integer cond, input [8*28-1:0] msg);
         begin
@@ -436,13 +502,79 @@ module car_fsm_tb;
         wait_us(30000);                    // > TURN_DIR_HOLD_MS(20)
         chk5(td5 == 2'd0, "hold: indicator clears");
 
+        // ---- 15) S_LOST 期间遇障碍：必须立刻转避障，不能继续盲目前进 ----
+        // 旧代码 obstacle 只在 S_RUN 与 PROBE 判，S_LOST 会按上一刻占空比
+        // 继续前进 LOST_HOLD_MS，25 cm 阈值下完全来得及撞上去。
+        lost6 = 1'b0; on6 = 1'b1; obs6 = 1'b0;
+        wait_state6(S_RUN, 20000);
+        wait_us(3000);
+        lost6 = 1'b1; on6 = 1'b0;              // 丢线，进 S_LOST（LOST_HOLD_MS=5）
+        wait_state6(S_LOST, 20000);
+        chk6(state6 == S_LOST, "lost: in LOST");
+        obs6 = 1'b1;                            // 丢线还保持期间突然出现障碍
+        // 只等 60 ms：远小于 LOST_HOLD_MS(200)。若障碍分支没生效，车会一直
+        // 停在 LOST 直到 200 ms 超时，这条断言就会失败 —— 区分度就在这里。
+        wait_state6(S_AVOID_BACK, 60000);
+        chk6(state6 == S_AVOID_BACK, "lost+obs -> BACK fast");
+        // 换相死区会短暂把 en 拉低，等死区走完再查电机是否上电
+        wait_us(6000);
+        chk6(en6 === 1'b1, "lost+obs: motor on");
+
+        // ---- 16) S_SEARCH 期间遇障碍：同样必须转避障 ----
+        // 原地图旋转找线最长 1.5 s，贴着障碍转很容易蹭上（细则 4.3.2 禁触碰）。
+        // 注意不能让它"自然"走到 SEARCH：避障走完车不在线上，会先进 S_LOST，
+        // 而 LOST_HOLD_MS=5 太短、不容易在 LOST 里命中；这里先回线上重新起跑，
+        // 再直接把 on6 拉低，让 LOST->SEARCH 这条路干净可控。
+        obs6 = 1'b0;
+        on6 = 1'b1; lost6 = 1'b0;
+        wait_state6(S_RUN, 40000);
+        wait_us(3000);
+        on6 = 1'b0; lost6 = 1'b1;              // 丢线
+        wait_state6(S_LOST, 30000);
+        wait_state6(S_SEARCH, 400000);         // 等 LOST_HOLD_MS(200) 超时后自动进 SEARCH
+        chk6(state6 == S_SEARCH, "search: in SEARCH");
+        obs6 = 1'b1;
+        wait_state6(S_AVOID_BACK, 20000);
+        chk6(state6 == S_AVOID_BACK, "search+obs -> BACK");
+
+        // ---- 17) PROBE 结束不在线上 -> 转 S_LOST（不是无条件回 RUN）----
+        // 绕行结束时车体朝向与线的相对关系已经全变了，按"线就在脚下"进 RUN
+        // 会用一份过期的 pid 值瞎跑。这里让整个避障过程都没有线。
+        obs6 = 1'b0; lost6 = 1'b1; on6 = 1'b0;
+        wait_state6(S_AVOID_PROBE, 40000);
+        chk6(state6 == S_AVOID_PROBE, "probe: reached PROBE");
+        wait_state6(S_LOST, 40000);
+        chk6(state6 == S_LOST, "probe done offline -> LOST");
+        chk6(state6 !== S_RUN, "probe done offline != RUN");
+
+        // ---- 18) PROBE 静默窗：刚进试探段时障碍仍在，不能第一拍就打回 BACK ----
+        // 从 TURN 转进 PROBE 时障碍通常还在正前方（车还没动）。如果一进 PROBE
+        // 就判 obstacle，试探只跑 1 ms 就被打回，3 轮配额瞬间烧光，避障退化成
+        // "原地左右各抖 600 ms 再停车"。这里断言它在静默窗内确实留在 PROBE。
+        lost6 = 1'b0; on6 = 1'b1; obs6 = 1'b0;
+        wait_state6(S_RUN, 40000);
+        wait_us(3000);
+        obs6 = 1'b1;                            // 全程保持障碍
+        wait_state6(S_AVOID_PROBE, 60000);
+        chk6(state6 == S_AVOID_PROBE, "settle: reached PROBE");
+        wait_us(3000);                          // < AVOID_PROBE_SETTLE_MS(5)
+        chk6(state6 == S_AVOID_PROBE, "settle: stays in PROBE");
+        // 静默窗过后仍被挡，才应该回 BACK 再来一轮
+        wait_state6(S_AVOID_BACK, 40000);
+        chk6(state6 == S_AVOID_BACK, "settle: then bounces BACK");
+
+        // 收回到线上一路跑回去，给后面的用例一个干净起点
+        obs6 = 1'b0; lost6 = 1'b0; on6 = 1'b1;
+        wait_state6(S_RUN, 60000);
+        chk6(state6 == S_RUN, "recovered on line");
+
         if (fails == 0) $display("INFO: car_fsm_tb ALL PASS");
         else            $display("INFO: car_fsm_tb %0d FAIL(S)", fails);
         $finish;
     end
 
     initial begin
-        #600_000_000;                      // 600 ms：用例从约 30 ms 涨到约 130 ms
+        #1_200_000_000;                    // 1.2 s：u_dut6 的 LOST_HOLD_MS=200 拉长了整体时长
         $display("TIMEOUT: car_fsm_tb hung (state=%0d)", state);
         $finish;
     end
