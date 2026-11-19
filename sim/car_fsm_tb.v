@@ -167,7 +167,8 @@ module car_fsm_tb;
         .DIR_DEAD_MS  (3),                     // 死区 > 1 拍，断言前要等它走完
         .AVOID_EN     (0),
         .DEFAULT_TURN_LEFT (1),
-        .CORNER_WIDE_MS    (500)
+        .CORNER_WIDE_MS    (500),
+        .TURN_DIR_HOLD_MS  (20)                // 20 ms 后指示自动熄灭，便于在仿真里验证
     ) u_dut5 (
         .clk (clk), .rst_n (rst_n),
         .on_line (on5), .lost (lost5), .obstacle (1'b0), .wide (wide5), .pos (pos5),
@@ -427,6 +428,13 @@ module car_fsm_tb;
         wait_us(4000);
         chk5(dir_l5 === 1'b1 && dir_r5 === 1'b0, "normal: turn to line side");
         chk5(td5 == 2'd2, "normal: S=2 right");
+
+        // ---- 14) 转向指示必须自动熄灭 ----
+        // turn_dir 若只置位不清零，OLED 上"左转/右转"两格会一直亮着，
+        // 直道上也显示正在转弯，四标志格就失去意义了。
+        chk5(td5 == 2'd2, "hold: still lit right after turn");
+        wait_us(30000);                    // > TURN_DIR_HOLD_MS(20)
+        chk5(td5 == 2'd0, "hold: indicator clears");
 
         if (fails == 0) $display("INFO: car_fsm_tb ALL PASS");
         else            $display("INFO: car_fsm_tb %0d FAIL(S)", fails);

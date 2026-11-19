@@ -26,6 +26,14 @@ fi
 
 mkdir -p .scratch
 
+# 每次运行用独立后缀：队友并行跑回归时，共用的 _run_<tb>.out 会互相覆盖，
+# 表现为 PASS 计数为空、却被误判成通过。$$ 是当前 shell 的 pid。
+RUN_ID=$$
+
+# 每次运行用独立后缀：队友并行跑回归时，共用的 _run_<tb>.out 会互相覆盖，
+# 表现为 PASS 计数为空、却被误判成通过。$$ 是当前 shell 的 pid。
+RUN_ID=$$
+
 tbs=()
 if [ "$#" -gt 0 ]; then
     for t in "$@"; do
@@ -43,9 +51,9 @@ fi
 total=0; failed=0; t0=$(date +%s)
 for tb in "${tbs[@]}"; do
     total=$((total + 1))
-    vvp=".scratch/_run_${tb}.vvp"
-    clog=".scratch/_run_${tb}.compile.log"
-    olog=".scratch/_run_${tb}.out"
+    vvp=".scratch/_run_${tb}_${RUN_ID}.vvp"
+    clog=".scratch/_run_${tb}_${RUN_ID}.compile.log"
+    olog=".scratch/_run_${tb}_${RUN_ID}.out"
     rm -f "$vvp" "$clog" "$olog"
 
     if ! iverilog -g2012 -Wall -s "$tb" -o "$vvp" src/*.v "sim/${tb}.v" >"$clog" 2>&1; then
@@ -59,10 +67,13 @@ for tb in "${tbs[@]}"; do
     timeout 180 vvp "$vvp" >"$olog" 2>&1
     rc=$?
     e=$(date +%s)
-    np=$(grep -c 'PASS:' "$olog" || true)
-    na=$(grep -ciE 'ALL PASS' "$olog" || true)
-    nf=$(grep -c 'FAIL:' "$olog" || true)
-    nt=$(grep -c 'TIMEOUT' "$olog" || true)
+    # 注意：grep -c 在文件缺失时不打印数字，$() 得到空串，后面的 -eq 会报
+    # "integer expected" 并把 status 留在 OK —— 明明没跑成却报"全部通过"。
+    # 所以每个计数都必须兜底成 0，绝不允许空串流进算术比较。
+    np=$(grep -c 'PASS:' "$olog" 2>/dev/null); np=${np:-0}
+    na=$(grep -ciE 'ALL PASS' "$olog" 2>/dev/null); na=${na:-0}
+    nf=$(grep -c 'FAIL:' "$olog" 2>/dev/null); nf=${nf:-0}
+    nt=$(grep -c 'TIMEOUT' "$olog" 2>/dev/null); nt=${nt:-0}
 
     # 注意：uart_report_tb 只打印 "ALL PASS"、没有 PASS: 行；
     # 因此用「既无 PASS: 也无 ALL PASS」兜底静默失败，不能只看 PASS 计数。

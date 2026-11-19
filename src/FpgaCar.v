@@ -372,7 +372,10 @@ module FpgaCar (
         .AVOID_TURN_DUTY  (600),
         .AVOID_PROBE_MS   (400),
         .AVOID_PROBE_DUTY (450),
-        .AVOID_TRIES      (3)
+        .AVOID_TRIES      (3),
+        // 转向指示（串口 S= / OLED 左转右转格）保持 1500 ms 后自动熄灭。
+        // 保持太短 OLED 每 100 ms 采样一次抓不到；太长直道上也显示"正在转弯"。
+        .TURN_DIR_HOLD_MS (1500)
     ) u_car (
         .clk      (clk),
         .rst_n    (sys_rst_n),
@@ -630,8 +633,8 @@ module FpgaCar (
             .dbg_line   (line_bits),    // bit0 = 车体最左 X1
             .dbg_state  (car_state),
             .dbg_obs    (obstacle),
-            .dbg_irl    (ir_l_det),    // 原始电平，不看 USE_IR：接没接一眼可见
-            .dbg_irr    (ir_r_det),
+            // 左/右红外模块已从车上卸下，原来的两格改显示转向方向 S
+            .dbg_turn   (turn_dir),     // 0 无 / 1 左 / 2 右，与串口 S= 同源
             .dbg_lost   (line_lost)
         );
     end else begin : g_no_oled

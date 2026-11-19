@@ -38,8 +38,7 @@ module oled_driver_tb;
     reg [7:0]  dbg_line  = 8'h00;
     reg [2:0]  dbg_state = 3'd0;
     reg        dbg_obs   = 1'b0;
-    reg        dbg_irl   = 1'b0;
-    reg        dbg_irr   = 1'b0;
+    reg [1:0]  dbg_turn  = 2'd0;         // 转向方向 0 无 / 1 左 / 2 右
     reg        dbg_lost  = 1'b0;
 
     // 物理 SDA：主机与从机共用一条线，外部上拉
@@ -61,7 +60,7 @@ module oled_driver_tb;
         .busy(busy), .ack_err(ack_err), .frame_done(frame_done),
         .nack_seen(nack_seen),
         .dbg_dist(dbg_dist), .dbg_line(dbg_line), .dbg_state(dbg_state),
-        .dbg_obs(dbg_obs), .dbg_irl(dbg_irl), .dbg_irr(dbg_irr),
+        .dbg_obs(dbg_obs), .dbg_turn(dbg_turn),
         .dbg_lost(dbg_lost)
     );
 
@@ -252,14 +251,43 @@ module oled_driver_tb;
                     cxl = cl % 12;
                     case (flg)
                     0:       sv = dbg_obs;
-                    1:       sv = dbg_irl;
-                    2:       sv = dbg_irr;
-                    default: sv = dbg_lost;
+                    1:       sv = dbg_lost;
+                    2:       sv = (dbg_turn == 2'd1);   // 左转格
+                    default: sv = (dbg_turn == 2'd2);   // 右转格
                     endcase
                     if (cxl == 0 || cxl == 11)     exp_fb[(6 + pg) * 128 + 80 + cl] = 8'hFF;
                     else if (pg == 0)              exp_fb[(6 + pg) * 128 + 80 + cl] = sv ? 8'hFF : 8'h01;
                     else                            exp_fb[(6 + pg) * 128 + 80 + cl] = sv ? 8'hFF : 8'h80;
                 end
+        end
+    endtask
+
+    // 四标志格硬编码判据：不经过 dbg_* 变量、也不经过 build_exp_dbg，
+    // 直接按「障碍 / 丢线 / 左转 / 右转」的顺序给期望电平。
+    // 这样即使 DUT 与 tb 的期望模型被一起改错，也能被这几条断言抓出来。
+    task check_flags (input e0, input e1, input e2, input e3, input [255:0] tag);
+        integer p2, cl2, flg2, cxl2, bad2;
+        reg     sv2;
+        reg [7:0] ev2;
+        begin
+            bad2 = 0;
+            for (p2 = 0; p2 < 2; p2 = p2 + 1)
+                for (cl2 = 0; cl2 < 48; cl2 = cl2 + 1) begin
+                    flg2 = cl2 / 12;              // 0 障碍 1 丢线 2 左转 3 右转
+                    cxl2 = cl2 % 12;
+                    case (flg2)
+                    0:       sv2 = e0;
+                    1:       sv2 = e1;
+                    2:       sv2 = e2;
+                    default: sv2 = e3;
+                    endcase
+                    if (cxl2 == 0 || cxl2 == 11) ev2 = 8'hFF;         // 左右边框常亮
+                    else if (p2 == 0)            ev2 = sv2 ? 8'hFF : 8'h01;
+                    else                         ev2 = sv2 ? 8'hFF : 8'h80;
+                    if (model_fb[(6 + p2) * 128 + 80 + cl2] !== ev2) bad2 = bad2 + 1;
+                end
+            if (bad2 == 0) $display("PASS: %0s four flag cells match hard-coded layout", tag);
+            else           $display("FAIL: %0s %0d bad bytes in four flag cells", tag, bad2);
         end
     endtask
 
@@ -442,14 +470,27 @@ module oled_driver_tb;
         dbg_line  = 8'b10000001;
         dbg_state = 3'd2;
         dbg_obs   = 1'b1;
-        dbg_irl   = 1'b0;
-        dbg_irr   = 1'b1;
+        dbg_turn  = 2'd2;              // 右转：点亮最后一格，覆盖新布局
         dbg_lost  = 1'b0;
         @(posedge frame_done);
         @(posedge clk);
         $display("PHASE: debug-data frame arrived at %0t", $time); $fflush(0);
         build_exp;
         check_fb("debug data 123cm / 10000001 / state2");
+        // 本帧 dbg_obs=1、dbg_lost=0、dbg_turn=2 → 障碍亮 / 丢线灭 / 左转灭 / 右转亮
+        check_flags(1'b1, 1'b0, 1'b0, 1'b1, "right turn (dbg_turn=2)");
+
+        // ---- 第 5b 阶段：只把 dbg_turn 改成左转 ----
+        // 右转那一帧左转格是灭的，单看它无法区分「fl=2 接的是 turn_dir」与
+        // 「fl=2 接成了恒 0 或丢线」。这里再要一帧，让左转格真正点亮。
+        $display("PHASE: waiting left-turn frame at %0t", $time); $fflush(0);
+        dbg_turn = 2'd1;
+        @(posedge frame_done);
+        @(posedge clk);
+        $display("PHASE: left-turn frame arrived at %0t", $time); $fflush(0);
+        build_exp;
+        check_fb("left turn (dbg_turn=1)");
+        check_flags(1'b1, 1'b0, 1'b1, 1'b0, "left turn (dbg_turn=1)");
 
         if (nack !== 0) $display("FAIL: slave model saw %0d address NACKs", nack);
         else            $display("PASS: every transaction addressed 0x3C correctly");

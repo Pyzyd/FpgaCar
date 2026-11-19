@@ -52,7 +52,13 @@ module car_fsm #(
     // 0 = 退回旧行为（按最后看到线的方位转，线在左就左转、在右就右转）。
     parameter integer DEFAULT_TURN_LEFT = 1,
     // 宽黑（wide）出现后多久内仍算"拐角"。0 = 完全不做拐角判断。
-    parameter integer CORNER_WIDE_MS = 500
+    parameter integer CORNER_WIDE_MS = 500,
+
+    // 转向指示（串口 S= / OLED 左转右转格）保持多久。
+    // 不保持的话，一次转弯只有 1~2 ms 的脉冲，OLED 每 100 ms 才采一次样，
+    // 基本抓不到；但一直保持又会让直道上也显示"正在左转"，反而看不懂。
+    // 1500 ms 覆盖整个 S_SEARCH（SEARCH_MS=1500），之后自动熄灭。
+    parameter integer TURN_DIR_HOLD_MS = 1500
 ) (
     input  wire              clk,
     input  wire              rst_n,
@@ -117,6 +123,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     // 转向牌事件（K230 没装/没识别到），一律按 DEFAULT_TURN_LEFT 左转。
     // 不做这个区分的话，正常右弯跑偏丢线也会被强制左转，车会往反方向找线。
     reg  [15:0] corner_cnt;         // 距离上次宽黑还有多少 ms
+    reg  [15:0] turn_dir_cnt;       // 转向指示还要亮多久（0 = 灭）
 
     // ---------------- 方向死区 ----------------
     reg        dead;
@@ -157,8 +164,9 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
             turn_req    <= 1'b0;
             avoid_tries <= 4'd0;
             avoid_left  <= 1'b0;
-            corner_cnt  <= 16'd0;
-            turn_dir    <= 2'd0;
+            corner_cnt   <= 16'd0;
+            turn_dir     <= 2'd0;
+            turn_dir_cnt <= 16'd0;
         end else begin
             // ---- 记住线的方位 ----
             if (on_line && !lost) begin
@@ -190,10 +198,12 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                 turn_req  <= 1'b1;
                 turn_left <= 1'b1;
                 turn_dir  <= 2'd1;
+                turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
             end else if (dir_evt == 3'd2) begin
                 turn_req  <= 1'b1;
                 turn_left <= 1'b0;
                 turn_dir  <= 2'd2;
+                turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
             end else if (dir_evt == 3'd3) begin
                 turn_req  <= 1'b0;
                 turning   <= 1'b0;
@@ -209,6 +219,13 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                     corner_cnt <= CORNER_WIDE_MS[15:0];
                 end else if (corner_cnt != 16'd0) begin
                     corner_cnt <= corner_cnt - 16'd1;
+                end
+
+                // ---- 转向指示保持计时 ----
+                // 到 0 那一拍把 turn_dir 清掉，屏上两格才不会常亮。
+                if (turn_dir_cnt != 16'd0) begin
+                    turn_dir_cnt <= turn_dir_cnt - 16'd1;
+                    if (turn_dir_cnt == 16'd1) turn_dir <= 2'd0;
                 end
 
                 case (state)
@@ -270,6 +287,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             turning  <= 1'b1;
                             turn_cnt <= TURN_MS[15:0];
                             turn_dir <= turn_left ? 2'd1 : 2'd2;
+                            turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
                             corner_cnt <= 16'd0;
                         end else if (obstacle) begin
                             ms_cnt <= 16'd0;
@@ -304,18 +322,21 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             dir_l_des <= turn_left ? 1'b0 : 1'b1;
                             dir_r_des <= turn_left ? 1'b1 : 1'b0;
                             turn_dir  <= turn_left ? 2'd1 : 2'd2;
+                            turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
                             corner_cnt <= 16'd0;
                         end else if ((DEFAULT_TURN_LEFT != 0) && (corner_cnt != 16'd0)) begin
                             // 拐角兜底：默认左转（左轮后退、右轮前进）
                             dir_l_des <= 1'b0;
                             dir_r_des <= 1'b1;
                             turn_dir  <= 2'd1;
+                            turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
                             corner_cnt <= 16'd0;
                         end else begin
                             // 线在右边 → 向右转：左轮前进、右轮后退
                             dir_l_des <= ~last_pos_neg;
                             dir_r_des <=  last_pos_neg;
                             turn_dir  <= last_pos_neg ? 2'd1 : 2'd2;
+                            turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
                         end
                         duty_l    <= SEARCH_DUTY[10:0];
                         duty_r    <= SEARCH_DUTY[10:0];
