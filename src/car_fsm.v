@@ -114,7 +114,6 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     // ---------------- 状态 ----------------
     reg        final_stop;          // 找线超时后的永久停车（只能靠复位解除）
     reg        last_pos_neg;        // 最后看到线时 pos<0（线在左）
-    reg        saw_line;            // 是否曾经看到过线
 
     // ---------------- 交通牌强制转向 ----------------
     reg        turning;             // 1 = 正在按交通牌转向
@@ -154,7 +153,6 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
             ms_cnt      <= 16'd0;
             final_stop  <= 1'b0;
             last_pos_neg <= 1'b0;
-            saw_line    <= 1'b0;
             dir_l       <= 1'b1;
             dir_r       <= 1'b1;
             dir_l_des   <= 1'b1;
@@ -176,7 +174,6 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
             // ---- 记住线的方位 ----
             if (on_line && !lost) begin
                 last_pos_neg <= pos[4];
-                saw_line     <= 1'b1;
             end
 
             // ---- 方向死区计数 ----
@@ -215,6 +212,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                 turn_cnt  <= 16'd0;
                 turn_dir  <= 2'd0;      // 直行牌 = 取消转向，指示也一并灭掉
                 turn_dir_cnt <= 16'd0;
+                corner_cnt   <= 16'd0;  // 直行牌同时清拐角记忆，避免随后误触兜底
             end
 
             // ---- 主状态机（1 ms 步进）----
@@ -222,7 +220,12 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                 // ---- 拐角记忆 ----
                 // 直角/菱形拐角会让八路同时压线（wide=1），随后整条线消失。
                 // 记住"刚过拐角"这段时间，找线时才能区分"拐角"和"普通跑偏"。
-                if (wide && CORNER_WIDE_MS > 0) begin
+                // 【必须 !turning】强制转向期间车是有意离开赛道的，车体扫过线/宽黑
+                // 区域时 wide 会置位。若不加这个门控，转向结束回到找线时
+                // corner_cnt 还没衰减完，拐角兜底会把刚按牌子做的转向反着执行一遍
+                // （牌要求右转 → 兜底强制左转），直接违反"有牌就完全按牌走"。
+                // 当前 USE_K230=0 时 turning 永远进不去，这条是接回 K230 后的保险。
+                if (!turning && wide && CORNER_WIDE_MS > 0) begin
                     corner_cnt <= CORNER_WIDE_MS[15:0];
                 end else if (corner_cnt != 16'd0) begin
                     corner_cnt <= corner_cnt - 16'd1;
@@ -272,6 +275,9 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                         if (turn_cnt <= 16'd1) begin
                             turning <= 1'b0;
                             ms_cnt  <= 16'd0;
+                            // 转向正常结束时清掉拐角记忆：这 700 ms 里车轮扫过的
+                            // 宽黑是"转向动作本身造成的"，不是赛道拐角特征。
+                            corner_cnt <= 16'd0;
                         end
                         if (obstacle) begin
                             turning <= 1'b0;        // 撞上障碍就放弃这次转向

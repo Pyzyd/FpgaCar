@@ -55,6 +55,7 @@ module car_fsm_tb;
         .clk (clk), .rst_n (rst_n),
         .on_line (on_line), .lost (lost), .obstacle (obstacle), .pos (pos),
         .wide (wide),
+        .dir_evt (3'd0),                // 本实例不测转向牌；悬空会在仿真里变成 X
         .pid_l (pid_l), .pid_r (pid_r),
         .en (en), .dir_l (dir_l), .dir_r (dir_r),
         .duty_l (duty_l), .duty_r (duty_r), .state (state), .turn_dir (td)
@@ -80,6 +81,7 @@ module car_fsm_tb;
         .clk (clk), .rst_n (rst_n),
         .on_line (on_line), .lost (lost), .obstacle (obstacle), .pos (pos),
         .wide (wide),
+        .dir_evt (3'd0),
         .pid_l (pid_l), .pid_r (pid_r),
         .en (en2), .dir_l (dir_l2), .dir_r (dir_r2),
         .duty_l (duty_l2), .duty_r (duty_r2), .state (state2), .turn_dir (td2)
@@ -105,6 +107,7 @@ module car_fsm_tb;
         .clk (clk), .rst_n (rst_n),
         .on_line (on_line), .lost (lost), .obstacle (obstacle), .pos (pos),
         .wide (wide),
+        .dir_evt (3'd0),
         .pid_l (pid_l), .pid_r (pid_r),
         .en (en3), .dir_l (dir_l3), .dir_r (dir_r3),
         .duty_l (duty_l3), .duty_r (duty_r3), .state (state3), .turn_dir (td3)
@@ -139,7 +142,7 @@ module car_fsm_tb;
     ) u_dut4 (
         .clk (clk), .rst_n (rst_n),
         .on_line (on4), .lost (lost4), .obstacle (obs4), .pos (5'sd0),
-        .wide (1'b0),
+        .wide (1'b0), .dir_evt (3'd0),
         .pid_l (11'd700), .pid_r (11'd500),
         .en (en4), .dir_l (dir_l4), .dir_r (dir_r4),
         .duty_l (duty_l4), .duty_r (duty_r4), .state (state4), .turn_dir (td4)
@@ -173,6 +176,7 @@ module car_fsm_tb;
     ) u_dut5 (
         .clk (clk), .rst_n (rst_n),
         .on_line (on5), .lost (lost5), .obstacle (1'b0), .wide (wide5), .pos (pos5),
+        .dir_evt (3'd0),
         .pid_l (11'd700), .pid_r (11'd500),
         .en (en5), .dir_l (dir_l5), .dir_r (dir_r5),
         .duty_l (duty_l5), .duty_r (duty_r5), .state (state5), .turn_dir (td5)
@@ -215,9 +219,49 @@ module car_fsm_tb;
     ) u_dut6 (
         .clk (clk), .rst_n (rst_n),
         .on_line (on6), .lost (lost6), .obstacle (obs6), .wide (1'b0), .pos (5'sd0),
+        .dir_evt (3'd0),
         .pid_l (11'd700), .pid_r (11'd500),
         .en (en6), .dir_l (dir_l6), .dir_r (dir_r6),
         .duty_l (duty_l6), .duty_r (duty_r6), .state (state6), .turn_dir (td6)
+    );
+
+    // 第七个实例：转向牌（dir_evt）路径。此前 6 个实例一次都没驱动过 dir_evt，
+    // 导致 car_fsm 里整块交通牌逻辑（事件锁存 / turning 段 / 按牌找线）零覆盖。
+    // 参数刻意调短：TURN_MS=20 ms、TURN_DIR_HOLD_MS=50 ms，方便在仿真里观察。
+    // DEFAULT_TURN_LEFT=1 + CORNER_WIDE_MS=500 同时开着，用来回归
+    // "转向期间产生的宽黑不能污染拐角记忆、否则把牌的方向反过来"。
+    reg  [2:0]        dir_evt7 = 3'd0;
+    reg               on7 = 1'b0;
+    reg               lost7 = 1'b0;
+    reg               wide7 = 1'b0;
+    reg signed [4:0]  pos7 = 5'sd0;
+    wire              en7, dir_l7, dir_r7;
+    wire [10:0]       duty_l7, duty_r7;
+    wire [2:0]        state7;
+    wire [1:0]        td7;
+
+    car_fsm #(
+        .CLK_FREQ          (24_000_000),
+        .START_MS          (1),
+        .START_REQUIRE_LINE (1),
+        .LOST_HOLD_MS      (2),                // 很短：进 LOST 后马上到决策点
+        .SEARCH_MS         (10),
+        .SEARCH_DUTY       (500),
+        .SEARCH_FAIL_TO_IDLE (1),
+        .DIR_DEAD_MS       (1),
+        .TURN_MS           (20),
+        .TURN_DUTY         (400),
+        .AVOID_EN          (0),
+        .DEFAULT_TURN_LEFT (1),
+        .CORNER_WIDE_MS    (500),
+        .TURN_DIR_HOLD_MS  (50)
+    ) u_dut7 (
+        .clk (clk), .rst_n (rst_n),
+        .on_line (on7), .lost (lost7), .obstacle (1'b0), .wide (wide7), .pos (pos7),
+        .dir_evt (dir_evt7),
+        .pid_l (11'd700), .pid_r (11'd500),
+        .en (en7), .dir_l (dir_l7), .dir_r (dir_r7),
+        .duty_l (duty_l7), .duty_r (duty_r7), .state (state7), .turn_dir (td7)
     );
 
     task wait_state5 (input [2:0] want, input integer timeout_us);
@@ -257,6 +301,29 @@ module car_fsm_tb;
         begin
             n = 0;
             while (state6 !== want && n < timeout_us) begin
+                wait_us(100);
+                n = n + 100;
+            end
+            #1;
+        end
+    endtask
+
+    task chk7 (input integer cond, input [8*28-1:0] msg);
+        begin
+            if (cond) $display("PASS: %0s", msg);
+            else begin
+                $display("FAIL: %0s | st7=%0d dir7=%b%b d7=%0d/%0d td7=%0d",
+                         msg, state7, dir_l7, dir_r7, duty_l7, duty_r7, td7);
+                fails = fails + 1;
+            end
+        end
+    endtask
+
+    task wait_state7 (input [2:0] want, input integer timeout_us);
+        integer n;
+        begin
+            n = 0;
+            while (state7 !== want && n < timeout_us) begin
                 wait_us(100);
                 n = n + 100;
             end
@@ -567,6 +634,68 @@ module car_fsm_tb;
         obs6 = 1'b0; lost6 = 1'b0; on6 = 1'b1;
         wait_state6(S_RUN, 60000);
         chk6(state6 == S_RUN, "recovered on line");
+
+        // ---- 19) 转向牌：dir_evt=1 -> 左转（左轮后退、右轮前进）----
+        // 这块逻辑此前零覆盖：六个旧实例一次都没驱动过 dir_evt。
+        on7 = 1'b1; lost7 = 1'b0; pos7 = 5'sd0;
+        wait_state7(S_RUN, 40000);
+        chk7(state7 == S_RUN, "card: in RUN");
+        dir_evt7 = 3'd1;
+        wait_us(2000);
+        dir_evt7 = 3'd0;
+        wait_us(3000);                          // 死区 1 ms + 装载
+        chk7(dir_l7 === 1'b0 && dir_r7 === 1'b1, "card1: LEFT wheels");
+        chk7(duty_l7 == 11'd400 && duty_r7 == 11'd400, "card1: duty 400");
+        chk7(td7 == 2'd1, "card1: S=1 left");
+        wait_state7(S_RUN, 40000);              // TURN_MS=20 ms 后自动结束
+        chk7(state7 == S_RUN, "card1: turn ends");
+
+        // ---- 20) 转向牌：dir_evt=2 -> 右转 ----
+        dir_evt7 = 3'd2;
+        wait_us(2000);
+        dir_evt7 = 3'd0;
+        wait_us(3000);
+        chk7(dir_l7 === 1'b1 && dir_r7 === 1'b0, "card2: RIGHT wheels");
+        chk7(td7 == 2'd2, "card2: S=2 right");
+        wait_state7(S_RUN, 40000);
+        chk7(state7 == S_RUN, "card2: turn ends");
+
+        // ---- 21) 直行牌 dir_evt=3：取消转向，同时熄掉转向指示 ----
+        dir_evt7 = 3'd1;
+        wait_us(2000);
+        dir_evt7 = 3'd0;
+        wait_us(3000);
+        chk7(td7 == 2'd1, "card3: turn indicated");
+        dir_evt7 = 3'd3;
+        wait_us(2000);
+        dir_evt7 = 3'd0;
+        wait_us(2000);
+        chk7(td7 == 2'd0, "card3: straight clears S");
+        wait_state7(S_RUN, 40000);
+
+        // ---- 22) 【回归 corner_cnt 污染】转向期间扫过宽黑，转向后丢线，
+        //          找线方向必须仍按牌走，不能被拐角兜底反成左转 ----
+        // 这是真实失效链：强制转向 700 ms 期间车体有意离开赛道，必然扫过
+        // 黑线/宽黑区域。若 corner_cnt 在那儿被填满，转向结束丢线时兜底
+        // 就会强制左转，把刚按牌子做的右转覆盖掉。
+        pos7 = 5'sd3;                           // 线在右 -> 正常找线应右转
+        wait_us(3000);
+        chk7(state7 == S_RUN, "card4: RUN before turn");
+        dir_evt7 = 3'd2;                        // 牌子要求右转
+        wait_us(2000);
+        dir_evt7 = 3'd0;
+        wait_us(2000);
+        wide7 = 1'b1;                           // 转向中扫过宽黑
+        wait_us(2000);
+        wide7 = 1'b0;                           // 必须在转向结束前撤掉，
+                                                // 否则转向结束后它自己会重新填 corner_cnt
+        wait_state7(S_RUN, 40000);              // 转向结束
+        lost7 = 1'b1; on7 = 1'b0;
+        wait_state7(S_SEARCH, 40000);           // LOST_HOLD_MS=2，很快到决策点
+        wait_us(3000);                          // 等方向死区
+        chk7(state7 == S_SEARCH, "card4: in SEARCH");
+        chk7(dir_l7 === 1'b1 && dir_r7 === 1'b0, "card4: still RIGHT");
+        chk7(td7 == 2'd2, "card4: S=2 not flipped");
 
         if (fails == 0) $display("INFO: car_fsm_tb ALL PASS");
         else            $display("INFO: car_fsm_tb %0d FAIL(S)", fails);

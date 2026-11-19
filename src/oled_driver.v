@@ -41,7 +41,8 @@
 //     page 6/7 col0..47 : 超声距离，三位 16x16 数字（col 0/16/32）；
 //                         无回波（16'hFFFF）显示 "---"，超过 999 饱和成 999。
 //     page 7 col48..63  : 小字 "cm"（8x8）。
-//     page 6/7 col64..79: 车状态号 0=IDLE 1=RUN 2=LOST 3=SEARCH 4=STOP。
+//     page 6/7 col64..79: 车状态号 0=IDLE 1=RUN 2=LOST 3=SEARCH 4=STOP
+//                         5=AVOID_BACK 6=AVOID_TURN 7=AVOID_PROBE（一位数字，0..7）。
 //     page 6/7 col80..127: 四个标志格，每格 12 px（实心 10 px），
 //                         自左向右 = 障碍 / 丢线 / 左转 / 右转；
 //                         （左/右红外模块已从车上卸下，不再显示）
@@ -450,6 +451,8 @@ module oled_driver #(
             dbg_turn_r  <= 2'd0;
             dbg_lost_r  <= 1'b0;
             dbg_cnt     <= 26'd0;
+            ack_err     <= 1'b0;      // 复位后到首笔事务之间不能是 X
+            nack_seen   <= 1'b0;
             frame_done  <= 1'b0;
             frame_pend  <= 1'b0;
             x_req       <= 1'b0;

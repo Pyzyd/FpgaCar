@@ -306,7 +306,10 @@ module FpgaCar (
     wire hc_near  = (dist_cm != 16'hFFFF) && (dist_cm <= OBSTACLE_CM);
     wire ir_l_det = ~ir_l;                      // NPN 低有效
     wire ir_r_det = ~ir_r;
-    wire ir_det   = ir_l_det | ir_r_det;        // 原始判定，始终可观测（屏上四个标志格）
+    // 注意：OLED 的四格已改成 障碍/丢线/左转/右转（红外模块已卸下），
+    // 所以 ir_l_det / ir_r_det 现在只在 USE_IR=1 时参与 obstacle，没有观测出口。
+    // 要排查红外接线只能用串口或示波器；重装红外时记得先把 USE_IR 改回 1。
+    wire ir_det   = ir_l_det | ir_r_det;
     wire obstacle = (USE_ULTRA ? hc_near : 1'b0) | (USE_IR & ir_det);
 
     // ------------------------------------------------------------------
