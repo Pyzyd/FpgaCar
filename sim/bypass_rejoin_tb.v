@@ -2,13 +2,16 @@
 
 module bypass_rejoin_tb;
     localparam [2:0] RUN = 1, LOST = 2, SEARCH = 3, STOP = 4, TURN = 6, BYPASS = 7;
-    localparam [2:0] OUT = 0, ALIGN = 1, PASS_SIDE = 2, REJOIN = 4;
+    localparam [2:0] OUT = 0, ALIGN = 1, PASS_SIDE = 2, TURN_IN = 3, REJOIN = 4;
     reg clk = 0;
     always #5 clk = !clk;
     reg rst_n = 0, on_line = 1, lost = 0, obstacle = 0, wide = 0;
     reg signed [4:0] pos = 0;
     wire [2:0] state;
     wire en, dir_l, dir_r;
+    wire [2:0] fixed_state;
+    wire fixed_en, fixed_dir_l, fixed_dir_r;
+    reg fixed_right_seen = 0, fixed_wrong_side = 0, fixed_left_return_seen = 0;
     reg inside_bypass = 0;
 
     car_fsm #(
@@ -20,6 +23,33 @@ module bypass_rejoin_tb;
         .wide(wide), .pos(pos), .dir_evt(3'd0), .pid_l(11'd450), .pid_r(11'd450),
         .en(en), .dir_l(dir_l), .dir_r(dir_r), .duty_l(), .duty_r(), .state(state), .turn_dir()
     );
+
+    car_fsm #(
+        .CLK_FREQ(1000), .START_MS(1), .LOST_HOLD_MS(2), .DIR_DEAD_MS(1),
+        .AVOID_ROUTE_EN(1), .AVOID_FIXED_RIGHT(1),
+        .AVOID_BACK_MS(4), .AVOID_TURN_MS(6), .AVOID_PROBE_MS(6),
+        .AVOID_PASS_MS(14), .AVOID_REJOIN_MS(20), .AVOID_LINE_MS(3), .AVOID_BLOCK_MS(5)
+    ) fixed_right (
+        .clk(clk), .rst_n(rst_n), .on_line(on_line), .lost(lost), .obstacle(obstacle),
+        .wide(wide), .pos(pos), .dir_evt(3'd0), .pid_l(11'd450), .pid_r(11'd450),
+        .en(fixed_en), .dir_l(fixed_dir_l), .dir_r(fixed_dir_r),
+        .duty_l(), .duty_r(), .state(fixed_state), .turn_dir()
+    );
+
+    always @(negedge clk) begin
+        if (!rst_n) begin
+            fixed_right_seen <= 0;
+            fixed_wrong_side <= 0;
+            fixed_left_return_seen <= 0;
+        end else if (fixed_en) begin
+            if (fixed_state == TURN && fixed_dir_l != fixed_dir_r) begin
+                if (fixed_dir_l) fixed_right_seen <= 1;
+                else             fixed_wrong_side <= 1;
+            end
+            if (fixed_state == BYPASS && fixed_right.bypass_step == TURN_IN && !fixed_dir_l && fixed_dir_r)
+                fixed_left_return_seen <= 1;
+        end
+    end
 
     always @(negedge clk)
         if (inside_bypass && (state == LOST || state == SEARCH)) begin
@@ -58,6 +88,7 @@ module bypass_rejoin_tb;
         obstacle = 0;
         wait_drive(ALIGN);
         check(dir_l && !dir_r, "left detour rotates right to align");
+        check(fixed_right_seen && !fixed_wrong_side, "fixed right turns right at center line");
         wait_drive(PASS_SIDE);
         check(dir_l && dir_r, "both wheels advance along the obstacle side");
         on_line = 1; lost = 0;
@@ -66,6 +97,7 @@ module bypass_rejoin_tb;
         on_line = 0; lost = 1;
 
         wait_drive(REJOIN);
+        check(fixed_left_return_seen, "fixed right turns left toward the return line");
         on_line = 1; lost = 0; wide = 1;
         repeat (4) @(negedge clk);
         check(state == BYPASS, "wide black does not qualify as the return line");
@@ -91,6 +123,7 @@ module bypass_rejoin_tb;
         obstacle = 0;
         wait_drive(ALIGN);
         check(!dir_l && dir_r, "right detour mirrors alignment turn");
+        check(fixed_right_seen && !fixed_wrong_side, "fixed right stays right with a different last line position");
         wait_drive(REJOIN);
         wait (state == STOP);
         @(negedge clk);

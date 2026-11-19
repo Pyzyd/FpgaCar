@@ -380,6 +380,7 @@ module FpgaCar (
         // 现场初值：先让车驶到障碍侧边，再摆正超越，最后低速斜切回线。
         .AVOID_EN         (1),
         .AVOID_ROUTE_EN   (1),
+        .AVOID_FIXED_RIGHT (1),
         .AVOID_BACK_MS    (400),
         .AVOID_BACK_DUTY  (500),
         .AVOID_TURN_MS    (600),

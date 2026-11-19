@@ -55,6 +55,7 @@ module car_fsm #(
     parameter integer AVOID_PROBE_SETTLE_MS = 100,
     parameter integer AVOID_TRIES = 3,      // 最多连续尝试次数，用尽则停车等待
     parameter integer AVOID_ROUTE_EN = 0,  // 启用侧绕并定向回线；0 保留三段试探
+    parameter integer AVOID_FIXED_RIGHT = 0, // 侧绕时 1=固定右侧，0=按最后线位选侧
     parameter integer AVOID_PASS_MS = 900, // 车头摆正后沿障碍侧边直行
     parameter integer AVOID_REJOIN_MS = 1200,
     parameter integer AVOID_REJOIN_DUTY = 400,
@@ -153,6 +154,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     // ---------------- 避障 ----------------
     reg [3:0]  avoid_tries;         // 本次障碍已尝试几轮
     reg        avoid_left;          // 1 = 这次往左绕（按最后看到线的方位反着走）
+    wire       avoid_start_left = !last_pos_neg && (AVOID_ROUTE_EN == 0 || AVOID_FIXED_RIGHT == 0);
 
     localparam [2:0] BY_OUT = 3'd0, BY_ALIGN = 3'd1, BY_PASS = 3'd2,
                      BY_TURN_IN = 3'd3, BY_REJOIN = 3'd4;
@@ -326,8 +328,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             turning <= 1'b0;        // 撞上障碍就放弃这次转向
                             ms_cnt  <= 16'd0;
                             avoid_tries <= 4'd0;
-                            // 往"线不在的那一侧"绕：线在右（!last_pos_neg）就往左绕
-                            avoid_left  <= !last_pos_neg;
+                            avoid_left  <= avoid_start_left;
                             state   <= (AVOID_EN != 0) ? S_AVOID_BACK : S_STOP;
                         end
                     end else begin
@@ -350,7 +351,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                         end else if (obstacle) begin
                             ms_cnt <= 16'd0;
                             avoid_tries <= 4'd0;
-                            avoid_left  <= !last_pos_neg;
+                            avoid_left  <= avoid_start_left;
                             state  <= (AVOID_EN != 0) ? S_AVOID_BACK : S_STOP;
                         end else if (lost) begin
                             ms_cnt <= 16'd0;
@@ -373,7 +374,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                         // 这里补上，与 S_RUN 走同一套避障入口。
                         ms_cnt <= 16'd0;
                         avoid_tries <= 4'd0;
-                        avoid_left  <= !last_pos_neg;
+                        avoid_left  <= avoid_start_left;
                         state  <= (AVOID_EN != 0) ? S_AVOID_BACK : S_STOP;
                     end else if (ms_cnt >= LOST_HOLD_MS - 1 &&
                                  ((TURN_WAIT_FOR_CORNER == 0) || dir_evt == 3'd0)) begin
@@ -431,7 +432,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                         // 很容易蹭上（细则 4.3.2 明确不得触碰）。同样转避障。
                         ms_cnt <= 16'd0;
                         avoid_tries <= 4'd0;
-                        avoid_left  <= !last_pos_neg;
+                        avoid_left  <= avoid_start_left;
                         state  <= (AVOID_EN != 0) ? S_AVOID_BACK : S_STOP;
                     end else if (ms_cnt >= SEARCH_MS - 1) begin
                         ms_cnt <= 16'd0;
