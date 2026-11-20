@@ -104,6 +104,21 @@ class Checks(unittest.TestCase):
             events+=tracker.update([d],i*252)['events']
         self.assertEqual([e['label'] for e in events],['green'])
 
+    def test_recovered_edge_needs_observed_motion_to_count(self):
+        for moving in (False, True):
+            with self.subTest(moving=moving):
+                tracker = MultiTracker(arm=.94,commit=.98,min_travel=40,hold_ms=100,edge_pass=True)
+                events = []
+                for i in range(8):
+                    left = 500+5*i if moving else 500
+                    right = 590 if i<4 else 640
+                    hit = {'box':(left,180,right-left,90),'label':'red',
+                           'pixels':3500,'clipped':right==640}
+                    if right==640:
+                        hit['core_box'] = (left,180,590-left,90)
+                    events += tracker.update([hit], i*125)['events']
+                self.assertEqual([event['label'] for event in events],['red'] if moving else [])
+
     def test_field_edge_does_not_count_a_common_jump_with_no_followup_motion(self):
         tracker=MultiTracker(arm=.94,commit=.98,min_travel=40,hold_ms=100,edge_pass=True)
         events=[]

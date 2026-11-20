@@ -30,6 +30,21 @@ class Frame:
 
 
 class Checks(unittest.TestCase):
+    def test_field_recovers_a_faded_face_but_stops_at_gray(self):
+        for code, rgb in ((1,(101,87,88)),(8,(120,109,96))):
+            with self.subTest(code=code):
+                img = Frame([Blob(code,x=492,y=171,w=74,h=106,pixels=5000)])
+                img.get_pixel = lambda x,y: rgb if x<640 else (123,123,123)
+                hit = detect_multi_colors(img,field=True)['candidates'][0]
+                self.assertEqual(hit['core_box'],(492,171,74,106))
+                self.assertEqual(hit['box'],(492,171,148,106))
+                self.assertTrue(hit['clipped'])
+
+                img.get_pixel = lambda x,y: rgb if x<595 or x>=608 else (123,123,123)
+                hit = detect_multi_colors(img,field=True)['candidates'][0]
+                self.assertLessEqual(abs(hit['box'][0]+hit['box'][2]-595),2)
+                self.assertFalse(hit['clipped'])
+
     def test_multi_mode_preserves_candidates_and_clipped_tracks(self):
         result=detect_multi_colors(Frame([Blob(1),Blob(2,x=300)]))
         self.assertEqual(len(result['candidates']),2)

@@ -8,7 +8,7 @@ from turn_detector import detect as detect_turn
 from turn_shape import StableEvent
 
 
-VERSION = 'FpgaCar-field-vision-v2'
+VERSION = 'FpgaCar-field-vision-v3'
 EVENT_CODES = {'left':1, 'right':2, 'red':3, 'green':4, 'blue':5, 'yellow':6}
 LABELS = {'left':'左转', 'right':'右转', 'red':'红', 'green':'绿', 'blue':'蓝', 'yellow':'黄'}
 BOX_COLORS = {'red':(255,76,76), 'yellow':(255,217,60),

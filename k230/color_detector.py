@@ -24,6 +24,46 @@ def looks_like_arrow(img,box):
     return classify(mask,TEMPLATES,.40,.05)["label"] != "unknown"
 
 
+def extend_warm_box(img, label, box, roi):
+    """Use weak same-hue pixels next to an existing red/yellow seed near an edge."""
+    x,y,w,h = box
+    left, _, width, _ = roi
+    right = left + width
+    frame_width = img.width()
+    reach = min(h, frame_width//6)
+    rows = [y+h*i//10 for i in range(2,9)]
+    edges = [x, x+w]
+    for side, bound, direction in ((0,left,-1), (1,right,1)):
+        original = edges[side]
+        if abs(bound-original)>frame_width//5:
+            continue
+        # Inspect adjacent columns in order. One weak gap can be a cube seam;
+        # two in a row stop growth. Keep the last column with color evidence.
+        distance = min(reach, abs(bound-original))
+        gap = 0
+        offset = 1
+        while offset<=distance:
+            column = original-offset if direction<0 else original+offset-1
+            votes = 0
+            for row in rows:
+                r,g,b = img.get_pixel(column,row)
+                if label=='red':
+                    votes += r-g>=12 and r-b>=8
+                else:
+                    votes += min(r,g)-b>=10 and -20<=r-g<=26
+            if votes>=5:
+                edges[side] = original+direction*offset
+                gap = 0
+            else:
+                gap += 1
+                if gap>=2:
+                    break
+            if offset==distance:
+                break
+            offset = min(offset+3,distance)
+    return edges[0],y,edges[1]-edges[0],h
+
+
 def detect_colors(img,tracking=False,field=False,sign_box=None):
     roi = roi_rect(img.width(),img.height(),tracking,field)
     minimum = getattr(C,"COLOR_MIN_PIXELS",500)
@@ -69,7 +109,15 @@ def detect_colors(img,tracking=False,field=False,sign_box=None):
         # Only eligible targets block rearming. Clipped background patches,
         # tiny/noisy shapes and vetoed arrow signs aren't an ongoing color cube.
         present = True
-        candidates.append({"label":label,"box":b.rect(),"pixels":b.pixels(),'clipped':clipped})
+        box = b.rect()
+        candidate = {"label":label,"box":box,"pixels":b.pixels(),'clipped':clipped}
+        if field and label in ('red','yellow'):
+            recovered = extend_warm_box(img,label,box,roi)
+            if recovered != box:
+                candidate['core_box'] = box
+                candidate['box'] = recovered
+                candidate['clipped'] = clipped or recovered[0]<=x0+1 or recovered[0]+recovered[2]>=x0+rw-1
+        candidates.append(candidate)
     candidates.sort(key=lambda c:c['pixels'],reverse=True)
     discarded=max(0,len(candidates)-24)
     candidates=candidates[:24]
