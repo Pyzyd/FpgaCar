@@ -7,7 +7,7 @@
 
 **只提交「输入」，不提交「输出」。** 判据：能由仓库内文件重新生成、或可随时重新采集的东西，一律不入库。
 
-所以「仿真文件」其实**是入库的**：18 个 `sim/*_tb.v` 全部被跟踪，`tools/` 下 16 个正式脚本也都在库里。
+所以「仿真文件」其实**是入库的**：23 个 `sim/*_tb.v` 全部被跟踪，`tools/` 下 17 个正式脚本也都在库里。
 不入库的是**仿真产物**（`*.vvp`、`.scratch/`、`_sim/`）和**上板抓包数据**（`data/`）——前者由 tb 重编即得，后者随时能重抓。
 
 ## 2. 入库 / 不入库对照
@@ -55,7 +55,7 @@ C:/Efinity/2026.1/bin/efx_run.bat --flow pgm FpgaCar.xml
 
 1. `git status --short` —— 确认改动都在预期路径，**没有** `outflow/`、`data/`、`.scratch/`、`*.vvp`、`*.bit`。
 2. `git diff --check` —— 无尾随空格 / 冲突标记。
-3. `tools/run_regression.sh` —— 全量 18 个 tb 必须全绿（约 35 s）。只改文档时可跳过，但**改 `src/` 必跑**。
+3. `tools/run_regression.sh` —— 全量 23 个 tb 必须全绿（约 250 s；`car_fsm_tb` 单个就占 180 s）。只改文档时可跳过，但**改 `src/` 必跑**。
 4. `git add -A && git commit`。
 
 提交消息沿用现有风格：
