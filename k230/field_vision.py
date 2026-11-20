@@ -1,20 +1,22 @@
-"""K230 front camera: traffic arrows and passing color blocks."""
+"""K230 field vision: traffic arrows, color blocks and the parking sign."""
 
 import config as C
 from color_core import COLORS, elapsed
 from color_detector import detect_multi_colors
 from multi_tracker import MultiTracker
-from turn_detector import detect as detect_turn
+from parking_detector import select as select_parking
+from turn_detector import blue_regions, select as select_turn
 from turn_shape import StableEvent
 
 
-VERSION = 'FpgaCar-field-vision-v3'
+VERSION = 'FpgaCar-parking-p-v1'
 EVENT_CODES = {'left':1, 'right':2, 'red':3, 'green':4, 'blue':5, 'yellow':6}
 LABELS = {'left':'左转', 'right':'右转', 'red':'红', 'green':'绿', 'blue':'蓝', 'yellow':'黄'}
 BOX_COLORS = {'red':(255,76,76), 'yellow':(255,217,60),
               'green':(60,235,126), 'blue':(74,169,255)}
 SOURCES = ('field_vision.py','config.py','color_detector.py','color_core.py','arrow_core.py',
            'arrow_templates.py','multi_tracker.py','gpio_link.py','album.py','run_recorder.py',
+           'parking_detector.py',
            'turn_verify/turn_detector.py','turn_verify/turn_shape.py','turn_verify/turn_templates.py')
 
 
@@ -35,31 +37,41 @@ class RestartKey:
 class FieldVision:
     def __init__(self):
         self.turn_gate = StableEvent(confirm=3, rearm=6)
+        self.parking_gate = StableEvent(confirm=3, rearm=6, labels=('P',))
         self.tracker = MultiTracker(width=C.PREVIEW_WIDTH, arm=C.FIELD_ARM_EDGE,
                                     commit=C.FIELD_PASS_EDGE, min_travel=C.FIELD_MIN_TRAVEL,
                                     hold_ms=C.FIELD_EDGE_HOLD_MS, edge_pass=True)
         self.last_turn = None
+        self.parking_seen = False
 
     def reset(self):
-        self.turn_gate = StableEvent(self.turn_gate.confirm, self.turn_gate.rearm)
+        self.turn_gate.reset()
+        self.parking_gate.reset()
         self.tracker.reset()
         self.last_turn = None
+        self.parking_seen = False
 
     def update(self, img, now):
-        turn = detect_turn(img)
+        regions = blue_regions(img)
+        width, height = img.width(), img.height()
+        turn = select_turn(width, height, img.get_pixel, regions)
+        parking = select_parking(width, height, img.get_pixel, regions)
         direction = self.turn_gate.update(turn['label'], turn['present'])
         events = []
         if direction:
             self.last_turn = direction
             events.append({'kind':'turn','label':direction})
+        if self.parking_gate.update(parking['label'], parking['present']):
+            self.parking_seen = True
+            events.append({'kind':'parking','label':'P'})
 
         sign_box = turn['box'] if turn['present'] else None
-        colors = detect_multi_colors(img, field=True, sign_box=sign_box)
+        colors = detect_multi_colors(img, field=True, sign_box=sign_box, parking_box=parking['box'])
         tracking = self.tracker.update(colors['candidates'], now)
         for passage in tracking['events']:
             if passage['included']:
                 events.append({'kind':'color','label':passage['label'],'track':passage['track']})
-        return {'turn':turn, 'last_turn':self.last_turn, 'colors':colors,
+        return {'turn':turn, 'last_turn':self.last_turn, 'parking':parking, 'colors':colors,
                 'tracking':tracking, 'sequence':tracking['sequence'], 'events':events}
 
 
@@ -76,15 +88,12 @@ def open_recorder():
     return None
 
 
-def draw_color_boxes(panel, candidates, width):
-    for item in candidates:
-        label = item['label']
-        x,y,w,h = item['box']
-        color = BOX_COLORS[label]
-        panel.draw_rectangle(x,y,w,h,color=color,thickness=3)
-        tx,ty = min(x,width-28),max(0,y-24)
-        panel.draw_rectangle(tx,ty,28,24,color=(13,26,41),fill=True)
-        panel.draw_string_advanced(tx+3,ty+1,20,LABELS[label],color=color)
+def draw_labeled_box(panel, box, text, color, width):
+    x,y,w,h = box
+    panel.draw_rectangle(x,y,w,h,color=color,thickness=3)
+    tx,ty = min(x,width-28),max(0,y-24)
+    panel.draw_rectangle(tx,ty,28,24,color=(13,26,41),fill=True)
+    panel.draw_string_advanced(tx+3,ty+1,20,text,color=color)
 
 
 def main(send_gpio=False):
@@ -170,13 +179,17 @@ def main(send_gpio=False):
                 result = vision.update(frame,now)
                 events = result['events']
                 for event in events:
-                    ok = link.send(EVENT_CODES[event['label']]) if link else False
-                    event['gpio'] = 'sent_no_ack' if ok else 'fault' if send_gpio else 'preview_only'
+                    if event['kind']=='parking':
+                        event['gpio'] = 'local_only'
+                    else:
+                        ok = link.send(EVENT_CODES[event['label']]) if link else False
+                        event['gpio'] = 'sent_no_ack' if ok else 'fault' if send_gpio else 'preview_only'
                     print('[FIELD EVENT]',event)
                 if recorder:
                     saved = recorder.image(frame,frame_id,bool(events))
                     recorder.write({'kind':'frame','ticks_ms':now,'frame':frame_id,'mode':'field',
-                                    'detection':{'turn':result['turn'],'colors':result['colors']},
+                                    'detection':{'turn':result['turn'],'parking':result['parking'],
+                                                 'colors':result['colors']},
                                     'tracking':result['tracking'],'sequence':result['sequence'],
                                     'events':events,'image':saved},bool(events))
             if link:
@@ -189,10 +202,15 @@ def main(send_gpio=False):
                 rate_count,rate_at = 0,now
                 gc.collect()
             candidates = result['colors']['candidates'] if result else ()
-            if frame_id==0 or redraw or events or candidates or boxes_visible or time.ticks_diff(now,last_draw)>=300:
+            parking_box = result['parking']['box'] if result else None
+            if frame_id==0 or redraw or events or candidates or parking_box or boxes_visible or time.ticks_diff(now,last_draw)>=300:
                 panel = panels[index]
                 panel.clear()
-                draw_color_boxes(panel,candidates,width)
+                for item in candidates:
+                    label = item['label']
+                    draw_labeled_box(panel,item['box'],LABELS[label],BOX_COLORS[label],width)
+                if parking_box:
+                    draw_labeled_box(panel,parking_box,'P',(90,230,255),width)
                 panel.draw_rectangle(0,height,C.WIDTH,C.HEIGHT-height,color=(13,26,41),fill=True)
                 arrow = LABELS.get(vision.last_turn,'--')
                 sequence = '  '.join(LABELS[c] for c in vision.tracker.sequence) or '--'
@@ -208,11 +226,12 @@ def main(send_gpio=False):
                         reset_at = None
                 labels = {item['label'] for item in candidates}
                 visible = '  '.join(LABELS[c] for c in COLORS if c in labels) or '--'
-                panel.draw_string_advanced(12,height+48,22,'当前色块 '+visible,color=(241,246,251))
+                parking_status = '    停车牌 P 已确认' if vision.parking_seen else ''
+                panel.draw_string_advanced(12,height+48,22,'当前色块 '+visible+parking_status,color=(241,246,251))
                 panel.draw_string_advanced(12,height+83,22,'%s    %.1f FPS' % (status,fps),color=(180,217,242))
                 Display.show_image(panel,layer=Display.LAYER_OSD0)
                 index = (index+1)%len(panels)
-                last_draw, redraw, boxes_visible = now, False, bool(candidates)
+                last_draw, redraw, boxes_visible = now, False, bool(candidates or parking_box)
             frame_id += 1
             while True:
                 now = time.ticks_ms()

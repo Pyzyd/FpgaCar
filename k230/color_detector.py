@@ -64,7 +64,15 @@ def extend_warm_box(img, label, box, roi):
     return edges[0],y,edges[1]-edges[0],h
 
 
-def detect_colors(img,tracking=False,field=False,sign_box=None):
+def inside_sign(blob, box):
+    if not box:
+        return False
+    x,y,w,h = box
+    cx,cy = blob.x()+blob.w()/2,blob.y()+blob.h()/2
+    return x<=cx<x+w and y<=cy<y+h
+
+
+def detect_colors(img,tracking=False,field=False,sign_box=None,parking_box=None):
     roi = roi_rect(img.width(),img.height(),tracking,field)
     minimum = getattr(C,"COLOR_MIN_PIXELS",500)
     thresholds = getattr(C,"COLOR_LAB",DEFAULT_LAB)
@@ -97,11 +105,12 @@ def detect_colors(img,tracking=False,field=False,sign_box=None):
             reject('mixed_threshold')
             continue
         label = COLORS[(1,2,4,8).index(code)]
-        if field and label == "blue" and sign_box:
-            sx,sy,sw,sh = sign_box
-            cx,cy = b.x()+b.w()/2,b.y()+b.h()/2
-            if sx <= cx < sx+sw and sy <= cy < sy+sh:
+        if field and label == "blue":
+            if inside_sign(b,sign_box):
                 reject('arrow_sign')
+                continue
+            if inside_sign(b,parking_box):
+                reject('parking_sign')
                 continue
         if label=="blue" and not clipped and looks_like_arrow(img,b.rect()):
             reject('arrow_sign')
@@ -131,5 +140,5 @@ def detect_colors(img,tracking=False,field=False,sign_box=None):
     return result
 
 
-def detect_multi_colors(img,field=False,sign_box=None):
-    return detect_colors(img,tracking=True,field=field,sign_box=sign_box)
+def detect_multi_colors(img,field=False,sign_box=None,parking_box=None):
+    return detect_colors(img,tracking=True,field=field,sign_box=sign_box,parking_box=parking_box)
