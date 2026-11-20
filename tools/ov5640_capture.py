@@ -51,12 +51,16 @@ def png_chunk(kind, data):
     return struct.pack(">I", len(data)) + contents + struct.pack(">I", zlib.crc32(contents))
 
 
-def save_png(path, width, height, pixels):
+def encode_png(width, height, pixels):
     rows = b"".join(b"\x00" + pixels[i:i + width] for i in range(0, len(pixels), width))
     # Eight-bit grayscale and no filtering per row preserve the captured samples.
     header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
-    png = (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header)
-           + png_chunk(b"IDAT", zlib.compress(rows)) + png_chunk(b"IEND", b""))
+    return (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header)
+            + png_chunk(b"IDAT", zlib.compress(rows)) + png_chunk(b"IEND", b""))
+
+
+def save_png(path, width, height, pixels):
+    png = encode_png(width, height, pixels)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("xb") as output:
         output.write(png)

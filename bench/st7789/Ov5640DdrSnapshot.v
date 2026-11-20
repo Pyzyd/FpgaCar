@@ -31,6 +31,7 @@ module Ov5640DdrSnapshot (
     localparam integer CLOCK_HZ = 96_000_000, BAUD = 460_800;
     localparam integer KEY_TICKS = CLOCK_HZ / 50;
     localparam integer FIFO_BITS = 10;
+    localparam [6:0] ALBUM_SLOTS = 7'd64;
     assign sys_pll_rstn_o = 1'b1;
     assign ddr_pll_rstn_o = sys_pll_lock;
     assign {clk_p_hi, clk_p_lo, clk_n_hi, clk_n_lo} = 4'b0110;
@@ -110,13 +111,17 @@ module Ov5640DdrSnapshot (
     wire [127:0] rdata;
     wire [19:0] read_addr;
     wire [7:0] read_y;
-    wire uart_active, busy, photo_valid, error, read_request, read_ready, read_error;
-    ov5640_photo_store #(.WIDTH(WIDTH), .HEIGHT(HEIGHT), .FIFO_BITS(FIFO_BITS)) store (
+    wire uart_active, busy, error, read_request, read_ready, read_error;
+    wire [6:0] photo_count;
+    wire [5:0] read_slot;
+    ov5640_photo_store #(
+        .WIDTH(WIDTH), .HEIGHT(HEIGHT), .FIFO_BITS(FIFO_BITS), .SLOTS(ALBUM_SLOTS)
+    ) store (
         .clk(clk_sys), .rst_n(rst_n), .shoot(key_press && system_ready), .uart_active(uart_active),
         .request(request), .capture_done(capture_done), .capture_good(capture_good),
-        .busy(busy), .photo_valid(photo_valid), .error(error),
+        .busy(busy), .photo_count(photo_count), .error(error),
         .available(available), .pop(pop),
-        .read_request(read_request), .read_addr(read_addr), .read_y(read_y),
+        .read_request(read_request), .read_slot(read_slot), .read_addr(read_addr), .read_y(read_y),
         .read_ready(read_ready), .read_error(read_error),
         .avalid(avalid), .atype(atype), .aaddr(aaddr), .alen(alen), .aready(aready),
         .wvalid(wvalid), .wlast(wlast), .wready(wready), .bvalid(bvalid), .bresp(bresp),
@@ -124,10 +129,11 @@ module Ov5640DdrSnapshot (
     );
     ov5640_uart_snapshot #(
         .WIDTH(WIDTH), .HEIGHT(HEIGHT), .ADDRESS_WIDTH(20), .CLK_FREQ(CLOCK_HZ),
-        .BAUD(BAUD), .STORED_PHOTO(1'b1)
+        .BAUD(BAUD), .STORED_PHOTO(1'b1), .ALBUM_SLOTS(ALBUM_SLOTS)
     ) serial (
         .clk(clk_sys), .rst_n(rst_n), .uart_rx(uart_rx), .uart_tx(uart_tx),
-        .frame_valid(photo_valid && !busy && ddr_ready), .frame_release(),
+        .frame_valid(photo_count != 0 && !busy && ddr_ready), .frame_release(),
+        .photo_count(photo_count), .album_flags({error, busy, system_ready}), .read_slot(read_slot),
         .read_addr(read_addr), .read_y(read_y), .sent(), .read_request(read_request),
         .read_ready(read_ready), .read_error(read_error), .active(uart_active)
     );
@@ -163,6 +169,7 @@ module Ov5640DdrSnapshot (
     always @(posedge clk_sys or negedge rst_n)
         if (!rst_n) heartbeat <= 0;
         else heartbeat <= heartbeat + 1'b1;
+    wire photo_lamp = photo_count == ALBUM_SLOTS ? heartbeat[26] : photo_count != 0;
     assign led = ~{heartbeat[26], error || (cal_done && !cal_pass) || busy || uart_active,
-                   ddr_ready, vs_active, sccb_done, photo_valid};
+                   ddr_ready, vs_active, sccb_done, photo_lamp};
 endmodule

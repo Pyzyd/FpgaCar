@@ -114,33 +114,40 @@ python tools/ov5640_capture.py COM12 data/ov5640_capture/turn_point.png
 按旧模板直接生成会报 `Missing Ti60 board pins: ['rst_n']`。现在自适应，两种底板都能生成。
 按 K1 即复位 bench（bench 不跑车，只是重新初始化屏幕和摄像头）。
 
-## K1 拍照，串口取图（720p）
+## K1 拍照与电脑相册（720p）
 
-独立工程 `Ov5640DdrSnapshot` 将 OV5640 配置为 1280×720，把逐像素灰度保存到板载 DDR3。每张图占 900 KiB。
-拍摄时可以拔掉电脑串口。保持 Ti60 供电，之后接回串口就能导出照片。DDR3 只保留最近一张完整的照片，重新下载位流或断电会清空。
+独立工程 `Ov5640DdrSnapshot` 将 OV5640 配置为 1280×720，每张保存 900 KiB 原始灰度像素。
+板载 DDR3 可保存 **64 张**，编号按拍摄顺序从 01 到 64。拍满后保留这 64 张，K1 暂停接收。
+坏帧不会入册或占用编号。拍摄时可以拔掉电脑串口，保持 Ti60 供电。重新下载位流或断电会清空相册。
 
 1. 将 OV5640 接到 `DVP Sensor`。通过 JTAG 临时加载 `Ov5640DdrSnapshot.bit`，电机控制输出处于停机状态。
 2. 等 LED1、LED2、LED3 亮，分别表示摄像头配置写完、检测到帧同步、DDR3 校准通过。
-3. 短按 K1，保持镜头位置，等 LED4 熄灭且 LED0 亮。LED0 表示 DDR3 里有可读照片，LED4 在拍摄、传输和出错时点亮。LED5 为心跳。
-4. 用 **板载 CH340N Mini-USB 串口**连接电脑。将下面的 `COM12` 换成实际串口号。460800 8N1 下导出约 20 秒，可重复导出同一张照片。
+3. 每短按一次 K1 拍一张，等 LED4 熄灭再拍下一张。LED0 常亮表示有图，慢闪表示已拍满。LED4 在拍摄、传输和出错时亮，LED5 为心跳。
+4. 用 **板载 CH340N Mini-USB 串口**连接电脑。启动相册，选串口，点击「读取相册」。
 
 ```powershell
-python tools/ov5640_capture.py COM12 --stored
+python tools/ov5640_album.py
 ```
 
-默认输出到 `data/ov5640_capture/`，也可用 `COM12 photo.png --stored` 指定文件名。脚本发送 `R`，收到
-`OVS1`、宽高、像素和 CRC32 后才保存 PNG。若没有可读照片或还在拍摄，板子返回 `N`。
-如果拍摄后 LED4 持续亮，重新短按 K1 可重试已结束的失败拍摄，已有完整图仍可通过串口导出。
+相册使用 Python 自带的 Tkinter 和 `pyserial`。点选照片即可看 160×90 缩略图。
+「导出选中」保存所选照片的原始 1280×720 PNG。「全部导出」在所选目录下建立一组照片，按编号保存。
+460800 8N1 下原图约 20 秒一张。停止批量导出会先保存当前照片，随后停止。导出完成后可继续按 K1 拍摄。
+如果拍摄后 LED4 持续亮，重新短按 K1 可重试已结束的失败拍摄，已有完整图仍可导出。
+
+`tools/ov5640_capture.py COM12 --stored` 仍可直接导出最后一张。相册状态使用 `L` 查询，
+响应 `OVA1` 加三个单字节字段（照片数、容量、状态）。状态 bit0 表示摄像头和 DDR3 就绪、bit1 表示拍摄中、bit2 表示出错。
+`G` 读取原图，`T` 读取缩略图，后面都跟一个从 1 开始的原始编号字节。
+图像沿用 `OVS1` 帧和 CRC32 校验。若指定照片不可读，板子返回 `N`。
 
 重新编译时，从奥唯思 Ti60 资料里找到带有 `Ti60_Demo.peri.xml` 和 `ip/DdrCtrl` 的
 `02-1_Ti60_OV5640_LCD-HDMI_1080P60` 工程。生成脚本使用其中的 DDR3 引脚、PLL 和控制器文件。
 
 ```powershell
-python bench/st7789/make_ddr_snapshot_project.py .scratch/ov5640-ddr-snapshot "<奥唯思示例工程路径>"
+python bench/st7789/make_ddr_snapshot_project.py .scratch/ov5640-ddr-album "<奥唯思示例工程路径>"
 ```
 
 在 Efinity 编译生成目录内的 `Ov5640DdrSnapshot.xml`，产物位于该目录的 `outflow`。
-临时调试可使用 `tools\dl.bat .scratch\ov5640-ddr-snapshot\outflow\Ov5640DdrSnapshot.bit`。
+临时调试可使用 `tools\dl.bat .scratch\ov5640-ddr-album\outflow\Ov5640DdrSnapshot.bit`。
 如果 Ti60 的 Flash 内已有小车程序，JTAG 临时版在下一次重新上电时会自动恢复 Flash 内的程序。
 `Ov5640DdrSnapshot.hex` 可用于需要断电后自动启动拍照程序时。
 

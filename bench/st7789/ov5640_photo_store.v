@@ -1,20 +1,23 @@
 `timescale 1ns/1ns
 
-// Store only complete frames. Two 1 MiB DDR slots allow a failed capture to
-// leave the previous photo intact. Addresses on the DDR AXI port are bytes.
+// Append complete frames, one 1 MiB DDR slot per photo. A failed capture can
+// only affect the unpublished slot. Addresses on the DDR AXI port are bytes.
 module ov5640_photo_store #(
     parameter integer WIDTH = 1280,
     parameter integer HEIGHT = 720,
-    parameter integer FIFO_BITS = 9
+    parameter integer FIFO_BITS = 9,
+    parameter [6:0] SLOTS = 7'd64
 ) (
     input wire clk, rst_n,
     input wire shoot, uart_active,
     output reg request,
     input wire capture_done, capture_good,
-    output reg busy, photo_valid, error,
+    output reg busy, error,
+    output reg [6:0] photo_count,
     input wire [FIFO_BITS:0] available,
     output wire pop,
     input wire read_request,
+    input wire [5:0] read_slot,
     input wire [19:0] read_addr,
     output wire [7:0] read_y,
     output wire read_ready,
@@ -38,23 +41,23 @@ module ov5640_photo_store #(
     (* async_reg = "true" *) reg [1:0] done_sync, good_sync;
     reg done_settled;
     wire finished = done_settled == request;
-    reg active_slot, write_failed;
+    reg write_failed;
     reg [15:0] words_written;
     reg [15:0] start_word;
     reg [4:0] burst_words, words_left;
     reg cache_valid;
-    reg [15:0] cache_addr, read_word_addr;
+    reg [21:0] cache_addr, read_word_addr;
     reg [127:0] cache;
 
     assign avalid = state == WRITE_ADDR || state == READ_ADDR;
     assign atype = state == WRITE_ADDR;
-    assign aaddr = atype ? {11'd0, ~active_slot, start_word, 4'b0} :
-                           {11'd0, active_slot, read_word_addr, 4'b0};
+    assign aaddr = atype ? {6'd0, photo_count[5:0], start_word, 4'b0} :
+                           {6'd0, read_word_addr, 4'b0};
     assign alen = atype ? {3'b0, burst_words} - 1'b1 : 8'd0;
     assign pop = state == LOAD_WORD;
     assign wvalid = state == WRITE_WORD;
     assign wlast = words_left == 1;
-    assign read_ready = cache_valid && cache_addr == read_addr[19:4];
+    assign read_ready = cache_valid && cache_addr == {read_slot, read_addr[19:4]};
     assign read_y = cache[{read_addr[3:0], 3'b000} +: 8];
 
     always @(posedge clk or negedge rst_n) begin
@@ -74,9 +77,8 @@ module ov5640_photo_store #(
             state <= IDLE;
             request <= 0;
             busy <= 0;
-            photo_valid <= 0;
+            photo_count <= 0;
             error <= 0;
-            active_slot <= 0;
             write_failed <= 0;
             words_written <= 0;
             start_word <= 0;
@@ -103,21 +105,19 @@ module ov5640_photo_store #(
                         end else begin
                             busy <= 0;
                             if (good_sync[1] && !write_failed && words_written == FRAME_WORDS) begin
-                                active_slot <= ~active_slot;
-                                photo_valid <= 1;
-                                cache_valid <= 0;
+                                photo_count <= photo_count + 1'b1;
                             end else begin
                                 error <= 1;
                             end
                         end
-                    end else if (!busy && shoot && !uart_active) begin
+                    end else if (!busy && shoot && !uart_active && photo_count < SLOTS) begin
                         request <= ~request;
                         words_written <= 0;
                         write_failed <= 0;
                         error <= 0;
                         busy <= 1;
                     end else if (!busy && read_request && !read_ready) begin
-                        read_word_addr <= read_addr[19:4];
+                        read_word_addr <= {read_slot, read_addr[19:4]};
                         state <= READ_ADDR;
                     end
                 end
