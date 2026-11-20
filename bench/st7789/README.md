@@ -84,6 +84,27 @@ FPGA 每 4×4 像素取一个样本并转为 Y8，缓存 160×120 图，再按 2
 对着摄像头移动手或纸，等待几次刷新，检查图像内容是否随之改变。
 仿真用例 `ov5640_preview_frame_tb.v` 覆盖非法行长、19,200 个灰度样本和显示锁帧期间的缓存保护。
 
+## OV5640 串口拍照
+
+串口台架 `Ov5640UartBench` 使用 OV5640 的 VGA 全视野模式。每 2×2 区域取一个样本，保存 **320×240 灰度 PNG**。测试工程将电机驱动置于停机状态。将 OV5640 接到 `DVP Sensor`，用板载 CH340N 的 Mini-USB 口连接电脑。
+
+在仓库根目录生成工程，在 Efinity 编译 `Ov5640UartBench.xml`，然后用 JTAG 临时加载：
+
+```powershell
+python bench/st7789/make_project.py .scratch/ov5640-uart-bench --snapshot
+tools\dl.bat .scratch\ov5640-uart-bench\outflow\Ov5640UartBench.bit
+```
+
+摄像头准备好后 LED1、LED3 点亮。用 `python -m serial.tools.list_ports` 查 CH340N 的端口号。把下面的 `COM12` 换成实际端口：
+
+```powershell
+python tools/ov5640_capture.py COM12 data/ov5640_capture/turn_point.png
+```
+
+电脑发送 `S` 后，FPGA 从下一张完整画面取样。串口是 **115200、8N1**，每张传输约 6.7 秒。传完 LED0 点亮，电脑校验尺寸和 CRC32 后保存 PNG。省略输出路径时，文件按时间命名，落在 `data/ov5640_capture/`。拍不同位置时使用新文件名，已有照片会保留。电脑端依赖 `pyserial`。
+
+数据包依次为 `OVS1`、宽和高（各 16 位小端）、从上到下且每行从左到右的灰度字节、像素数据的 CRC32（32 位小端）。像素和摄像头的输入图保持同一视角，便于标注车库两角。
+
 ## 复位脚：K1/K2 按键版底板
 
 `make_project.py` 生成工程时会读 `FpgaCar.peri.xml`，按 `key_start_n` → `key_stop_n` → `rst_n` 的顺序挑第一个存在的引脚当复位源，
@@ -96,13 +117,15 @@ FPGA 每 4×4 像素取一个样本并转为 Y8，缓存 160×120 图，再按 2
 ## 与主工程的关系
 
 本目录是**独立工程**，不参与主工程 `FpgaCar.xml` 的综合，也不进 `tools/run_regression.sh` 的 23 个 tb。
-两个测试台需要手动跑：
+测试台可手动运行：
 
 ```bash
 iverilog -g2012 -s St7789Bench_tb -o .scratch/st7789.vvp bench/st7789/St7789Bench.v bench/st7789/St7789Bench_tb.v
 vvp .scratch/st7789.vvp
 iverilog -g2012 -s ov5640_preview_frame_tb -o .scratch/preview.vvp bench/st7789/ov5640_preview_frame.v bench/st7789/ov5640_preview_frame_tb.v
 vvp .scratch/preview.vvp
+iverilog -g2012 -s ov5640_uart_snapshot_tb -o .scratch/snapshot.vvp bench/st7789/ov5640_uart_snapshot_tb.v bench/st7789/ov5640_uart_snapshot.v bench/st7789/ov5640_preview_frame.v src/uart_tx.v
+vvp .scratch/snapshot.vvp
 ```
 
 唯一与主工程共用的源文件是 `src/cam_sccb_cfg.v`：本目录的 OV5640 预览用 `FULL_FOV_VGA=1` 切到 4∶3 全阵列，

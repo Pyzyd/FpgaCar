@@ -1,4 +1,4 @@
-"""Generate a standalone ST7789 Efinity project using the Ti60 board template."""
+"""Generate a standalone LCD or camera snapshot project from the Ti60 board template."""
 
 import argparse
 from copy import deepcopy
@@ -35,18 +35,25 @@ def write_xml(tree, path):
     tree.write(path, encoding="utf-8", xml_declaration=True)
 
 
-def generate(destination, camera=False):
+def generate(destination, camera=False, snapshot=False):
     destination.mkdir(parents=True, exist_ok=True)
-    name = "Ov5640LcdBench" if camera else "St7789Bench"
-    files = [HERE / "St7789Bench.v"]
     pins = BASE_PINS
+    if snapshot:
+        name = "Ov5640UartBench"
+        files = [HERE / (name + ".v"), HERE / "ov5640_uart_snapshot.v",
+                 ROOT / "src" / "uart_tx.v"]
+        pins = pins | {"uart_rx", "uart_tx"}
+    else:
+        name = "Ov5640LcdBench" if camera else "St7789Bench"
+        files = [HERE / "St7789Bench.v"]
+        if camera:
+            files.append(HERE / (name + ".v"))
     buses = {"led"}
     sdc = "create_clock -period 41.667 [get_ports clk]\n"
-    if camera:
+    if camera or snapshot:
         pins = pins | CAMERA_PINS
         buses.add("cmos_data")
-        files.extend(HERE / source for source in
-                     ("Ov5640LcdBench.v", "ov5640_preview_frame.v"))
+        files.append(HERE / "ov5640_preview_frame.v")
         files.extend(ROOT / "src" / source for source in
                      ("cam_probe.v", "cam_sccb_cfg.v", "i2c_timing_ctrl_16bit.v",
                       "I2C_OV5640_1280720_Config.v"))
@@ -99,7 +106,7 @@ def generate(destination, camera=False):
     # LCD signals use the same 1.8 V FPGA-side settings as other P4 outputs.
     # The carrier translates to 3.3 V on the expansion header.
     unused_index = list(gpio).index(gpio.find(q + "global_unused_config"))
-    for signal, ball in LCD_PINS.items():
+    for signal, ball in (() if snapshot else LCD_PINS.items()):
         if any(pin.get("gpio_def") == ball for pin in existing.values()):
             raise ValueError(f"Reserved LCD pin {ball} is already assigned")
         pin = deepcopy(existing["ml_pwm"])
@@ -126,6 +133,8 @@ def generate(destination, camera=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--camera", action="store_true", help="include OV5640 grayscale preview")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--camera", action="store_true", help="include OV5640 grayscale preview")
+    mode.add_argument("--snapshot", action="store_true", help="take OV5640 photos over CH340N UART")
     args = parser.parse_args()
-    generate(args.output, args.camera)
+    generate(args.output, args.camera, args.snapshot)
