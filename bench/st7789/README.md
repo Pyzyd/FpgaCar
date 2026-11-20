@@ -114,6 +114,36 @@ python tools/ov5640_capture.py COM12 data/ov5640_capture/turn_point.png
 按旧模板直接生成会报 `Missing Ti60 board pins: ['rst_n']`。现在自适应，两种底板都能生成。
 按 K1 即复位 bench（bench 不跑车，只是重新初始化屏幕和摄像头）。
 
+## K1 拍照，串口取图（720p）
+
+独立工程 `Ov5640DdrSnapshot` 将 OV5640 配置为 1280×720，把逐像素灰度保存到板载 DDR3。每张图占 900 KiB。
+拍摄时可以拔掉电脑串口。保持 Ti60 供电，之后接回串口就能导出照片。DDR3 只保留最近一张完整的照片，重新下载位流或断电会清空。
+
+1. 将 OV5640 接到 `DVP Sensor`。通过 JTAG 临时加载 `Ov5640DdrSnapshot.bit`，电机控制输出处于停机状态。
+2. 等 LED1、LED2、LED3 亮，分别表示摄像头配置写完、检测到帧同步、DDR3 校准通过。
+3. 短按 K1，保持镜头位置，等 LED4 熄灭且 LED0 亮。LED0 表示 DDR3 里有可读照片，LED4 在拍摄、传输和出错时点亮。LED5 为心跳。
+4. 用 **板载 CH340N Mini-USB 串口**连接电脑。将下面的 `COM12` 换成实际串口号。460800 8N1 下导出约 20 秒，可重复导出同一张照片。
+
+```powershell
+python tools/ov5640_capture.py COM12 --stored
+```
+
+默认输出到 `data/ov5640_capture/`，也可用 `COM12 photo.png --stored` 指定文件名。脚本发送 `R`，收到
+`OVS1`、宽高、像素和 CRC32 后才保存 PNG。若没有可读照片或还在拍摄，板子返回 `N`。
+如果拍摄后 LED4 持续亮，重新短按 K1 可重试已结束的失败拍摄，已有完整图仍可通过串口导出。
+
+重新编译时，从奥唯思 Ti60 资料里找到带有 `Ti60_Demo.peri.xml` 和 `ip/DdrCtrl` 的
+`02-1_Ti60_OV5640_LCD-HDMI_1080P60` 工程。生成脚本使用其中的 DDR3 引脚、PLL 和控制器文件。
+
+```powershell
+python bench/st7789/make_ddr_snapshot_project.py .scratch/ov5640-ddr-snapshot "<奥唯思示例工程路径>"
+```
+
+在 Efinity 编译生成目录内的 `Ov5640DdrSnapshot.xml`，产物位于该目录的 `outflow`。
+临时调试可使用 `tools\dl.bat .scratch\ov5640-ddr-snapshot\outflow\Ov5640DdrSnapshot.bit`。
+如果 Ti60 的 Flash 内已有小车程序，JTAG 临时版在下一次重新上电时会自动恢复 Flash 内的程序。
+`Ov5640DdrSnapshot.hex` 可用于需要断电后自动启动拍照程序时。
+
 ## 与主工程的关系
 
 本目录是**独立工程**，不参与主工程 `FpgaCar.xml` 的综合，也不进 `tools/run_regression.sh` 的 23 个 tb。
@@ -126,7 +156,9 @@ iverilog -g2012 -s ov5640_preview_frame_tb -o .scratch/preview.vvp bench/st7789/
 vvp .scratch/preview.vvp
 iverilog -g2012 -s ov5640_uart_snapshot_tb -o .scratch/snapshot.vvp bench/st7789/ov5640_uart_snapshot_tb.v bench/st7789/ov5640_uart_snapshot.v bench/st7789/ov5640_preview_frame.v src/uart_tx.v
 vvp .scratch/snapshot.vvp
+iverilog -g2012 -s ov5640_ddr_snapshot_tb -o .scratch/snapshot720.vvp bench/st7789/ov5640_ddr_snapshot_tb.v bench/st7789/ov5640_photo_capture.v bench/st7789/ov5640_photo_fifo.v bench/st7789/ov5640_photo_store.v bench/st7789/ov5640_uart_snapshot.v src/uart_tx.v
+vvp .scratch/snapshot720.vvp
 ```
 
-唯一与主工程共用的源文件是 `src/cam_sccb_cfg.v`：本目录的 OV5640 预览用 `FULL_FOV_VGA=1` 切到 4∶3 全阵列，
+独立工程复用主工程的摄像头初始化和串口发送模块。本目录的 OV5640 全视野预览用 `FULL_FOV_VGA=1` 切到 4∶3 全阵列，
 主工程默认 `FULL_FOV_VGA=0` 走原 720p 表，行为不变。

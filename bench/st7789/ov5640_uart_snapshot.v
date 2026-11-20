@@ -1,13 +1,14 @@
 `timescale 1ns/1ns
 
-// Receive an ASCII S (115200 8N1) and transmit a fresh, complete Y8 image.
+// S requests a fresh image. In stored-photo mode R reads the latest saved image.
 // Packet: OVS1, width and height (u16 LE), row-major Y8, payload CRC32 (u32 LE).
 module ov5640_uart_snapshot #(
     parameter integer WIDTH = 320,
     parameter integer HEIGHT = 240,
     parameter integer ADDRESS_WIDTH = 17,
     parameter integer CLK_FREQ = 24_000_000,
-    parameter integer BAUD = 115_200
+    parameter integer BAUD = 115_200,
+    parameter STORED_PHOTO = 1'b0
 ) (
     input wire clk, rst_n,
     input wire uart_rx,
@@ -16,8 +17,11 @@ module ov5640_uart_snapshot #(
     output wire frame_release,
     output wire [ADDRESS_WIDTH-1:0] read_addr,
     input wire [7:0] read_y,
-    output reg sent
+    output reg sent,
+    input wire read_ready, read_error,
+    output wire read_request, active
 );
+    localparam [7:0] COMMAND = STORED_PHOTO ? "R" : "S";
     localparam integer BIT_CYCLES = CLK_FREQ / BAUD;
     localparam integer TIMER_WIDTH = $clog2(BIT_CYCLES);
     localparam [1:0] RX_IDLE = 0, RX_START = 1, RX_DATA = 2, RX_STOP = 3;
@@ -58,7 +62,7 @@ module ov5640_uart_snapshot #(
                         if (rx_bit == 7) rx_state <= RX_STOP;
                     end
                     RX_STOP: begin
-                        snap_request <= rx_sync[1] && rx_data == 8'h53;
+                        snap_request <= rx_sync[1] && rx_data == COMMAND;
                         rx_state <= RX_IDLE;
                     end
                     default: rx_state <= RX_IDLE;
@@ -81,7 +85,7 @@ module ov5640_uart_snapshot #(
     endfunction
 
     localparam [2:0] IDLE = 0, DROP_FRAME = 1, GET_FRAME = 2,
-                     SEND = 3, ACCEPT = 4, DRAIN = 5;
+                     SEND = 3, ACCEPT = 4, DRAIN = 5, NO_PHOTO = 6, ABORT = 7;
     localparam integer HEADER_BYTES = 8;
     localparam integer PAYLOAD_END = HEADER_BYTES + WIDTH*HEIGHT;
     localparam integer LAST_BYTE = PAYLOAD_END + 3;
@@ -92,7 +96,11 @@ module ov5640_uart_snapshot #(
     wire [31:0] final_crc = ~crc;
     wire pixel_byte = byte_index >= HEADER_BYTES && byte_index < PAYLOAD_END;
     wire tx_busy;
-    wire tx_start = state == SEND && !tx_busy;
+    assign read_request = STORED_PHOTO && state == SEND && pixel_byte && !tx_busy && !read_error;
+    assign active = state != IDLE || snap_request;
+    wire tx_start = !tx_busy && (state == NO_PHOTO ||
+                    (state == SEND && (!STORED_PHOTO || !pixel_byte || read_ready) &&
+                     (!STORED_PHOTO || !read_error)));
 
     // Release the pre-existing snapshot once. The capture block then locks the
     // next complete frame until another request, including the whole UART transfer.
@@ -100,7 +108,9 @@ module ov5640_uart_snapshot #(
     assign read_addr = pixel_byte ? byte_index[ADDRESS_WIDTH-1:0] - HEADER_BYTES : 0;
 
     always @* begin
-        if (pixel_byte) begin
+        if (state == NO_PHOTO) begin
+            tx_data = "N";
+        end else if (pixel_byte) begin
             tx_data = read_y;
         end else begin
             case (byte_index)
@@ -135,7 +145,13 @@ module ov5640_uart_snapshot #(
             case (state)
                 IDLE: if (snap_request) begin
                     sent <= 1'b0;
-                    state <= DROP_FRAME;
+                    if (STORED_PHOTO) begin
+                        byte_index <= 0;
+                        crc <= 32'hffffffff;
+                        state <= frame_valid ? SEND : NO_PHOTO;
+                    end else begin
+                        state <= DROP_FRAME;
+                    end
                 end
                 DROP_FRAME: if (frame_valid) state <= GET_FRAME;
                 GET_FRAME: if (frame_valid) begin
@@ -143,9 +159,13 @@ module ov5640_uart_snapshot #(
                     crc <= 32'hffffffff;
                     state <= SEND;
                 end
-                SEND: if (tx_start) begin
-                    if (pixel_byte) crc <= crc32_byte(crc, tx_data);
-                    state <= ACCEPT;
+                SEND: begin
+                    if (STORED_PHOTO && read_error) begin
+                        state <= IDLE;
+                    end else if (tx_start) begin
+                        if (pixel_byte) crc <= crc32_byte(crc, tx_data);
+                        state <= ACCEPT;
+                    end
                 end
                 ACCEPT: if (tx_busy) begin
                     if (byte_index == LAST_BYTE) state <= DRAIN;
@@ -158,6 +178,8 @@ module ov5640_uart_snapshot #(
                     sent <= 1'b1;
                     state <= IDLE;
                 end
+                NO_PHOTO: if (tx_start) state <= ABORT;
+                ABORT: if (!tx_busy) state <= IDLE;
                 default: state <= IDLE;
             endcase
         end

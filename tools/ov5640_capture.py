@@ -1,4 +1,4 @@
-"""Request a fresh OV5640 snapshot over the Ti60 CH340N port and save a PNG."""
+"""Read an OV5640 photo from the Ti60 CH340N serial port and save a PNG."""
 
 import argparse
 from datetime import datetime
@@ -11,6 +11,8 @@ import zlib
 MAGIC = b"OVS1"
 FRAME_SIZE = (320, 240)
 BAUD = 115_200
+STORED_SIZE = (1280, 720)
+STORED_BAUD = 460_800
 
 
 def read_exact(port, length, deadline):
@@ -22,15 +24,20 @@ def read_exact(port, length, deadline):
     return data
 
 
-def read_snapshot(port, timeout=20):
+def read_snapshot(port, timeout=20, frame_size=FRAME_SIZE, stored=False):
     deadline = time.monotonic() + timeout
     window = bytearray()
+    header_deadline = min(deadline, time.monotonic() + 3) if stored else deadline
+    if stored:
+        window.extend(read_exact(port, 1, header_deadline))
+        if window == b"N":
+            raise ValueError("No photo ready. Press K1 and wait until LED0 is on and LED4 is off.")
     while window != MAGIC:
-        window.extend(read_exact(port, 1, deadline))
+        window.extend(read_exact(port, 1, header_deadline))
         del window[:-len(MAGIC)]
 
     width, height = struct.unpack("<HH", read_exact(port, 4, deadline))
-    if (width, height) != FRAME_SIZE:
+    if (width, height) != frame_size:
         raise ValueError(f"unexpected frame size {width}x{height}")
     pixels = read_exact(port, width * height, deadline)
     (expected_crc,) = struct.unpack("<I", read_exact(port, 4, deadline))
@@ -59,6 +66,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("port", help="Ti60 CH340N serial port, for example COM12")
     parser.add_argument("output", nargs="?", type=Path, help="optional output PNG path")
+    parser.add_argument("--stored", action="store_true", help="read the 720p photo taken with K1")
     args = parser.parse_args()
     path = args.output
     if path is None:
@@ -73,11 +81,18 @@ def main():
         parser.exit(1, "Install pyserial first: python -m pip install pyserial\n")
 
     try:
-        with serial.Serial(args.port, BAUD, timeout=.25, write_timeout=2) as port:
+        baud = STORED_BAUD if args.stored else BAUD
+        with serial.Serial(args.port, baud, timeout=.25, write_timeout=2) as port:
             port.reset_input_buffer()
-            port.write(b"S")
-            print(f"Requested a photo on {args.port}. Waiting for a complete frame...", flush=True)
-            width, height, pixels = read_snapshot(port)
+            if args.stored:
+                port.write(b"R")
+                print(f"Reading the 720p photo from {args.port} (about 20 s)...", flush=True)
+                width, height, pixels = read_snapshot(port, timeout=45,
+                                                       frame_size=STORED_SIZE, stored=True)
+            else:
+                port.write(b"S")
+                print(f"Requested a photo on {args.port}. Waiting for a complete frame...", flush=True)
+                width, height, pixels = read_snapshot(port)
         save_png(path, width, height, pixels)
     except (OSError, ValueError) as exc:
         parser.exit(1, f"Capture failed: {exc}\n")

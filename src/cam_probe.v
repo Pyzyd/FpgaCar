@@ -41,17 +41,17 @@ module cam_probe #(
     localparam integer MS_DIV_RAW = CLK_FREQ / 1_000;
     localparam integer MS_DIV     = (MS_DIV_RAW < 1) ? 1 : MS_DIV_RAW;   // 24 MHz -> 24000
 
-    reg [15:0] ms_div;
+    reg [$clog2(MS_DIV < 2 ? 2 : MS_DIV)-1:0] ms_div;
     reg        ms_tick;
     always @(posedge clk or negedge rst_n)
         if (!rst_n) begin
-            ms_div  <= 16'd0;
+            ms_div  <= 0;
             ms_tick <= 1'b0;
         end else if (ms_div >= MS_DIV - 1) begin
-            ms_div  <= 16'd0;
+            ms_div  <= 0;
             ms_tick <= 1'b1;
         end else begin
-            ms_div  <= ms_div + 16'd1;
+            ms_div  <= ms_div + 1'b1;
             ms_tick <= 1'b0;
         end
 
