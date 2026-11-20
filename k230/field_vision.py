@@ -1,18 +1,35 @@
 """K230 front camera: traffic arrows and passing color blocks."""
 
 import config as C
+from color_core import COLORS, elapsed
 from color_detector import detect_multi_colors
 from multi_tracker import MultiTracker
 from turn_detector import detect as detect_turn
 from turn_shape import StableEvent
 
 
-VERSION = 'FpgaCar-field-vision-v1'
+VERSION = 'FpgaCar-field-vision-v3'
 EVENT_CODES = {'left':1, 'right':2, 'red':3, 'green':4, 'blue':5, 'yellow':6}
 LABELS = {'left':'左转', 'right':'右转', 'red':'红', 'green':'绿', 'blue':'蓝', 'yellow':'黄'}
+BOX_COLORS = {'red':(255,76,76), 'yellow':(255,217,60),
+              'green':(60,235,126), 'blue':(74,169,255)}
 SOURCES = ('field_vision.py','config.py','color_detector.py','color_core.py','arrow_core.py',
            'arrow_templates.py','multi_tracker.py','gpio_link.py','album.py','run_recorder.py',
            'turn_verify/turn_detector.py','turn_verify/turn_shape.py','turn_verify/turn_templates.py')
+
+
+class RestartKey:
+    def __init__(self, initial, now):
+        self.raw = self.stable = initial
+        self.changed = now
+
+    def update(self, value, now):
+        if value != self.raw:
+            self.raw, self.changed = value, now
+        if value != self.stable and elapsed(now, self.changed) >= 35:
+            self.stable = value
+            return value == 0
+        return False
 
 
 class FieldVision:
@@ -21,6 +38,11 @@ class FieldVision:
         self.tracker = MultiTracker(width=C.PREVIEW_WIDTH, arm=C.FIELD_ARM_EDGE,
                                     commit=C.FIELD_PASS_EDGE, min_travel=C.FIELD_MIN_TRAVEL,
                                     hold_ms=C.FIELD_EDGE_HOLD_MS, edge_pass=True)
+        self.last_turn = None
+
+    def reset(self):
+        self.turn_gate = StableEvent(self.turn_gate.confirm, self.turn_gate.rearm)
+        self.tracker.reset()
         self.last_turn = None
 
     def update(self, img, now):
@@ -54,11 +76,23 @@ def open_recorder():
     return None
 
 
+def draw_color_boxes(panel, candidates, width):
+    for item in candidates:
+        label = item['label']
+        x,y,w,h = item['box']
+        color = BOX_COLORS[label]
+        panel.draw_rectangle(x,y,w,h,color=color,thickness=3)
+        tx,ty = min(x,width-28),max(0,y-24)
+        panel.draw_rectangle(tx,ty,28,24,color=(13,26,41),fill=True)
+        panel.draw_string_advanced(tx+3,ty+1,20,LABELS[label],color=color)
+
+
 def main(send_gpio=False):
     import gc
     import image
     import os
     import time
+    from machine import FPIOA, Pin
     from media.sensor import Sensor, CAM_CHN_ID_0, CAM_CHN_ID_1
     from media.display import Display
     from media.media import MediaManager
@@ -92,14 +126,35 @@ def main(send_gpio=False):
                 print('[GPIO] disabled:',exc)
         recorder = open_recorder()
         vision = FieldVision()
-        panels = [image.Image(width,C.HEIGHT-height,image.RGB888) for _ in range(3)]
+        key = None
+        try:
+            mux = FPIOA()
+            mux.set_function(61, FPIOA.GPIO61)
+            key = Pin(61, Pin.IN, pull=Pin.PULL_UP)
+        except Exception as exc:
+            print('[FIELD] Restart key unavailable:', exc)
+        restart_key = RestartKey(key.value(), time.ticks_ms()) if key is not None else None
+        panels = [image.Image(C.WIDTH,C.HEIGHT,image.ARGB8888) for _ in range(3)]
         index = frame_id = rate_count = 0
         fps = 0.
         warmed_at = rate_at = last_draw = time.ticks_ms()
+        reset_at, redraw, boxes_visible = None, False, False
+
+        def poll_restart(now):
+            nonlocal reset_at, redraw
+            if restart_key is None or not restart_key.update(key.value(), now):
+                return
+            vision.reset()
+            reset_at, redraw = now, True
+            print('[FIELD] recognition restarted')
+            if recorder:
+                recorder.write({'kind':'recognition_reset','ticks_ms':now,'frame':frame_id}, True)
+
         print('[FIELD]', VERSION, 'GPIO:', bool(link), 'SD:', recorder.path if recorder else 'off')
         while True:
             os.exitpoint()
             started = time.ticks_ms()
+            poll_restart(started)
             try:
                 frame = sensor.snapshot(chn=CAM_CHN_ID_0,timeout=120)
             except RuntimeError:
@@ -108,6 +163,7 @@ def main(send_gpio=False):
                 time.sleep_ms(10)
                 continue
             now = time.ticks_ms()
+            poll_restart(now)
             result = None
             events = []
             if time.ticks_diff(now,warmed_at)>=1500:
@@ -132,24 +188,39 @@ def main(send_gpio=False):
                 fps = rate_count*1000/elapsed
                 rate_count,rate_at = 0,now
                 gc.collect()
-            if frame_id==0 or events or time.ticks_diff(now,last_draw)>=300:
+            candidates = result['colors']['candidates'] if result else ()
+            if frame_id==0 or redraw or events or candidates or boxes_visible or time.ticks_diff(now,last_draw)>=300:
                 panel = panels[index]
-                panel.draw_rectangle(0,0,width,C.HEIGHT-height,color=(13,26,41),fill=True)
+                panel.clear()
+                draw_color_boxes(panel,candidates,width)
+                panel.draw_rectangle(0,height,C.WIDTH,C.HEIGHT-height,color=(13,26,41),fill=True)
                 arrow = LABELS.get(vision.last_turn,'--')
                 sequence = '  '.join(LABELS[c] for c in vision.tracker.sequence) or '--'
                 tx = 'GPIO已启用' if link and not link.error else 'GPIO未输出'
-                panel.draw_string_advanced(12,8,30,'转向 '+arrow+'    色序 '+sequence,color=(241,246,251))
+                panel.draw_string_advanced(12,height+8,30,'转向 '+arrow+'    色序 '+sequence,color=(241,246,251))
                 status = '预热中' if result is None else '顺序待复核' if vision.tracker.sequence_uncertain else tx
                 if recorder and recorder.error:
                     status = 'SD记录停止'
-                panel.draw_string_advanced(12,55,23,'%s    %.1f FPS' % (status,fps),color=(180,217,242))
-                Display.show_image(panel,y=height,layer=Display.LAYER_OSD0)
+                if reset_at is not None:
+                    if time.ticks_diff(now,reset_at)<1000:
+                        status = '识别已重开'
+                    else:
+                        reset_at = None
+                labels = {item['label'] for item in candidates}
+                visible = '  '.join(LABELS[c] for c in COLORS if c in labels) or '--'
+                panel.draw_string_advanced(12,height+48,22,'当前色块 '+visible,color=(241,246,251))
+                panel.draw_string_advanced(12,height+83,22,'%s    %.1f FPS' % (status,fps),color=(180,217,242))
+                Display.show_image(panel,layer=Display.LAYER_OSD0)
                 index = (index+1)%len(panels)
-                last_draw = now
+                last_draw, redraw, boxes_visible = now, False, bool(candidates)
             frame_id += 1
-            delay = C.FIELD_PERIOD_MS-time.ticks_diff(time.ticks_ms(),started)
-            if delay>0:
-                time.sleep_ms(delay)
+            while True:
+                now = time.ticks_ms()
+                delay = C.FIELD_PERIOD_MS-time.ticks_diff(now,started)
+                if delay <= 0:
+                    break
+                time.sleep_ms(min(10, delay))
+                poll_restart(time.ticks_ms())
     except KeyboardInterrupt:
         print('[FIELD] stopped')
     finally:

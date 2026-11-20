@@ -96,6 +96,11 @@ class MultiTracker:
             return
         if t['cross_at'] is None:
             advancing = (edge>old_edge+2 or x>old_x+2)
+            core = d.get('core_box')
+            if core and core[0]+core[2]<self.commit:
+                # A weaker side face can reappear when exposure changes.
+                # Require motion of the observed left edge for a recovered crossing.
+                advancing = x>old_x+2
             at_edge = edge>=self.commit and edge-t['arm_x']>=self.min_travel
             if not (at_edge and advancing):
                 return

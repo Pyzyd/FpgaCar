@@ -57,6 +57,10 @@ TRACK_SHAKE_HOLD_MS = 350
 TRACK_MAX_TARGETS = 12
 # Competition calibration: edges use the full 640px capture coordinates.
 FIELD_COLOR_ROI = (.05,.40,.95,.60)
+# Red and yellow lose chroma when the camera views a screen or a shaded face.
+# Keep the green and blue ranges and leave a gap between red and yellow on A.
+FIELD_COLOR_LAB = ((16,100,16,127,-8,127), COLOR_LAB[1], COLOR_LAB[2],
+                   (30,100,-16,14,20,127))
 FIELD_ARM_EDGE = .94
 FIELD_PASS_EDGE = .98
 FIELD_MIN_TRAVEL = 40
