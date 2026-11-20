@@ -159,6 +159,32 @@
         <efxpt:comp_gpio name="mr_pwm" gpio_def="GPIOL_P_09" mode="output" bus_name="" io_standard="1.8 V LVCMOS">
             <efxpt:output_config name="mr_pwm" name_ddio_lo="" register_option="none" clock_name="" is_clock_inverted="false" is_slew_rate="false" tied_option="none" ddio_type="none" delay="0" is_serial="false" drive_strength="4" fastclk_name=""/>
         </efxpt:comp_gpio>
+        <!-- ================================================================ -->
+        <!-- ST7789 彩屏 SPI（P4 排针，FPGA 侧 1.8 V，排针外侧 3.3 V 经电平转换） -->
+        <!--   引脚分配表里这五根一直标注为预留，这里是首次真正绑定。          -->
+        <!--   CS 用 GPIOT_P_11（pin40）；pin39 GPIOT_N_11 已被 k230_stb 占用，  -->
+        <!--   不能挪来当屏的 CS。                                             -->
+        <!-- ================================================================ -->
+        <!-- pin35 User_IO30，SPI 时钟 -->
+        <efxpt:comp_gpio name="lcd_sclk" gpio_def="GPIOL_N_17" mode="output" bus_name="" io_standard="1.8 V LVCMOS">
+            <efxpt:output_config name="lcd_sclk" name_ddio_lo="" register_option="none" clock_name="" is_clock_inverted="false" is_slew_rate="false" tied_option="none" ddio_type="none" delay="0" is_serial="false" drive_strength="4" fastclk_name=""/>
+        </efxpt:comp_gpio>
+        <!-- pin36 User_IO31，SPI 数据 -->
+        <efxpt:comp_gpio name="lcd_mosi" gpio_def="GPIOL_P_17" mode="output" bus_name="" io_standard="1.8 V LVCMOS">
+            <efxpt:output_config name="lcd_mosi" name_ddio_lo="" register_option="none" clock_name="" is_clock_inverted="false" is_slew_rate="false" tied_option="none" ddio_type="none" delay="0" is_serial="false" drive_strength="4" fastclk_name=""/>
+        </efxpt:comp_gpio>
+        <!-- pin37 User_IO32，命令/数据选择 -->
+        <efxpt:comp_gpio name="lcd_dc" gpio_def="GPIOL_N_18" mode="output" bus_name="" io_standard="1.8 V LVCMOS">
+            <efxpt:output_config name="lcd_dc" name_ddio_lo="" register_option="none" clock_name="" is_clock_inverted="false" is_slew_rate="false" tied_option="none" ddio_type="none" delay="0" is_serial="false" drive_strength="4" fastclk_name=""/>
+        </efxpt:comp_gpio>
+        <!-- pin38 User_IO33，屏复位，低有效 -->
+        <efxpt:comp_gpio name="lcd_rst_n" gpio_def="GPIOL_P_18" mode="output" bus_name="" io_standard="1.8 V LVCMOS">
+            <efxpt:output_config name="lcd_rst_n" name_ddio_lo="" register_option="none" clock_name="" is_clock_inverted="false" is_slew_rate="false" tied_option="none" ddio_type="none" delay="0" is_serial="false" drive_strength="4" fastclk_name=""/>
+        </efxpt:comp_gpio>
+        <!-- pin40 User_IO35，片选，低有效 -->
+        <efxpt:comp_gpio name="lcd_cs_n" gpio_def="GPIOT_P_11" mode="output" bus_name="" io_standard="1.8 V LVCMOS">
+            <efxpt:output_config name="lcd_cs_n" name_ddio_lo="" register_option="none" clock_name="" is_clock_inverted="false" is_slew_rate="false" tied_option="none" ddio_type="none" delay="0" is_serial="false" drive_strength="4" fastclk_name=""/>
+        </efxpt:comp_gpio>
         <!-- 核心板 K1、K2 均低有效，分别与 P4-2、P4-1 复用。 -->
         <efxpt:comp_gpio name="key_start_n" gpio_def="GPIOL_P_02" mode="input" bus_name="" io_standard="1.8 V LVCMOS">
             <efxpt:input_config name="key_start_n" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="weak pullup" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="key_start_n_PULL_UP_ENA" dyn_delay_en_name="key_start_n_DLY_ENA" dyn_delay_reset_name="key_start_n_DLY_RST" dyn_delay_ctrl_name="key_start_n_DLY_CTRL" clkmux_buf_name=""/>

@@ -103,6 +103,15 @@ module FpgaCar (
     input  wire [2:0]   k230_d,         // D0=GPIO42 / D1=GPIO43 / D2=GPIO34
     input  wire         k230_stb,       // STB=GPIO35，上升沿采样 D[2:0]
 
+    // ---------------- ST7789 彩屏（SPI，P4 排针 35/36/37/38/40）----------------
+    // 与 OV5640 共用相机口：屏上显示的就是摄像头预览（灰度转 RGB565）。
+    // 这五根在引脚分配表里一直预留，这里是首次真正例化。
+    output wire         lcd_sclk,       // pin35 User_IO30 / GPIOL_N_17
+    output wire         lcd_mosi,       // pin36 User_IO31 / GPIOL_P_17
+    output wire         lcd_dc,         // pin37 User_IO32 / GPIOL_N_18
+    output wire         lcd_rst_n,      // pin38 User_IO33 / GPIOL_P_18
+    output wire         lcd_cs_n,       // pin40 User_IO35 / GPIOT_P_11
+
     // ---------------- 板载调试资源 ----------------
     output wire [5:0]   led,            // LED0~LED5，低电平点亮
     input  wire         uart_rx,        // GPIOT_N_16，Mini-USB 口 CH340N
@@ -122,6 +131,21 @@ module FpgaCar (
     // 赛场上 K230 是主方案，OV5640 只作退路，用一个开关明确二选一更不容易出错。
     // 前视联调分支：启用固定 K230 GPIO 线束，转向仍等待 Ti60 循迹确认。
     localparam USE_K230   = 1'b1;
+
+    // ------------------------------------------------------------------
+    // 【彩屏预览开关】1'b1 = 相机画面送到 ST7789 屏上（灰度，320x240 横屏）
+    //   - 与 USE_CAMERA 互斥：两者都要吃 OV5640 的 DVP 数据，同时开会争抢总线。
+    //   - 与 USE_K230 不冲突：K230 走 GPIO 并行口，OV5640 走 DVP，互不相干。
+    //   - 开着它时仍然不产生颜色事件（cam_color 打 0），方便单独看画面。
+    // ------------------------------------------------------------------
+    localparam USE_LCD_PREVIEW = 1'b1;
+
+    // SPI 半周期（24 MHz 主时钟下的分频数）。SPI 时钟 = 24MHz / (2*N)：
+    //   N=16 -> 750 kHz，整屏 1.6 s 一帧（bench 最初的值）
+    //   N=4  -> 3 MHz，  整屏 0.41 s 一帧
+    //   N=2  -> 6 MHz，  整屏 0.20 s 一帧（当前值）
+    // 屏线拉长或出现花屏就把它改回 4 或 16，这是唯一需要现场试的参数。
+    localparam integer LCD_SPI_HALF_CYCLES = 2;
 
     // ------------------------------------------------------------------
     // FPGA 配置后先保持内部复位几个周期，再随系统时钟释放。
@@ -440,7 +464,107 @@ module FpgaCar (
     wire snap_tx, snap_busy;        // 停用时由 else 分支打常量
 
     generate
-    if (USE_CAMERA) begin : g_cam
+    if (USE_LCD_PREVIEW) begin : g_lcd
+        // ----------------------------------------------------------------
+        // 彩屏预览：cam_probe -> cam_sccb_cfg(VGA 全视场) -> 预览取样 -> ST7789
+        //   采集侧：OV5640 640x480 RGB565，PCLK 下写满一帧约 26 ms
+        //   显示侧：SPI 6 MHz 发 320x240 RGB565 约 200 ms
+        //   两者用双缓冲 + request/ack 握手解耦，采集不必等屏发完。
+        // ----------------------------------------------------------------
+        wire        lcd_cam_ready;
+        wire        lcd_cfg_done;
+        wire        lcd_vs_act;
+        wire [8:0]  pv_x, pv_y;
+        wire [7:0]  pv_gray;
+        wire        pv_frame_valid, pv_frame_release;
+        wire        pv_used;
+
+        // 160x120 取样点双倍放大铺满 320x240：屏幕坐标右移一位就是样本坐标
+        wire [14:0] pv_sample_row = {7'b0, pv_y[8:1]};
+        wire [14:0] pv_sample_addr = (pv_sample_row << 7) + (pv_sample_row << 5)
+                                     + {7'b0, pv_x[8:1]};
+        wire        lcd_capture_ready = sys_rst_n && lcd_cfg_done;
+        wire [15:0] pv_pixel = {pv_gray[7:3], pv_gray[7:2], pv_gray[7:3]};
+
+        cam_probe #(
+            .CLK_FREQ     (24_000_000),
+            .RST_LOW_MS   (1),
+            .CFG_DELAY_MS (20),
+            .WIN_MS       (100)
+        ) u_lcd_cam (
+            .clk    (clk),
+            .rst_n  (sys_rst_n),
+            .vsync  (cmos_vsync),
+            .ready  (lcd_cam_ready),
+            .vs_cnt (),
+            .vs_act (lcd_vs_act)
+        );
+
+        // FULL_FOV_VGA=1：把读取窗口从 720p 的纵向 250..1705 扩到 4:3 全阵列，
+        // 输出 640x480。主工程原来那套 720p 参数由 g_cam 分支继续用，不受影响。
+        cam_sccb_cfg #(
+            .CLK_FREQ    (24_000_000),
+            .I2C_FREQ    (100_000),
+            .DEV_ADDR    (8'h78),
+            .FULL_FOV_VGA(1'b1)
+        ) u_lcd_sccb (
+            .clk      (clk),
+            .rst_n    (sys_rst_n),
+            .start    (lcd_cam_ready),
+            .sclk     (cmos_sclk),
+            .sdat_in  (cmos_sdat_IN),
+            .sdat_out (cmos_sdat_OUT),
+            .sdat_oe  (cmos_sdat_OE),
+            .done     (lcd_cfg_done)
+        );
+
+        ov5640_preview_frame #(
+            .INPUT_WIDTH  (640),
+            .INPUT_HEIGHT (480),
+            .SAMPLE_LOG2  (2)
+        ) u_preview (
+            .clk           (clk),
+            .rst_n         (lcd_capture_ready),
+            .pclk          (cmos_pclk),
+            .href          (cmos_href),
+            .vsync         (cmos_vsync),
+            .data          (cmos_data),
+            .frame_release (pv_frame_release),
+            .frame_valid   (pv_frame_valid),
+            .read_addr     (pv_sample_addr),
+            .read_y        (pv_gray)
+        );
+
+        st7789_panel #(
+            .CLK_HZ          (24_000_000),
+            .SPI_HALF_CYCLES (LCD_SPI_HALF_CYCLES),
+            .MADCTL          (8'h60),
+            .INVERSION_CMD   (8'h20),
+            .LANDSCAPE       (1'b1)
+        ) u_lcd (
+            .clk             (clk),
+            .rst_n           (sys_rst_n),
+            .preview_valid   (lcd_capture_ready && pv_frame_valid),
+            .preview_pixel   (pv_pixel),
+            .x               (pv_x),
+            .y               (pv_y),
+            .preview_used    (pv_used),
+            .preview_release (pv_frame_release),
+            .led             (),              // 屏驱动的板载指示灯不用，LED 由顶层统一给
+            .lcd_rst_n       (lcd_rst_n),
+            .lcd_cs_n        (lcd_cs_n),
+            .lcd_sclk        (lcd_sclk),
+            .lcd_mosi        (lcd_mosi),
+            .lcd_dc          (lcd_dc)
+        );
+
+        // 预览模式下不出颜色事件：下游 color_seq 会一直空着，K230 仍然是颜色的来源
+        assign cam_color     = 3'd0;
+        assign cam_color_evt = 1'b0;
+        assign snap_tx       = 1'b1;
+        assign snap_busy     = 1'b0;
+        assign uart_tx       = rep_tx;
+    end else if (USE_CAMERA) begin : g_cam
         wire        cam_ready;
         wire [7:0]  cam_vs_cnt;
         wire        cam_vs_act;
@@ -553,6 +677,18 @@ module FpgaCar (
         assign cmos_sdat_OE  = 1'b0;
 
         assign uart_tx = rep_tx;
+    end
+    endgenerate
+
+    // 不开预览时把屏的 5 根脚全部驱动成确定电平：CS 拉高（不选中）、RST 拉低（屏保持复位）。
+    // 不能留空，否则综合认为端口无驱动。开着预览时这五根由 g_lcd 驱动。
+    generate
+    if (!USE_LCD_PREVIEW) begin : g_no_lcd
+        assign lcd_sclk  = 1'b0;
+        assign lcd_mosi  = 1'b0;
+        assign lcd_dc    = 1'b0;
+        assign lcd_rst_n = 1'b0;
+        assign lcd_cs_n  = 1'b1;
     end
     endgenerate
 

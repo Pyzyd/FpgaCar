@@ -38,15 +38,16 @@ def write_xml(tree, path):
 def generate(destination, camera=False):
     destination.mkdir(parents=True, exist_ok=True)
     name = "Ov5640LcdBench" if camera else "St7789Bench"
-    files = [HERE / "St7789Bench.v"]
+    # 面板驱动在主工程 src/ 下，与 main 共用一份，不再各自复制
+    files = [HERE / "St7789Bench.v", ROOT / "src" / "st7789_panel.v"]
     pins = BASE_PINS
     buses = {"led"}
     sdc = "create_clock -period 41.667 [get_ports clk]\n"
     if camera:
         pins = pins | CAMERA_PINS
         buses.add("cmos_data")
-        files.extend(HERE / source for source in
-                     ("Ov5640LcdBench.v", "ov5640_preview_frame.v"))
+        files.append(HERE / "Ov5640LcdBench.v")
+        files.append(ROOT / "src" / "ov5640_preview_frame.v")
         files.extend(ROOT / "src" / source for source in
                      ("cam_probe.v", "cam_sccb_cfg.v", "i2c_timing_ctrl_16bit.v",
                       "I2C_OV5640_1280720_Config.v"))

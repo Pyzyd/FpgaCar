@@ -48,6 +48,7 @@ module FpgaCar_tb;
     wire [5:0]  led;                // LED0~LED5（LED6/7 球让给 CMOS_D0/D1）
     reg         uart_rx;
     wire        uart_tx;
+    wire        lcd_sclk, lcd_mosi, lcd_dc, lcd_rst_n, lcd_cs_n;
     reg  [2:0]  k230_d;             // K230 并行数据，未接模块时保持 0
     reg         k230_stb;           // K230 选通，空闲为低
 
@@ -115,7 +116,12 @@ module FpgaCar_tb;
         .uart_rx      (uart_rx),
         .uart_tx      (uart_tx),
         .k230_d       (k230_d),
-        .k230_stb     (k230_stb)
+        .k230_stb     (k230_stb),
+        .lcd_sclk     (lcd_sclk),
+        .lcd_mosi     (lcd_mosi),
+        .lcd_dc       (lcd_dc),
+        .lcd_rst_n    (lcd_rst_n),
+        .lcd_cs_n     (lcd_cs_n)
     );
 
     // ------------------------------------------------------------------
@@ -126,6 +132,22 @@ module FpgaCar_tb;
 
     initial begin
         #2000;
+        // 彩屏上电静态约束：面板要压 20 ms 复位再放，复位期间 CS 必须为高。
+        // 完整的初始化序列与整帧发送由 sim/st7789_panel_tb.v 用小分频覆盖 ——
+        // 那一段在本测试台的 24 MHz 真实时基下要跑 380 ms，会拖垮回归。
+        if (u_dut.USE_LCD_PREVIEW) begin
+            if (lcd_rst_n !== 1'b0)
+                $display("FAIL: LCD reset should still be held 2 us after power-up");
+            else if (lcd_cs_n !== 1'b1)
+                $display("FAIL: LCD CS should sit high while reset is held");
+            else
+                $display("PASS: LCD held in reset with CS high right after power-up");
+        end else begin
+            if (lcd_cs_n !== 1'b1 || lcd_rst_n !== 1'b0 || lcd_sclk !== 1'b0)
+                $display("FAIL: LCD pins should be idle when preview disabled");
+            else $display("PASS: LCD pins idle (CS high, reset low, SCLK low)");
+        end
+
         if (motor_stby !== 1'b0)  $display("FAIL: IDLE expects motor_stby=0, got %b", motor_stby);
         else                      $display("PASS: IDLE -> TB6612 standby (motors off)");
         if (ml_in1 !== 1'b0 || ml_in2 !== 1'b0) $display("FAIL: left motor driven during IDLE");
@@ -147,12 +169,23 @@ module FpgaCar_tb;
         if (led[4:2] !== 3'b111)  $display("FAIL: led[4:2] should show IDLE(000) -> 3b111, got %b", led[4:2]);
         else                      $display("PASS: LEDs show IDLE + no obstacle + line lost");
 
-        // 【摄像头停用】USE_CAMERA=0：DVP/SCCB 输出必须是确定电平，不是悬空
-        if (cmos_sclk !== 1'b0)   $display("FAIL: cmos_sclk should be 0 when camera disabled");
-        if (cmos_sdat_OE !== 1'b0) $display("FAIL: cmos_sdat_OE should be 0 (bus released)");
-        if (cmos_ctl1 !== 1'b0 || cmos_rst_n !== 1'b0 || cmos_pwdn !== 1'b0)
-            $display("FAIL: cmos CTL pins should all be 0");
-        else                      $display("PASS: camera disabled -> all cmos outputs deterministic");
+        // 【摄像头】USE_CAMERA=0 但 USE_LCD_PREVIEW=1 时 SCCB 正在配 OV5640，
+        // 此时 sclk/sdat_OE 本来就该动，不能再按"全部静默"断言。
+        // 两条分支都要保证：输出是确定电平，不是 X（悬空）。
+        if (u_dut.USE_LCD_PREVIEW) begin
+            if (cmos_sclk === 1'bx)    $display("FAIL: cmos_sclk floating");
+            if (cmos_sdat_OE === 1'bx) $display("FAIL: cmos_sdat_OE floating");
+            if (cmos_ctl1 !== 1'b0 || cmos_rst_n !== 1'b0 || cmos_pwdn !== 1'b0)
+                $display("FAIL: cmos CTL pins should all be 0");
+            else $display("PASS: LCD preview on -> cmos outputs driven, CTL all 0");
+        end else begin
+            if (cmos_sclk !== 1'b0)   $display("FAIL: cmos_sclk should be 0 when camera disabled");
+            if (cmos_sdat_OE !== 1'b0) $display("FAIL: cmos_sdat_OE should be 0 (bus released)");
+            if (cmos_ctl1 !== 1'b0 || cmos_rst_n !== 1'b0 || cmos_pwdn !== 1'b0)
+                $display("FAIL: cmos CTL pins should all be 0");
+            else                      $display("PASS: camera disabled -> all cmos outputs deterministic");
+        end
+        // 预览模式下不出颜色事件（颜色仍由 K230 提供）
         if (u_dut.cam_color !== 3'd0 || u_dut.cam_color_evt !== 1'b0)
             $display("FAIL: cam_color should be neutral 0 with no event");
 

@@ -30,6 +30,8 @@
         <efx:design_file name="src/oled_font.v" version="default" library="default" />
         <efx:design_file name="src/oled_digits.v" version="default" library="default" />
         <efx:design_file name="src/oled_driver.v" version="default" library="default" />
+        <efx:design_file name="src/st7789_panel.v" version="default" library="default" />
+        <efx:design_file name="src/ov5640_preview_frame.v" version="default" library="default" />
         <efx:top_vhdl_arch name="" />
         <efx:msg_config name="" />
         <efx:partition_definitions name="" />

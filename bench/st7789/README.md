@@ -45,8 +45,18 @@ tools\dl.bat .scratch\st7789-bench\outflow\St7789Bench.bit
 在一个已有的 `.scratch` 目录上运行 Icarus Verilog。
 
 ```powershell
-iverilog -g2012 -s St7789Bench_tb -o .scratch/st7789.vvp bench/st7789/St7789Bench.v bench/st7789/St7789Bench_tb.v
+iverilog -g2012 -s St7789Bench_tb -o .scratch/st7789.vvp src/st7789_panel.v bench/st7789/St7789Bench.v bench/st7789/St7789Bench_tb.v
 vvp .scratch/st7789.vvp
+```
+
+面板驱动（`st7789_panel` + `st7789_spi_byte`）已经抽到 `src/st7789_panel.v`，
+主工程和本 bench 共用这一份，bench 目录下不再留副本。单独的驱动回归用
+`sim/st7789_panel_tb.v`，它把 `CLK_HZ` 缩小 1000 倍，在几百微秒里逐字节断言
+初始化命令序列（SWRESET / SLPOUT / COLMOD / MADCTL / INVON / CASET / RASET / NORON / DISPON / RAMWR）：
+
+```powershell
+iverilog -g2012 -s st7789_panel_tb -o .scratch/st7789_panel.vvp src/st7789_panel.v sim/st7789_panel_tb.v
+vvp .scratch/st7789_panel.vvp
 ```
 
 仿真从 SPI 引脚重组命令和像素，检查完整第一帧、第二帧变化的小方块、复位等待和电机输出。

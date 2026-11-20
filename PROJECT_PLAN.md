@@ -2969,6 +2969,86 @@ end
 ### 3.37.6 仍需现场确认
 
 `AVOID_LINE_MS=20` 是「连续 20 ms 看到线」才认，配合 `track_line` 的 4 ms 消抖。拐角处线是斜的，车一边转一边扫，可能扫过线但维持不到 20 ms。若现场仍出现「扫到了却继续转」，把 `AVOID_LINE_MS` 降到 10 或 8。
+## 3.38 ST7789 彩屏接进主工程：先看画面（2026-11-20）
+
+### 3.38.1 起因
+
+用户问「屏幕不刷新」。此前 `bench/st7789/` 只是**独立工程**，用 `Ov5640LcdBench.xml` 单独综合、单独烧 JTAG，不参与 `FpgaCar.xml`。把小车固件烧进 Flash 后，那一版 bench 位流就被覆盖了，屏幕自然全黑。
+
+用户选 B 方案：**把屏接进小车固件本体**，先能在屏上看到摄像头灰度预览，之后再谈刷新率。
+
+### 3.38.2 硬件接线（P4 排针，与 K230 的 STB 脚不冲突）
+
+| 屏丝印 | P4 针号 | FPGA 引脚 | 端口名 |
+| --- | ---: | --- | --- |
+| SCL | 35 | `GPIOL_N_17` | `lcd_sclk` |
+| SDA | 36 | `GPIOL_P_17` | `lcd_mosi` |
+| A0 | 37 | `GPIOL_N_18` | `lcd_dc` |
+| RESET | 38 | `GPIOL_P_18` | `lcd_rst_n` |
+| CS | 40 | `GPIOT_P_11` | `lcd_cs_n` |
+
+P4 第 39 脚（`GPIOT_N_11`）已经被 `k230_stb` 占用，屏的 CS 只能走 40。屏的 VCC 用外部 3.3 V，必须与 Ti60 共地。
+
+### 3.38.3 代码结构：一份驱动，两处引用
+
+把 `st7789_panel` 与 `st7789_spi_byte` 从 `bench/st7789/St7789Bench.v` 里抽出来，成为 `src/st7789_panel.v`；`ov5640_preview_frame.v` 也从 bench 挪到 `src/`。理由：主工程与 bench 各存一份必然分叉，出问题时分不清是哪份在跑。
+
+- `bench/st7789/St7789Bench.v` 现在只剩顶层（1.1 KB），面板驱动引用 `src/st7789_panel.v`
+- `bench/st7789/make_project.py` 的 `files` 列表同步改，camera 分支追加 `src/ov5640_preview_frame.v`
+- `FpgaCar.xml` 登记两个新源文件，design_file 计数 24 → 26
+
+顶层新增两个开关（`src/FpgaCar.v`，紧跟 `USE_K230`）：
+
+| 开关 | 当前值 | 说明 |
+| --- | --- | --- |
+| `USE_LCD_PREVIEW` | `1'b1` | 打开彩屏预览。会顶掉 `USE_CAMERA` 那条老链路（两者互斥） |
+| `LCD_SPI_HALF_CYCLES` | `2` | SPI 时钟 = 24 MHz / (2×N)。N=16→750 kHz（1.64 s/帧）、N=4→3 MHz（0.41 s）、**N=2→6 MHz（0.20 s）** |
+
+### 3.38.4 数据通路
+
+`cam_probe` → `cam_sccb_cfg #(.FULL_FOV_VGA(1'b1))` 把 OV5640 配成 640×480 → `ov5640_preview_frame #(.INPUT_WIDTH(640) .INPUT_HEIGHT(480) .SAMPLE_LOG2(2))` 抽成 160×120 的 Y8 灰度 → 双缓冲 + request/ack 握手 → `st7789_panel` 铺满 320×240。
+
+- 取样地址：屏幕坐标右移一位就是样本坐标，`pv_sample_addr = (row<<7) + (row<<5) + col`，即 160 列 × 120 行的二维展开
+- 灰度转 RGB565：`{gray[7:3], gray[7:2], gray[7:3]}`
+- `lcd_capture_ready = sys_rst_n && lcd_cfg_done`：SCCB 配置完成前不采帧，避免吃半配置状态的图像
+- 屏驱动的 `led` 输出不接（板载 LED 由顶层统一给），`preview_valid` 喂 `lcd_capture_ready && pv_frame_valid`
+
+`FULL_FOV_VGA=1` 是给 `cam_sccb_cfg` 加的新参数，把读取窗口从 720p 的纵向 250–1705 行扩到 4:3 全阵列 0–1951 行（横向两边都是 0–2623）。默认 `0` 时主工程原有行为完全不变。
+
+### 3.38.5 刷新率：瓶颈在 SPI，不在相机
+
+| 环节 | 耗时 |
+| --- | --- |
+| OV5640 采集一帧 640×480（PCLK 下） | 约 26 ms |
+| SPI 发一帧 320×240 RGB565 @ 750 kHz（bench 默认） | **1.64 s** |
+| SPI 发一帧 @ 3 MHz（N=4） | 0.41 s |
+| SPI 发一帧 @ 6 MHz（N=2，当前） | **0.20 s** |
+
+两者差 60 倍，所以采集侧用双缓冲解耦，采集不必等屏发完。再往上提 SPI 时钟受 ST7789 手册上限约束（一般标称 62.5 ns 周期，实际模块排线长时容易出错），6 MHz 是这块屏比较稳的一档。
+
+### 3.38.6 测试台：为什么必须拆成单元测试
+
+`sim/FpgaCar_tb.v` 里原本想直接断言「上电 166 ms 后 CS 拉低、SCLK 在动」，结果一直 FAIL。查下来是**测试台自己的时间账算错了**，不是 RTL 问题：初始化是「发一字节 → 抬 CS → 等稳定 → 再发」的节奏，字节之间 CS 是高的；而 `init_delay_cycles` 对 `init_index < 2` 返回的是整段 `WAKE_CYCLES`（120 ms），SWRESET 和 SLPOUT 后面各有一段。整段初始化约 380 ms，比测试台等的 166 ms 长了 2 倍多，而且固定时刻采样必然撞在 CS 抬高的间隙里。
+
+结论：**这段不适合放在顶层测试台**。顶层实时基下跑完初始化 380 ms + 整帧 200 ms，会让整个回归超时。处理方式：
+
+1. `sim/FpgaCar_tb.v` 只保留零成本的上电静态约束（复位期间 `lcd_rst_n=0`、`lcd_cs_n=1`、端口不是 X）
+2. 新增 `sim/st7789_panel_tb.v`，把 `CLK_HZ` 从 24 MHz 缩到 **24 kHz**（时序比例不变），全程约 6300 拍、几百微秒跑完
+3. 那个测试台自带一个 SPI 从机：在 `lcd_sclk` 上升沿按 bit 收 MOSI，攒满 8 位算一字节，按 `lcd_dc` 分成命令/数据两路，**逐字节断言初始化命令序列**
+
+断言内容：`SWRESET(0x01)` → `SLPOUT(0x11)` → `COLMOD(0x3a)` → `MADCTL(0x36)` → `INVON(0x20)` → `CASET(0x2a)` → `RASET(0x2b)` → `NORON(0x13)` → `DISPON(0x29)` → `RAMWR(0x2c)`，外加 COLMOD 的数据字节必须是 `0x55`（RGB565）。
+
+**反向验证**：把 `NORON` 的 `8'h13` 改成 `8'h12` 重跑，`FAIL: cmd7 NORON`，精确命中；恢复后 ALL PASS。这是本工程第四次靠反向验证确认测试台有效。
+
+回归结果：**24 个 tb 全绿，226 s**，`st7789_panel_tb` PASS=17 ALLPASS=1、`FpgaCar_tb` PASS=12。
+
+### 3.38.7 仍需现场确认
+
+- 6 MHz 下屏幕是否有花屏/闪烁。若有，把 `LCD_SPI_HALF_CYCLES` 调回 4（0.41 s/帧）或 8
+- OV5640 在 `FULL_FOV_VGA=1` 下输出的 640×480 是否正常（此前主工程一直是 720p 那套参数，全阵列窗口没上板验证过）
+- 预览方向：`LANDSCAPE=1` + `MADCTL=8'h60` 是 bench 上验证过的组合，换屏或换排线方向要重新对
+- 颜色：预览是灰度转 RGB565，偏绿是正常的（G 用 6 位、R/B 各 5 位），不是配置错
+
 ## 4. 下一步（2026-11-10 按实际到货情况重排）
 
 ### 第 1 步：现在就能做的上板验证（不需要任何待买硬件）
