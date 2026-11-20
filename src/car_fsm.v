@@ -289,9 +289,18 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                 // corner_cnt 还没衰减完，拐角兜底会把刚按牌子做的转向反着执行一遍
                 // （牌要求右转 → 兜底强制左转），直接违反"有牌就完全按牌走"。
                 // 当前 USE_K230=0 时 turning 永远进不去，这条是接回 K230 后的保险。
+                //
+                // 【只能在 S_RUN 武装】只加 !turning 是不够的：交通牌在 S_LOST 里
+                // 被消费时（走的是找线方向决策，不置 turning），随后 1.5 s 的原地
+                // 旋转会让车体扫过赛道线，wide 被自己转出来 —— 若此时还允许武装，
+                // corner_cnt 会被重新填满，下一次丢线时拐角兜底又把牌的方向反着
+                // 执行（牌要求右转 → 兜底强制左转）。真正的拐角只会出现在正常
+                // 循迹（S_RUN）途中，所以武装条件收紧到 state == S_RUN。
+                // 倒计时不受这个门控影响，仍然每 ms 衰减。
                 if ((AVOID_ROUTE_EN != 0) && (state >= S_AVOID_BACK)) begin
                     corner_cnt <= 16'd0;
-                end else if (!turning && wide && CORNER_WIDE_MS > 0) begin
+                end else if (!turning && !lost && (state == S_RUN) &&
+                             wide && CORNER_WIDE_MS > 0) begin
                     corner_cnt <= CORNER_WIDE_MS[15:0];
                 end else if (corner_cnt != 16'd0) begin
                     corner_cnt <= corner_cnt - 16'd1;
@@ -539,8 +548,19 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                                 end
                                 BY_PASS: if (ms_cnt >= AVOID_PASS_MS - 1) begin
                                     ms_cnt <= 16'd0;
+                                    // 侧边超越结束后要判断"还能不能自己回线"：
+                                    //   · 绕行途中离过线（bypass_left_line=1）且此刻仍
+                                    //     丢线 → 正常回到 BY_TURN_IN 反向切回去；
+                                    //   · 全程都骑在线上（bypass_left_line=0）→ 根本
+                                    //     不需要回线动作，直接交回普通循迹。旧逻辑把
+                                    //     这种情况也判成"找不回线"直接 final_stop，
+                                    //     等于绕障绕到一半自己退赛。
+                                    //   · 离过线但此刻已重新压线 → 同样交回循迹。
                                     if (bypass_left_line && lost) begin
                                         bypass_step <= BY_TURN_IN;
+                                    end else if ((bypass_has_line) || !bypass_left_line) begin
+                                        ms_cnt <= 16'd0;
+                                        state  <= S_RUN;
                                     end else begin
                                         final_stop <= 1'b1;
                                         state <= S_STOP;

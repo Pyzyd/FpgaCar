@@ -375,6 +375,11 @@ module FpgaCar (
         .SEARCH_FAIL_TO_IDLE (0),    // 找线失败后由按键面板锁停
         .DIR_DEAD_MS  (10),
         .TURN_MS      (700),
+        // 转向牌从"看到牌"到"真的到岔口"的等待上限。默认 12000 太长：
+        // 一旦锁存了一枚过期箭头，它会在整整 12 s 内压制拐角兜底，
+        // 车遇到没有牌的真拐角也不会按 DEFAULT_TURN_LEFT 转（直接冲出去）。
+        // 现场按 3 m 场地、~0.4 m/s 估，3 s 足够走完一段直道。
+        .TURN_REQUEST_MS  (3000),
         .TURN_WAIT_FOR_CORNER (USE_K230),
         .TURN_DUTY    (700),
         // 现场初值：先让车驶到障碍侧边，再摆正超越，最后低速斜切回线。

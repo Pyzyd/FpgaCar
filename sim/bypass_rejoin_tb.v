@@ -68,9 +68,26 @@ module bypass_rejoin_tb;
             $finish;
         end
 
+    // 只 $display 是不够的：单跑 vvp 时退出码仍是 0，工具链看起来"绿"。
+    // 这里累计失败数，末尾统一判死，外面靠 FAIL: 与退出码两路都能抓到。
+    integer fails = 0;
+
     task check(input condition, input [383:0] message);
-        if (condition === 1'b1) $display("PASS: %0s", message);
-        else                     $display("FAIL: %0s", message);
+        begin
+            if (condition === 1'b1) $display("PASS: %0s", message);
+            else begin
+                $display("FAIL: %0s", message);
+                fails = fails + 1;
+            end
+        end
+    endtask
+
+    task finish_summary;
+        begin
+            if (fails == 0) $display("INFO: bypass_rejoin_tb ALL PASS");
+            else            $display("INFO: bypass_rejoin_tb %0d FAIL(S)", fails);
+            $finish;
+        end
     endtask
 
     task begin_bypass(input signed [4:0] initial_pos);
@@ -132,6 +149,33 @@ module bypass_rejoin_tb;
         repeat (5) @(negedge clk);
         check(state == STOP && !en, "persistent blockage latches stop without repeated attempts");
 
+        // ---- M2：绕障全程都骑在线上（lost 从未置位）不得直接判退赛 ----
+        // 现场是「线一直在脚下、只是前面挡了个 10 cm 立方体」的情形：
+        // 出线转向只 800 ms，车很可能一直压着线。此时 bypass_left_line 永远
+        // 是 0，旧逻辑在 BY_PASS 结束时会直接 final_stop + S_STOP —— 绕障绕到
+        // 一半自己停住，比绕不开还糟。
+        rst_n = 0; on_line = 1; lost = 0; obstacle = 0; wide = 0; pos = 0;
+        repeat (3) @(negedge clk);
+        rst_n = 1;
+        wait (state == RUN);
+        @(negedge clk); obstacle = 1;
+        wait (state == TURN);
+        @(negedge clk); obstacle = 0;
+        // 故意不再改 on_line/lost：全程压线
+        wait (state == BYPASS && dut.bypass_step == PASS_SIDE);
+        // 有界等待：正常应走到 REJOIN -> RUN；出 bug 会停在 STOP，用计数兜住
+        // 而不是让整台挂死（挂死只会报 TIMEOUT，看不出是哪条断言）。
+        begin : m2_wait
+            integer guard;
+            guard = 0;
+            while (state != RUN && state != STOP && guard < 400) begin
+                @(negedge clk);
+                guard = guard + 1;
+            end
+        end
+        check(dut.bypass_left_line == 1'b0, "never left the line during bypass");
+        check(state == RUN, "line never lost: bypass returns to tracking");
+
         begin_bypass(-5'sd2);
         obstacle = 0;
         wait_drive(ALIGN);
@@ -141,7 +185,7 @@ module bypass_rejoin_tb;
         wait (state == STOP);
         @(negedge clk);
         check(!en, "missing return line times out and stays stopped");
-        $finish;
+        finish_summary;
     end
 
     initial begin

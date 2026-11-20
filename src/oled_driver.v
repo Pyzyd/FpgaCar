@@ -786,7 +786,9 @@ module oled_driver #(
     wire [39:0] panel_word = (panel_status_r == 2'd1) ? " RUN " :
                              (panel_status_r == 2'd2) ? "STOP " :
                              (panel_status_r == 2'd3) ? "LINE " : "READY";
-    wire [5:0] panel_col = dk - DK_SEG6;
+    // dk < DK_SEG6 时（段6 之外的拍）不能让 6 位减法下溢成 63，
+    // 否则 panel_letter 的位选 index 会越界取到别处。只在段6 内有意义。
+    wire [5:0] panel_col = (dk >= DK_SEG6) ? (dk - DK_SEG6) : 6'd0;
     wire [7:0] panel_letter = panel_word[39 - 8 * panel_col[5:3] -: 8];
     wire [39:0] panel_bitmap = panel_glyph(panel_letter);
 
