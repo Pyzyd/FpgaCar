@@ -1707,7 +1707,7 @@ DC3-40 针号按「pin1–10 = User_IO0–9、pin13–28 = User_IO10–25、pin3
 - **绝对不能从 Ti60 板的 D3V3 取电**：板载 AMS1117-3.3 余量很小（xlsx「电源分配」原话「建议独立 LDO」）。
 - **必须共地**：K230 的 GND 与 Ti60 的 GND 接在一起，否则信号没有参考电平，读出来全是垃圾。
 - 信号线本身是 3.3V ↔ 3.3V（排针外侧），不需要再转换；FPGA 侧 1.8V 由板上 TXS0108EPWR 负责。
-- **加 4 只 10 kΩ 下拉到 GND**（放在 Ti60 排针侧）：K230 没上电时线路不会浮空乱触发。
+- **下拉怎么来（2026-11-20 改）**：`FpgaCar.peri.xml` 里这 4 根脚已从 `pull_option="none"` 改成 `weak pulldown`，用 FPGA 内部弱下拉保证 K230 没上电时不浮空。原来计划的「在 Ti60 排针侧加 4 只 10 kΩ 下拉」现在只是可选冗余（内部弱下拉与外部电阻并联，无害）。K230 接上后是推挽驱动，轻松压过弱下拉，功能无影响。
 
 ### 备选方案（万一自由 GPIO 不足 4 根）
 
@@ -2329,7 +2329,7 @@ map 699 s / pnr / pgm 全 PASS，`outflow/FpgaCar.bit` = **1840716 B**（比上�
 | 状态 | 值 | 动作 | 参数 |
 |---|---|---|---|
 | `S_AVOID_BACK` | 5 | 两轮反转后退 | `AVOID_BACK_MS=400`、`AVOID_BACK_DUTY=500` |
-| `S_AVOID_TURN` | 6 | 原地转（一正一反） | `AVOID_TURN_MS=600`、`AVOID_TURN_DUTY=600` |
+| `S_AVOID_TURN` | 6 | 原地转（一正一反） | 默认 `AVOID_TURN_MS=600`、`AVOID_TURN_DUTY=600`；顶层覆盖为 1000 / 620 |
 | `S_AVOID_PROBE` | 7 | 低速两轮正转 | `AVOID_PROBE_MS=400`、`AVOID_PROBE_DUTY=450` |
 
 - 进 `S_AVOID_BACK` 时按 `avoid_left = !last_pos_neg` 定转向：线在右边就往左绕，避免绕到线的另一侧。
@@ -2893,7 +2893,7 @@ end
 
 | 项 | 决定 | 理由 |
 |---|---|---|
-| M3：K230 四脚无内部下拉 | 不改 | `FpgaCar.peri.xml:255-256` 注释已写明板上在模块侧加 10 kΩ 下拉，**有意不依赖 FPGA 内部弱下拉**（K230 掉电时也要保证不浮空）。改约束需重综合验证，收益不明。 |
+| M3：K230 四脚无内部下拉 | **已改（2026-11-20 撤销「不改」）** | 当初判断「板上会加 10 kΩ 下拉」属计划未落地：实测 K230 未接时 4 根脚真浮空，`k230_stb` 浮空会产生大量假上升沿，三重校验挡得住单次假帧但挡不住长期等下去；假 `dir_evt` 会被 `TURN_WAIT_FOR_CORNER` 存起来，等真拐角时按假方向转（失败现象极难归因）。已改 `pull_option="weak pulldown"`，`outflow/FpgaCar.peri.pbn` 里确认出现 4 条 `WEAK_PULLDOWN`。 |
 | H2：`motion_rst_n = sys_rst_n && run_enable` | 待确认 | 读 `src/car_panel.v` 全文，这是**有意设计**：找线失败 → 面板锁停 → 按 K1 重试（`run_enable = rst_n && (status == RUN) && stop_sync[1]`）。与审查所说的「抹平 final_stop」是同一现象的两种解读，取决于产品语义，需用户裁定。 |
 
 ### 3.36.7 回归
@@ -2947,6 +2947,24 @@ end
 - `bash tools/run_regression.sh`：**23 个 tb 全绿，0 失败，223 s**。
 - map（约 9 min）/ pnr / pgm 全部 PASS，新位流 `outflow/FpgaCar.bit` = **2038176 B**、`hex` = 2038236 B。
 - `bash .scratch/reflash.sh`：擦 664 KiB / 读 663 KiB / **`Flash verify successful`** / 三步 `PROGRAMMING DONE`。已落盘，掉电保留。
+
+### 3.37.6 转角再次加大（2026-11-20 晚，现场反馈）
+
+扫线闭环上线后用户复测：「避障还是不行，就是把开始的转向加大一点，后面的转向也加大，后面的转的更多」。
+
+三处参数同时上调（均在 `src/FpgaCar.v:391-393` 的 `car_fsm` 例化处，`car_fsm.v` 的默认值不动）：
+
+| 参数 | 旧值 | 新值 | 影响 |
+|---|---|---|---|
+| `AVOID_TURN_MS` | 800 | **1000** | 出线转向（`S_AVOID_TURN`）与摆正（`BY_ALIGN`）各用这段时长 |
+| `AVOID_TURN_IN_MS` | 1100 | **1600** | 回线扫转的**上限**（扫到线会提前结束），比出线更长 |
+| `AVOID_TURN_DUTY` | 540 | **620** | 两处原地转共用，占空比 45% → 约 52% |
+
+为什么这么配：出线转不够就摆不正、侧边超越会压到障碍；回线转不够则 `BY_REJOIN` 直行时线不在前方。回线上限给得比出线大一截，是因为它只会被「扫到线」提前终止，留大没有副作用 —— 转不到才是问题。
+
+`sim/bypass_rejoin_tb.v` 不受影响：它给两个 DUT 都显式传了 `TURN_TICKS` / `TURN_IN_TICKS` / `TURN_DUTY`，不继承顶层覆盖值，断言仍然成立。
+
+回归：`bypass_rejoin_tb` PASS=19、`car_fsm_tb` PASS=78（159 s）。
 
 ### 3.37.6 仍需现场确认
 

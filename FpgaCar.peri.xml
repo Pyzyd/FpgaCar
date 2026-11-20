@@ -252,19 +252,22 @@
              中间过 TXS0108，所以 RTL 约束一律 LVCMOS18。
              D0/D1/D2 只有在 STB 上升沿才被采样，K230 侧先写数据再拉 STB，
              数据早已稳定，因此寄存器选项保持 none，靠 RTL 里的两级同步。
-             pull_option 用 none：板上按计划在本侧加 10 kΩ 下拉，
-             不依赖 FPGA 内部弱下拉（K230 掉电时也能保证不浮空）。 -->
+             2026-11-20 改为 pull_option="weak pulldown"：K230 目前没接，
+             none 会让这 4 根脚真浮空（STB 浮空每秒上万个假上升沿，
+             三重校验挡得住单次假帧但挡不住长期等下去）。
+             内部弱下拉约几十 kΩ 量级，够保证不浮空；K230 接上后是推挽驱动，
+             轻松压过弱下拉，功能无影响。板上若再加 10 kΩ 外部下拉只是冗余无害。 -->
         <efxpt:comp_gpio name="k230_d[0]" gpio_def="GPIOL_P_14" mode="input" bus_name="k230_d" io_standard="1.8 V LVCMOS">
-            <efxpt:input_config name="k230_d[0]" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="none" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="k230_d_PULL_UP_ENA[0]" dyn_delay_en_name="k230_d_DLY_ENA[0]" dyn_delay_reset_name="k230_d_DLY_RST[0]" dyn_delay_ctrl_name="k230_d_DLY_CTRL[0]" clkmux_buf_name=""/>
+            <efxpt:input_config name="k230_d[0]" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="weak pulldown" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="k230_d_PULL_UP_ENA[0]" dyn_delay_en_name="k230_d_DLY_ENA[0]" dyn_delay_reset_name="k230_d_DLY_RST[0]" dyn_delay_ctrl_name="k230_d_DLY_CTRL[0]" clkmux_buf_name=""/>
         </efxpt:comp_gpio>
         <efxpt:comp_gpio name="k230_d[1]" gpio_def="GPIOL_N_16" mode="input" bus_name="k230_d" io_standard="1.8 V LVCMOS">
-            <efxpt:input_config name="k230_d[1]" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="none" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="k230_d_PULL_UP_ENA[1]" dyn_delay_en_name="k230_d_DLY_ENA[1]" dyn_delay_reset_name="k230_d_DLY_RST[1]" dyn_delay_ctrl_name="k230_d_DLY_CTRL[1]" clkmux_buf_name=""/>
+            <efxpt:input_config name="k230_d[1]" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="weak pulldown" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="k230_d_PULL_UP_ENA[1]" dyn_delay_en_name="k230_d_DLY_ENA[1]" dyn_delay_reset_name="k230_d_DLY_RST[1]" dyn_delay_ctrl_name="k230_d_DLY_CTRL[1]" clkmux_buf_name=""/>
         </efxpt:comp_gpio>
         <efxpt:comp_gpio name="k230_d[2]" gpio_def="GPIOL_P_16" mode="input" bus_name="k230_d" io_standard="1.8 V LVCMOS">
-            <efxpt:input_config name="k230_d[2]" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="none" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="k230_d_PULL_UP_ENA[2]" dyn_delay_en_name="k230_d_DLY_ENA[2]" dyn_delay_reset_name="k230_d_DLY_RST[2]" dyn_delay_ctrl_name="k230_d_DLY_CTRL[2]" clkmux_buf_name=""/>
+            <efxpt:input_config name="k230_d[2]" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="weak pulldown" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="k230_d_PULL_UP_ENA[2]" dyn_delay_en_name="k230_d_DLY_ENA[2]" dyn_delay_reset_name="k230_d_DLY_RST[2]" dyn_delay_ctrl_name="k230_d_DLY_CTRL[2]" clkmux_buf_name=""/>
         </efxpt:comp_gpio>
         <efxpt:comp_gpio name="k230_stb" gpio_def="GPIOT_N_11" mode="input" bus_name="" io_standard="1.8 V LVCMOS">
-            <efxpt:input_config name="k230_stb" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="none" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="k230_stb_PULL_UP_ENA" dyn_delay_en_name="k230_stb_DLY_ENA" dyn_delay_reset_name="k230_stb_DLY_RST" dyn_delay_ctrl_name="k230_stb_DLY_CTRL" clkmux_buf_name=""/>
+            <efxpt:input_config name="k230_stb" name_ddio_lo="" conn_type="normal" is_register="false" clock_name="" is_clock_inverted="false" pull_option="weak pulldown" is_schmitt_trigger="false" ddio_type="none" is_bus_hold="false" delay="0" is_serial="false" is_dyn_delay="false" fastclk_name="" pullup_ena_name="k230_stb_PULL_UP_ENA" dyn_delay_en_name="k230_stb_DLY_ENA" dyn_delay_reset_name="k230_stb_DLY_RST" dyn_delay_ctrl_name="k230_stb_DLY_CTRL" clkmux_buf_name=""/>
         </efxpt:comp_gpio>
         <efxpt:global_unused_config state="input with weak pullup"/>
         <efxpt:bus name="track" mode="input" msb="7" lsb="0"/>
