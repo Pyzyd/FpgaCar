@@ -27,7 +27,10 @@ def looks_like_arrow(img,box):
 def detect_colors(img,tracking=False,field=False,sign_box=None):
     roi = roi_rect(img.width(),img.height(),tracking,field)
     minimum = getattr(C,"COLOR_MIN_PIXELS",500)
-    blobs = img.find_blobs(list(getattr(C,"COLOR_LAB",DEFAULT_LAB)),roi=roi,
+    thresholds = getattr(C,"COLOR_LAB",DEFAULT_LAB)
+    if field:
+        thresholds = getattr(C,"FIELD_COLOR_LAB",thresholds)
+    blobs = img.find_blobs(list(thresholds),roi=roi,
                           pixels_threshold=minimum,area_threshold=minimum,
                           merge=False)
     candidates = []
