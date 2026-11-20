@@ -1261,8 +1261,8 @@ WARNING: Mapping into logic memory block 'u_oled/fb' (8192 bits) because read po
 
 | 按键 | 接到 | 网络 | 我们能不能用 |
 |---|---|---|---|
-| K1 | `GPIOL_P_02` | CSI | 能用（= KEY[0]，现绑 `rst_n`） |
-| K2 | `GPIOL_N_02` | CSO | 能用（= KEY[1]，当前空闲） |
+| K1 | `GPIOL_P_02` | CSI | 能用（= KEY[0]，现绑 `key_start_n` 启动） |
+| K2 | `GPIOL_N_02` | CSO | 能用（= KEY[1]，现绑 `key_stop_n` 停车） |
 | K3 | 专用配置脚 | CRESET_N | **不能**，见下 |
 
 `outflow/FpgaCar.pinout.csv` 里 `J5,CRESET_N,,Input,1A,1.8 V,,,Configuration` —— CRESET_N 属于
@@ -1313,8 +1313,10 @@ Configuration 类引脚，直接进 FPGA 的配置控制器，**RTL 完全碰不
 > 固化的**只是裸位流**，不含 RTL 之外的状态；Flash 里没有第二镜像，回退只能靠重新综合再固化。
 > 固化后上电自启动的是这一版，与 JTAG `dl.bat` 烧的是同一份 `outflow/FpgaCar.bit`。
 
-> **K1 的定位**：保留，作为**调试专用逻辑复位**——只复位用户逻辑（`sys_rst_n`），
-> 不动配置、不掉位流，开发期间可以反复按。K3 则是整片重配置，只在验证上电自启动时用。
+> **K1/K2 的定位（2026-11-20 起）**：`src/car_panel.v` 把两个按键做成了运行面板——
+> K1 短按启动（`key_start_n`），K2 短按停车（`key_stop_n`），长按 K2 约 1 s 清结果回 READY。
+> 用户逻辑复位改为上电自复位（`FpgaCar.v` 的 `power_on` 移位 4 拍），K1 不再承担复位。
+> K3 仍是整片重配置（CRESET_N，RTL 碰不到），只在验证上电自启动时用。
 
 ### OLED 四脚接线（已按原理图逐脚核对，2026-11-12）
 

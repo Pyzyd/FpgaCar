@@ -37,7 +37,8 @@ for n in range(1,41):
     text(x+190,y+6,signal,18,bold=is_comm or is_lcd)
     if is_comm: note={28:'K230 GPIO42',33:'K230 GPIO43',34:'K230 GPIO34',39:'K230 GPIO35'}[n]
     elif is_lcd: note='SPI屏预留'
-    elif n==2: note='核心板 K1 复位'
+    elif n==2: note='核心板 K1 启动'
+    elif n==1: note='核心板 K2 停车'
     else: note=row[2].split()[-1] if not is_power else '电源 / 地'
     text(x+420,y+6,note,17,'#586775')
 text(55,1205,'蓝：K230通信　黄：SPI屏预留　红：电源/地；User_IO14–17保留给编码器。',21)

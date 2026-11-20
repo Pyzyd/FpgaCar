@@ -40,8 +40,10 @@ K230 pin7 与 Ti60 P4 pin12 也都是 GND，但本线束统一采用上表 pin4 
 
 这些是排针资源预留，尚未加入 LCD RTL 或 Interface Designer，不代表屏幕已可运行。
 BL 背光单独按屏幕模块资料处理，不额外占通信脚。
-旧表把 P4 pin40 写作 rst_n 已过时：当前 `rst_n=GPIOL_P_02`，是核心板 K1/KEY[0]，
-对应 User_IO1/P4 pin2 的复用网。P4 pin40 的 GPIOT_P_11 当前未分配，因此可以保留给屏幕 CS。
+旧表把 P4 pin40 写作 rst_n 已过时。2026-11-20 起用户逻辑复位改为上电自复位（`FpgaCar.v` 的
+`power_on` 移位），两个按键改成运行面板：`key_start_n=GPIOL_P_02`（核心板 K1/KEY[0]，
+User_IO1/P4 pin2）、`key_stop_n=GPIOL_N_02`（K2/KEY[1]，User_IO0/P4 pin1）。
+P4 pin40 的 GPIOT_P_11 当前未分配，因此可以保留给屏幕 CS。
 
 ## 电平与首次上电核对
 

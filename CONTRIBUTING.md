@@ -27,6 +27,20 @@
 | 烧录配置 | `_jtag.jcf` | ❌ 忽略 | 本机路径相关 |
 
 **引脚改动特别规则**：`outflow/FpgaCar.lpf` 与 `outflow/FpgaCar.pinout.csv` 是派生报告（每次编译 `Date` 头会变），不入库。
+
+**改了 `FpgaCar.peri.xml` 之后必须重跑引脚平面**，否则 `pnr`/`pgm` 会继续吃 `outflow/` 里的旧 LPF，位流用的是**旧引脚**，而且全程不报错：
+
+```bash
+C:/Efinity/2026.1/bin/efx_run.bat --flow interface FpgaCar.xml   # 由 peri.xml 重生成 outflow/FpgaCar.lpf
+C:/Efinity/2026.1/bin/efx_run.bat --flow pnr FpgaCar.xml
+C:/Efinity/2026.1/bin/efx_run.bat --flow pgm FpgaCar.xml
+```
+
+为什么容易踩（2026-11-20 实际发生过一次，表现为「按 K1、K2 全无反应」）：
+`FpgaCar.xml` 的 `<efx:interface_info>` 只声明 peri.xml 是源，**LPF 不会自动重新生成**；
+而 `outflow/` 被 gitignore，换分支/合并后旧 LPF 原样留着，时间戳比 peri.xml 还老。
+判据：`--flow interface` 的日志要有 `interface :	PASS`，且 `outflow/FpgaCar.lpf` 的 `Date` 头晚于 `FpgaCar.peri.xml` 的修改时间；
+再用 `outflow/FpgaCar.pinout.csv` 核对新加的端口是否都绑上了、方向是否为 `Input`/`Output`。
 改管脚 / 电平后，除提交 `FpgaCar.peri.xml` 外，**必须同步更新 `PROJECT_PLAN.md` 的接线表**，保证没装 Efinity 的机器也能查到 `i2c_scl → E3 / GPIOL_N_13`、`i2c_sda → F3 / GPIOL_P_13` 这类结论。
 
 **位流归档**：`*.bit` / `*.hex` 不进 git。赛前把最终位流单独拷到 U 盘，或作为 GitHub Release 附件归档，并在 `PROJECT_PLAN.md` 记下对应的 commit hash。
