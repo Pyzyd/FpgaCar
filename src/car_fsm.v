@@ -162,6 +162,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     reg [2:0] bypass_step;
     reg bypass_left_line;
     reg [15:0] bypass_line_cnt, bypass_block_cnt;
+    reg [15:0] bypass_turn_in_cnt;   // TURN_IN 期间连续看到线的毫秒数
     wire avoid_backing = (state == S_AVOID_BACK);
     wire avoid_turning_out = (state == S_AVOID_TURN);
     wire avoid_active = avoid_backing || avoid_turning_out || (state == S_AVOID_PROBE);
@@ -215,6 +216,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
             bypass_left_line <= 1'b0;
             bypass_line_cnt <= 16'd0;
             bypass_block_cnt <= 16'd0;
+            bypass_turn_in_cnt <= 16'd0;
             corner_cnt   <= 16'd0;
             turn_dir     <= 2'd0;
             turn_dir_cnt <= 16'd0;
@@ -557,6 +559,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                                     //     等于绕障绕到一半自己退赛。
                                     //   · 离过线但此刻已重新压线 → 同样交回循迹。
                                     if (bypass_left_line && lost) begin
+                                        bypass_turn_in_cnt <= 16'd0;
                                         bypass_step <= BY_TURN_IN;
                                     end else if ((bypass_has_line) || !bypass_left_line) begin
                                         ms_cnt <= 16'd0;
@@ -566,9 +569,21 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                                         state <= S_STOP;
                                     end
                                 end
-                                BY_TURN_IN: if (ms_cnt >= AVOID_TURN_IN_MS - 1) begin
-                                    ms_cnt <= 16'd0;
-                                    bypass_step <= BY_REJOIN;
+                                BY_TURN_IN: begin
+                                    // 原地转的同时找线：扫到线就提前收，AVOID_TURN_IN_MS 只是上限。
+                                    // 原来纯定长 —— 电池电压、地面摩擦、起点角度一变，
+                                    // 同一个 650 ms 转过的角度就差很多，现场表现就是
+                                    // 「转得不够，之后一路找不到线」。改成闭环扫线后，
+                                    // 转多少由"看到线"决定，不由时间决定。
+                                    bypass_turn_in_cnt <= bypass_has_line
+                                                        ? (bypass_turn_in_cnt + 16'd1) : 16'd0;
+                                    if (bypass_turn_in_cnt >= AVOID_LINE_MS - 1) begin
+                                        ms_cnt <= 16'd0;
+                                        bypass_step <= BY_REJOIN;
+                                    end else if (ms_cnt >= AVOID_TURN_IN_MS - 1) begin
+                                        ms_cnt <= 16'd0;
+                                        bypass_step <= BY_REJOIN;
+                                    end
                                 end
                                 BY_REJOIN: begin
                                     if (bypass_has_line && bypass_line_cnt >= AVOID_LINE_MS - 1) begin

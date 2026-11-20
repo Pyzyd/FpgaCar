@@ -2905,6 +2905,50 @@ end
 - **未合回 main**：这条分支还带着 `USE_K230=1`、`car_panel` 按键面板、`AVOID_ROUTE_EN=1` 侧绕整段、`AVOID_FIXED_RIGHT=1` 等一整套行为改动，合并与否需用户决定。
 - **未综合、未烧录**：本轮只跑仿真。
 - **H2 未动**：等用户明确「找线失败算不算判负」。
+## 3.37 侧绕回线转向改成扫线闭环（2026-11-20）
+
+### 3.37.1 现场现象
+
+用户实测避障后反馈：「BY_TURN_IN 朝黑线转 这个步骤转的有点少，之后找不到黑线」。
+
+### 3.37.2 根因：定长转角不可复现
+
+`BY_TURN_IN` 原来是纯定长动作：`if (ms_cnt >= AVOID_TURN_IN_MS - 1)` 就到点转下一段，`AVOID_TURN_IN_MS=650`。问题在于**电机转过的角度不只由时长决定**：
+
+- 电池电压下降 → 同样的占空比转速变低；
+- 地面摩擦（瓷砖 / 磨砂地板胶 / 地毯）差异很大；
+- 从 `BY_PASS` 结束时的车头角度本来就是浮动的。
+
+同一个 650 ms，昨天够、今天就不够。转不到位，`BY_REJOIN` 直行时线根本不在前方视野内，2.5 s（`AVOID_REJOIN_MS`）内找不到就 `final_stop` + `S_STOP` —— 现场表现就是「转得少，之后一路找不到线，最后停住」。
+
+### 3.37.3 改法：能看见线就停，时间只作上限
+
+`BY_TURN_IN` 段新增 `bypass_turn_in_cnt` 计数器，边转边看 `bypass_has_line`（= `on_line && !lost && !wide`）：
+
+- 连续 `AVOID_LINE_MS`(=20) ms 看到线 → 立即结束 `BY_TURN_IN`，进 `BY_REJOIN`；
+- 否则到 `AVOID_TURN_IN_MS` 上限才结束。
+
+`AVOID_TURN_IN_MS` 同时从 650 提到 **1100**（`src/FpgaCar.v:392`），因为它不再决定「转多少」，只决定「最多转多久」。转的角度由线决定，与电池和地面无关。
+
+进入 `BY_TURN_IN` 时把 `bypass_turn_in_cnt` 清零（`src/car_fsm.v` 的 `BY_PASS` 出口），避免沿用上一段的残留计数。
+
+### 3.37.4 测试台与反向验证
+
+`sim/bypass_rejoin_tb.v` 新增用例：进 `TURN_IN` 后先确认还在转（此时 `lost=1` 看不到线），然后拉 `on_line=1 / lost=0`，数还要几拍才离开 `TURN_IN`，断言 `t <= LINE_TICKS + 4`。
+
+- 为拉开两条通路的差距，测试台把 `TURN_IN_TICKS` 从 8 提到 **40**（原来 8 拍与扫线所需 3 拍太近，区分不出来），并显式定义 `LINE_TICKS = 3`。
+- **反向验证**：把 `bypass_turn_in_cnt >= AVOID_LINE_MS - 1` 改成 `1'b0 && ...` 禁用扫线通路 → `FAIL: turn-in ends early once the line is seen`，`FAIL=1`。恢复后 PASS=19。
+- 教训：第一版用例用 `t < TURN_IN_TICKS` 判据，且循环前已消耗 2 拍，禁用扫线后**仍然全过**（假绿灯）。是反向验证把它抓出来的 —— 光看「新用例通过了」不足以证明用例有效。
+
+### 3.37.5 验证与烧录
+
+- `bash tools/run_regression.sh`：**23 个 tb 全绿，0 失败，223 s**。
+- map（约 9 min）/ pnr / pgm 全部 PASS，新位流 `outflow/FpgaCar.bit` = **2038176 B**、`hex` = 2038236 B。
+- `bash .scratch/reflash.sh`：擦 664 KiB / 读 663 KiB / **`Flash verify successful`** / 三步 `PROGRAMMING DONE`。已落盘，掉电保留。
+
+### 3.37.6 仍需现场确认
+
+`AVOID_LINE_MS=20` 是「连续 20 ms 看到线」才认，配合 `track_line` 的 4 ms 消抖。拐角处线是斜的，车一边转一边扫，可能扫过线但维持不到 20 ms。若现场仍出现「扫到了却继续转」，把 `AVOID_LINE_MS` 降到 10 或 8。
 ## 4. 下一步（2026-11-10 按实际到货情况重排）
 
 ### 第 1 步：现在就能做的上板验证（不需要任何待买硬件）

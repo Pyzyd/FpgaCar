@@ -389,7 +389,7 @@ module FpgaCar (
         .AVOID_BACK_MS    (400),
         .AVOID_BACK_DUTY  (500),
         .AVOID_TURN_MS    (800),     // 右转出线和左转摆正各用这段时长
-        .AVOID_TURN_IN_MS (650),     // 超越障碍后左转朝向原线
+        .AVOID_TURN_IN_MS (1100),    // 超越后朝原线转的上限；扫到线会提前结束
         .AVOID_TURN_DUTY  (540),     // PWM 周期 1200 计数，两轮各 45%
         .AVOID_PROBE_MS   (2400),
         .AVOID_PROBE_DUTY (600),     // 外探和侧边直行均为 50%

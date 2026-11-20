@@ -3,7 +3,10 @@
 module bypass_rejoin_tb;
     localparam [2:0] RUN = 1, LOST = 2, SEARCH = 3, STOP = 4, TURN = 6, BYPASS = 7;
     localparam [2:0] OUT = 0, ALIGN = 1, PASS_SIDE = 2, TURN_IN = 3, REJOIN = 4;
-    localparam integer TURN_TICKS = 6, TURN_IN_TICKS = 8;
+    localparam integer TURN_TICKS = 6, TURN_IN_TICKS = 40;
+    // AVOID_LINE_MS 用的是默认 3；把 TURN_IN 的上限拉到 40，两条通路才拉开
+    // 足够差距（扫线 ~3 拍，定长 40 拍），否则断言区分不出来。
+    localparam integer LINE_TICKS = 3;
     localparam [10:0] TURN_DUTY = 11'd540;
     reg clk = 0;
     always #5 clk = !clk;
@@ -175,6 +178,30 @@ module bypass_rejoin_tb;
         end
         check(dut.bypass_left_line == 1'b0, "never left the line during bypass");
         check(state == RUN, "line never lost: bypass returns to tracking");
+
+        // ---- TURN_IN 提前收：转的过程中扫到线就不必转满整段 ----
+        // 现场问题是「转得不够、之后一路找不到线」：定长转的角度随电池电压和
+        // 地面摩擦漂移。改成扫线闭环后，转多少由"看到线"决定。
+        begin_bypass(0);
+        obstacle = 0;
+        wait_drive(TURN_IN);
+        // 先让它转几拍，确认此时确实还在 TURN_IN（lost=1，看不到线）
+        repeat (2) @(negedge clk);
+        check(state == BYPASS && dut.bypass_step == TURN_IN, "turn-in still running before line seen");
+        // 中途压到线：数还要几拍才离开 TURN_IN。
+        // 定长通路会等到 AVOID_TURN_IN_MS(=TURN_IN_TICKS) 才走，扫线通路
+        // 只要 AVOID_LINE_MS(=3) 拍就够。用「< TURN_IN_TICKS」区分两者，
+        // 不去断言离开后停在哪个 step —— 紧接着 REJOIN 可能已经交回 RUN。
+        begin : early_exit
+            integer t;
+            t = 0;
+            on_line = 1; lost = 0;
+            while (state == BYPASS && dut.bypass_step == TURN_IN && t < TURN_IN_TICKS + 4) begin
+                @(negedge clk);
+                t = t + 1;
+            end
+            check(t <= LINE_TICKS + 4, "turn-in ends early once the line is seen");
+        end
 
         begin_bypass(-5'sd2);
         obstacle = 0;
