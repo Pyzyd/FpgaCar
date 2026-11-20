@@ -2822,6 +2822,89 @@ if (wide && CORNER_WIDE_MS > 0) corner_cnt <= CORNER_WIDE_MS[15:0];
 
 （本版**报文格式与长度完全不变**，仍是第二行 77 字符；只是内部逻辑与测试设施修复。）
 
+## 3.36 fix/k230-p0：修 H1（转向牌被兜底反转）与 M2（侧绕误判退赛）（2026-11-20）
+
+本节的改动全部落在分支 `fix/k230-p0`（工作树 `_wt_fix`，基于 `origin/codex/k230-field-vision`），**尚未合回 main**。提交 `4e62982`，5 文件 120 增 5 删，已推 `origin/fix/k230-p0`。
+
+### 3.36.1 H1：转向牌方向被拐角兜底反转（[高]）
+
+**现象**：接回 K230 后，某些情形下按牌右转之后，下一次丢线会被拐角兜底强制左转，方向正好反过来。
+
+**根因**：拐角记忆的武装条件原只有 `!turning`。但交通牌有**两条**执行路径 —— S_RUN 里的 `turning` 分支，以及 S_LOST 里消费 `turn_req` 的找线方向决策。后者**从不置 turning**；随后 1.5 s 的原地旋转会让车体自己扫过赛道线，`wide` 被自己的转向动作转出来 → `corner_cnt` 重新填满 → 下一次丢线时兜底命中，把刚按牌子做的方向反着执行。
+
+**修法**（`src/car_fsm.v`，ms_tick 开头的拐角记忆块）：
+
+```verilog
+end else if (!turning && !lost && (state == S_RUN) &&
+             wide && CORNER_WIDE_MS > 0) begin
+    corner_cnt <= CORNER_WIDE_MS[15:0];
+end else if (corner_cnt != 16'd0) begin
+    corner_cnt <= corner_cnt - 16'd1;
+end
+```
+
+门控收到 `state == S_RUN` 是关键：真正的拐角只出现在正常循迹途中。中间过程值得记一笔 —— **只加 `(state == S_RUN)` 时复现仍然 FAIL**，还必须加 `!lost`（宽黑在丢线同时到达时也不能武装）。倒计时不受门控影响，仍每 ms 衰减。
+
+**固化**：`sim/turn_at_corner_tb.v` 新增 dut2 与第三条用例，时序为「右转牌 → 拐角宽黑 → 丢线（消费牌，右转）→ **自激宽黑** → 回线 → 再丢线」，断言第二次仍必须是 `dir=(1,0)`、`turn_dir=2`。反向验证：门控改回 `!turning && wide` → `FATAL: FAIL: corner fallback overrode the right card`。
+
+**当前影响为 0**（`USE_K230=1'b0` 时 `dir_evt` 恒 0，turning 进不去），但转向牌是 25 分硬指标，接回即生效。
+
+### 3.36.2 M2：侧绕 BY_PASS 出口误判退赛（[中]）
+
+**现象**：绕障全程都压着线时，`BY_PASS` 结束直接 `final_stop + S_STOP`，绕障绕到一半自己退赛。
+
+**根因**：`bypass_left_line` 只在 S_AVOID_PROBE 里 `if (lost)` 才置位。若全程压线，该标志恒 0 → 出口条件 `if (bypass_left_line && lost)` 为假 → 落到 else 的「找不回线」分支。
+
+**修法**（`src/car_fsm.v` 的 BY_PASS 段，四分支）：
+
+```verilog
+if (bypass_left_line && lost) begin
+    bypass_step <= BY_TURN_IN;          // 离过线且仍丢线：反向切回去
+end else if ((bypass_has_line) || !bypass_left_line) begin
+    ms_cnt <= 16'd0;
+    state  <= S_RUN;                    // 全程压线 / 已重新压线：交回循迹
+end else begin
+    final_stop <= 1'b1;                 // 离过线、丢线、又没重新压上
+    state <= S_STOP;
+end
+```
+
+`bypass_has_line` 的定义是 `on_line && !lost && !wide`（`src/car_fsm.v:186` 附近），带 `!wide` 是为了不让一片影子被当成「已回线」。
+
+**固化**：`sim/bypass_rejoin_tb.v` 新增用例 —— 复位 → RUN → 置 obstacle → 等 TURN → 撤 obstacle → **全程不动 on_line/lost** → 等 `state==BYPASS && bypass_step==PASS_SIDE` → 有界守卫等 RUN/STOP → 断言 `bypass_left_line==0` 且 `state==RUN`。反向验证：改回旧两分支版本 → `INFO: bypass_rejoin_tb 1 FAIL(S)`。
+
+### 3.36.3 M1：TURN_REQUEST_MS 顶层收紧到 3000
+
+`car_fsm.v:42` 默认 `TURN_REQUEST_MS = 12000`，顶层 `src/FpgaCar.v` 覆盖为 **3000**。
+
+原因：一旦锁存了一枚过期箭头，它会在整整 12 s 内压制拐角兜底 —— 车遇到没有牌的真拐角也不会按 `DEFAULT_TURN_LEFT` 转，直接冲出赛道。按 3 m 场地、约 0.4 m/s 估算，走完一段直道 3 s 足够。
+
+### 3.36.4 L2：OLED 面板列下溢保护
+
+`src/oled_driver.v` 原 `wire [5:0] panel_col = dk - DK_SEG6;`，在 `dk < DK_SEG6` 的拍上 6 位减法会回绕成 63，`panel_letter` 的位选 index 越界取到别的字符。改为 `(dk >= DK_SEG6) ? (dk - DK_SEG6) : 6'd0`。时序上原也不会显示错，但这是「靠上下文惯例才正确」的写法，收紧后不依赖调用顺序。
+
+### 3.36.5 L5：bypass_rejoin_tb 会真的失败
+
+`task check` 原只 `$display("FAIL:")`，单跑 `vvp` 退出码仍是 0，工具链看起来是绿的。改为累计 `integer fails`，新增 `task finish_summary` 打印 `ALL PASS` / `n FAIL(S)`，末尾用 `finish_summary` 代替裸 `$finish`。
+
+### 3.36.6 两个审查项判定为「不改」
+
+| 项 | 决定 | 理由 |
+|---|---|---|
+| M3：K230 四脚无内部下拉 | 不改 | `FpgaCar.peri.xml:255-256` 注释已写明板上在模块侧加 10 kΩ 下拉，**有意不依赖 FPGA 内部弱下拉**（K230 掉电时也要保证不浮空）。改约束需重综合验证，收益不明。 |
+| H2：`motion_rst_n = sys_rst_n && run_enable` | 待确认 | 读 `src/car_panel.v` 全文，这是**有意设计**：找线失败 → 面板锁停 → 按 K1 重试（`run_enable = rst_n && (status == RUN) && stop_sync[1]`）。与审查所说的「抹平 final_stop」是同一现象的两种解读，取决于产品语义，需用户裁定。 |
+
+### 3.36.7 回归
+
+`bash tools/run_regression.sh`（`_wt_fix`，**23 个 tb**）→ 全绿 0 失败 218 s。新增的两个台：`turn_at_corner_tb` PASS=3、`bypass_rejoin_tb` PASS=17。
+
+编译警告 23 条全部是同一句历史遗留：`src/I2C_OV5640_1280720_Config.v:302: warning: Extra digits given for sized hex constant.`
+
+### 3.36.8 尚未做的事
+
+- **未合回 main**：这条分支还带着 `USE_K230=1`、`car_panel` 按键面板、`AVOID_ROUTE_EN=1` 侧绕整段、`AVOID_FIXED_RIGHT=1` 等一整套行为改动，合并与否需用户决定。
+- **未综合、未烧录**：本轮只跑仿真。
+- **H2 未动**：等用户明确「找线失败算不算判负」。
 ## 4. 下一步（2026-11-10 按实际到货情况重排）
 
 ### 第 1 步：现在就能做的上板验证（不需要任何待买硬件）
