@@ -36,8 +36,13 @@ module car_fsm #(
     parameter integer SEARCH_DUTY   = 500,    // 找线时的占空比
     parameter integer SEARCH_FAIL_TO_IDLE = 1, // 找线超时后：1=回 IDLE 等重新压线，0=永久停车
     parameter integer DIR_DEAD_MS   = 10,     // 方向切换死区
-    parameter integer TURN_MS       = 700,    // 交通牌强制转向持续时长
+    parameter integer TURN_MS       = 700,    // 交通牌强制转向的最长时长（不是固定时长）
     parameter integer TURN_DUTY     = 700,    // 强制转向时的占空比
+    // 闭环转向：菱形锐角需要的转角比直角大，而定长转向时间一到就把车交回
+    // PID，此时车头还差一截，直接丢线滑走。改成边转边看线：连续压回线就
+    // 提前收工，TURN_MS 只当上限。
+    parameter integer TURN_MIN_MS   = 250,    // 至少先转这么久，防止刚起步还压着线就立刻结束
+    parameter integer TURN_LINE_MS  = 20,     // 连续压线多少 ms 才算"线已经找回来"
     parameter integer TURN_WAIT_FOR_CORNER = 0, // 1: 先存方向，宽黑后丢线才执行
     parameter integer TURN_REQUEST_MS = 12000,  // 转向牌等待岔口的上限
     // ---- 避障（BACK → TURN → PROBE 三段）----
@@ -128,6 +133,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     // ---------------- 交通牌强制转向 ----------------
     reg        turning;             // 1 = 正在按交通牌转向
     reg [15:0] turn_cnt;            // 转向剩余 ms
+    reg [15:0] turn_line_cnt;       // 转向期间连续压线的毫秒数（闭环提前结束用）
     reg        turn_left;           // 1 = 左转（左轮后退、右轮前进）
     reg        turn_req;            // 已收到转向请求
     reg [15:0] turn_request_left;
@@ -169,7 +175,8 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     wire bypass_active = (AVOID_ROUTE_EN != 0) && (state == S_AVOID_PROBE);
     wire bypass_forward = (bypass_step == BY_OUT || bypass_step == BY_PASS || bypass_step == BY_REJOIN);
     wire bypass_blocked = bypass_active && bypass_forward && obstacle;
-    wire bypass_has_line = on_line && !lost && !wide;
+    wire line_visible = on_line && !lost && !wide;   // 真的压在线上（宽黑不算）
+    wire bypass_has_line = line_visible;
 
     // 出线朝绕行的一侧转，摆正和回线转向则朝相反一侧转。
     // 转向统一让一轮正转、另一轮反转，两轮使用相同的转向占空比。
@@ -207,6 +214,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
             dead_cnt    <= 32'd0;
             turning     <= 1'b0;
             turn_cnt    <= 16'd0;
+            turn_line_cnt <= 16'd0;
             turn_left   <= 1'b0;
             turn_req    <= 1'b0;
             turn_request_left <= 16'd0;
@@ -348,12 +356,22 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             duty_l <= TURN_DUTY[10:0];
                             duty_r <= TURN_DUTY[10:0];
                         end
+                        turn_line_cnt <= line_visible ? (turn_line_cnt + 16'd1) : 16'd0;
                         turn_cnt <= turn_cnt - 16'd1;
                         if (turn_cnt <= 16'd1) begin
                             turning <= 1'b0;
                             ms_cnt  <= 16'd0;
-                            // 转向正常结束时清掉拐角记忆：这 700 ms 里车轮扫过的
+                            // 转向结束时清掉拐角记忆：这段时间里车轮扫过的
                             // 宽黑是"转向动作本身造成的"，不是赛道拐角特征。
+                            corner_cnt <= 16'd0;
+                        end else if ((TURN_LINE_MS > 0) &&
+                                     (turn_line_cnt >= TURN_LINE_MS - 1) &&
+                                     ((TURN_MS - turn_cnt) >= TURN_MIN_MS)) begin
+                            // 【闭环提前收工】菱形锐角的转角比直角大，定长 TURN_MS
+                            // 一到就交回 PID，车头还差一截 → 直接丢线滑走。
+                            // 这里只要真的把线转回来了就停，时长只作上限。
+                            turning <= 1'b0;
+                            ms_cnt  <= 16'd0;
                             corner_cnt <= 16'd0;
                         end
                         if (obstacle) begin
@@ -377,6 +395,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             turn_request_left <= 16'd0;
                             turning  <= 1'b1;
                             turn_cnt <= TURN_MS[15:0];
+                            turn_line_cnt <= 16'd0;
                             turn_dir <= turn_left ? 2'd1 : 2'd2;
                             turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
                             corner_cnt <= 16'd0;

@@ -3049,6 +3049,83 @@ P4 第 39 脚（`GPIOT_N_11`）已经被 `k230_stb` 占用，屏的 CS 只能走
 - 预览方向：`LANDSCAPE=1` + `MADCTL=8'h60` 是 bench 上验证过的组合，换屏或换排线方向要重新对
 - 颜色：预览是灰度转 RGB565，偏绿是正常的（G 用 6 位、R/B 各 5 位），不是配置错
 
+### 3.39 牌转向改成闭环：菱形锐角不再转不到位（2026-11-21）
+
+#### 3.39.1 现场现象
+
+K230 识别转向牌后转弯本身是对的，但遇到**菱形的角**，转向没有足够角度，随后丢线。
+
+#### 3.39.2 根因：牌转向是定长动作
+
+`car_fsm.v` 的 `S_RUN` 里 turning 分支只按 `TURN_MS` 倒计时：
+
+```verilog
+turn_cnt <= turn_cnt - 16'd1;
+if (turn_cnt <= 16'd1) begin
+    turning <= 1'b0;
+    ms_cnt  <= 16'd0;
+    corner_cnt <= 16'd0;
+end
+```
+
+完全不看线有没有转回来。菱形锐角需要的转角比直角大得多，700 ms 到点就把车交回 PID，车头还差一截 → 进 `S_LOST` → 按上一刻占空比继续前进 `LOST_HOLD_MS`(300 ms) 才决策 → 车已经冲出去了。与 §3.37 的 `BY_TURN_IN` 定长缺陷是同一类错误。
+
+#### 3.39.3 改法：边转边看线，时长只作上限
+
+`car_fsm.v` 参数区新增两个参数（紧跟 `TURN_MS`）：
+
+| 参数 | 默认 | 含义 |
+|---|---|---|
+| `TURN_MIN_MS` | 250 | 至少先转这么久。防止刚起步时车还压着线，闭环立刻判定"线已找回"而一秒都不转 |
+| `TURN_LINE_MS` | 20 | 连续压线多少 ms 才算线真的找回来（配合 4 ms 消抖） |
+
+新增 `reg [15:0] turn_line_cnt`（复位清零、起转时清零），并抽出 `wire line_visible = on_line && !lost && !wide;`（`bypass_has_line` 改为引用它，语义等价）。turning 分支改成：
+
+```verilog
+turn_line_cnt <= line_visible ? (turn_line_cnt + 16'd1) : 16'd0;
+turn_cnt <= turn_cnt - 16'd1;
+if (turn_cnt <= 16'd1) begin
+    turning <= 1'b0;                  // 到达上限，强制结束
+    ...
+end else if ((TURN_LINE_MS > 0) &&
+             (turn_line_cnt >= TURN_LINE_MS - 1) &&
+             ((TURN_MS - turn_cnt) >= TURN_MIN_MS)) begin
+    turning <= 1'b0;                  // 线已经找回来，提前收工
+    ...
+end
+```
+
+顶层 `src/FpgaCar.v` 的 `.TURN_MS` 从 700 提到 **1100**，并显式写 `.TURN_MIN_MS(250)`、`.TURN_LINE_MS(20)`。1100 只是上限——正常直角大约 400~600 ms 就会自己结束，只有锐角才会一路转到上限。
+
+#### 3.39.4 测试台与反向验证
+
+`sim/car_fsm_tb.v` 新增第八个实例 `u_dut8`（`TURN_MS=40`、`TURN_MIN_MS=5`、`TURN_LINE_MS=3`、`TURN_DUTY=400`）。第七个实例的 `TURN_MS=20` 小于默认 `TURN_MIN_MS=250`，闭环恒不触发，所以必须再开一个实例才能真正覆盖这段逻辑。
+
+两条用例：
+
+| 编号 | 激励 | 断言 |
+|---|---|---|
+| 23 | 压线状态下收到 `dir_evt=1` | 15 ms 后已结束转向（定长要 40 ms），回到直行占空比 |
+| 24 | `wide=1` 把 `line_visible` 按住，收到 `dir_evt=2` | 32 ms 时仍在转（闭环不得误判）；再把线放开，6 ms 内必须收工 |
+
+**反向验证**：把闭环条件改成 `1'b0 && (TURN_LINE_MS > 0) && ...`，重跑正好这两条 FAIL（`ends early once line seen` / `ends once the line returns`），失败点精确；恢复后 ALL PASS。
+
+#### 3.39.5 写这两条用例时踩到的两个坑
+
+**坑一：`dir_evt` 必须给单时钟脉冲。** 最初写成 `dir_evt8 = 3'd1; wait_us(2000); dir_evt8 = 3'd0;`，结果探针显示 `turn_cnt` 走了 `39→34→…→4→40`，看起来像"转不完"。真因是这个实例 `TURN_WAIT_FOR_CORNER=0`，事件锁存块 `if ((dir_evt == 3'd1 || dir_evt == 3'd2) && ((TURN_WAIT_FOR_CORNER == 0) || !turning))` 在 `TURN_WAIT_FOR_CORNER==0` 时把 `!turning` 门控整个短路掉——转向结束的同一拍，仍在保持的 `dir_evt` 会把 `turn_req` 重新置起，立刻开始第二次相同的转向。生产配置 `TURN_WAIT_FOR_CORNER=USE_K230=1` 有 `!turning` 保护，不受影响。改法是 `@(negedge clk) dir_evt8 = 3'd1; @(negedge clk) dir_evt8 = 3'd0;`。
+
+**坑二：`turning` 只存在于 `S_RUN`。** 想构造"转向期间一直看不到线"，不能用 `lost=1`——`S_RUN` 里 `else if (lost) state <= S_LOST` 会立刻把车踢出 RUN，根本进不到 turning 分支（实测 `st8=0`、`dir8=11`、`duty=0/0`）。正确做法是用 `wide=1` 把 `line_visible` 按住，同时保持在 `S_RUN`。
+
+#### 3.39.6 回归
+
+`bash tools/run_regression.sh` → **24 个 tb 全绿，0 失败，263 s**。编译警告仍是历史遗留的 `src/I2C_OV5640_1280720_Config.v:302: warning: Extra digits given for sized hex constant.`
+
+#### 3.39.7 仍需现场确认
+
+- 菱形锐角是否一次转到位。若仍不足，直接加大顶层 `TURN_MS`（比如 1400）——闭环会自己提前结束，加大上限没有副作用
+- 正常直角的实际转向时长。若发现车在岔口明显"转过再回来"，说明 `TURN_LINE_MS=20` 太短、`TURN_MIN_MS=250` 太长，可下调
+- `TURN_DIR_HOLD_MS=1500` 的转向指示保持时间是否符合观感
+
 ## 4. 下一步（2026-11-10 按实际到货情况重排）
 
 ### 第 1 步：现在就能做的上板验证（不需要任何待买硬件）

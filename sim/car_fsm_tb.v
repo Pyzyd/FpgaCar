@@ -268,6 +268,45 @@ module car_fsm_tb;
         .duty_l (duty_l7), .duty_r (duty_r7), .state (state7), .turn_dir (td7)
     );
 
+    // 第八个实例：转向闭环（菱形锐角）。TURN_MS=40 只是上限，TURN_MIN_MS=5 +
+    // TURN_LINE_MS=3 表示"转开 5 ms 后连续 3 ms 压回线就提前收工"。
+    // 第七个实例的 TURN_MS=20 小于默认 TURN_MIN_MS=250，闭环恒不触发，
+    // 所以必须再开一个实例才能真正覆盖这段逻辑。
+    reg               on8 = 1'b0;
+    reg               lost8 = 1'b0;
+    reg               wide8 = 1'b0;
+    reg  [2:0]        dir_evt8 = 3'd0;
+    wire              en8, dir_l8, dir_r8;
+    wire [10:0]       duty_l8, duty_r8;
+    wire [2:0]        state8;
+    wire [1:0]        td8;
+
+    car_fsm #(
+        .CLK_FREQ            (24_000_000),
+        .START_MS            (1),
+        .START_REQUIRE_LINE  (1),
+        .LOST_HOLD_MS        (2),
+        .SEARCH_MS           (10),
+        .SEARCH_DUTY         (500),
+        .SEARCH_FAIL_TO_IDLE (1),
+        .DIR_DEAD_MS         (1),
+        .TURN_MS             (40),
+        .TURN_DUTY           (400),
+        .TURN_MIN_MS         (5),
+        .TURN_LINE_MS        (3),
+        .AVOID_EN            (0),
+        .DEFAULT_TURN_LEFT   (1),
+        .CORNER_WIDE_MS      (500),
+        .TURN_DIR_HOLD_MS    (50)
+    ) u_dut8 (
+        .clk (clk), .rst_n (rst_n),
+        .on_line (on8), .lost (lost8), .obstacle (1'b0), .wide (wide8), .pos (5'sd0),
+        .dir_evt (dir_evt8),
+        .pid_l (11'd700), .pid_r (11'd500),
+        .en (en8), .dir_l (dir_l8), .dir_r (dir_r8),
+        .duty_l (duty_l8), .duty_r (duty_r8), .state (state8), .turn_dir (td8)
+    );
+
     task wait_state5 (input [2:0] want, input integer timeout_us);
         integer n;
         begin
@@ -328,6 +367,29 @@ module car_fsm_tb;
         begin
             n = 0;
             while (state7 !== want && n < timeout_us) begin
+                wait_us(100);
+                n = n + 100;
+            end
+            #1;
+        end
+    endtask
+
+    task chk8 (input integer cond, input [8*28-1:0] msg);
+        begin
+            if (cond) $display("PASS: %0s", msg);
+            else begin
+                $display("FAIL: %0s | st8=%0d dir8=%b%b d8=%0d/%0d td8=%0d",
+                         msg, state8, dir_l8, dir_r8, duty_l8, duty_r8, td8);
+                fails = fails + 1;
+            end
+        end
+    endtask
+
+    task wait_state8 (input [2:0] want, input integer timeout_us);
+        integer n;
+        begin
+            n = 0;
+            while (state8 !== want && n < timeout_us) begin
                 wait_us(100);
                 n = n + 100;
             end
@@ -696,6 +758,37 @@ module car_fsm_tb;
         chk7(state7 == S_SEARCH, "card4: in SEARCH");
         chk7(dir_l7 === 1'b1 && dir_r7 === 1'b0, "card4: still RIGHT");
         chk7(td7 == 2'd2, "card4: S=2 not flipped");
+
+        // ---- 23) 转向闭环：线已经压回来就提前收工（菱形锐角场景）----
+        // 定长逻辑下 TURN_MS=40 ms 会一直转到时间用完；闭环下约 5 ms 就结束。
+        on8 = 1'b1; lost8 = 1'b0;
+        wait_state8(S_RUN, 40000);
+        chk8(state8 == S_RUN, "loop: in RUN");
+        // 单时钟脉冲。dir_evt 是单周期事件，本实例 TURN_WAIT_FOR_CORNER=0，
+        // 事件锁存没有 !turning 保护；若把脉冲保持 2 ms，转向结束的同一拍
+        // 会被同一次事件重新武装，看起来像"转不完"（实测 cnt 从 4 跳回 40）。
+        @(negedge clk) dir_evt8 = 3'd1;
+        @(negedge clk) dir_evt8 = 3'd0;
+        wait_us(15000);                     // 15 ms：定长要 40 ms，此刻应已结束
+        chk8(dir_l8 === 1'b1 && dir_r8 === 1'b1, "loop: ends early once line seen");
+        chk8(state8 == S_RUN, "loop: back on line stays RUN");
+
+        // ---- 24) 转向闭环：线一直没回来，必须转满 TURN_MS 上限 ----
+        // 反面用例：闭环的唯一入口是 line_visible（on_line && !lost && !wide）。
+        // 这里用 wide=1 把 line_visible 按住，同时保住 S_RUN —— turning 只存在
+        // 于 S_RUN；若改成 lost=1 会直接跳 S_LOST，根本走不到转向分支。
+        wide8 = 1'b1;
+        wait_us(3000);
+        @(negedge clk) dir_evt8 = 3'd2;
+        @(negedge clk) dir_evt8 = 3'd0;
+        wait_us(20000);                     // 20 ms，还不到 40 ms 上限
+        chk8(dir_l8 === 1'b1 && dir_r8 === 1'b0, "loop: keeps turning without line");
+        chk8(u_dut8.turn_line_cnt == 16'd0, "loop: no line counted while off track");
+        wait_us(12000);                     // 累计约 32 ms，还在 TURN_MS=40 ms 以内
+        chk8(dir_l8 === 1'b1 && dir_r8 === 1'b0, "loop: never ends early without a line");
+        wide8 = 1'b0; on8 = 1'b1;           // 线终于回来
+        wait_us(6000);                      // 3 拍闭环计数 + 1 ms 死区
+        chk8(dir_l8 === 1'b1 && dir_r8 === 1'b1, "loop: ends once the line returns");
 
         if (fails == 0) $display("INFO: car_fsm_tb ALL PASS");
         else            $display("INFO: car_fsm_tb %0d FAIL(S)", fails);
