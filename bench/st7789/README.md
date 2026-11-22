@@ -94,6 +94,27 @@ FPGA 每 4×4 像素取一个样本并转为 Y8，缓存 160×120 图，再按 2
 对着摄像头移动手或纸，等待几次刷新，检查图像内容是否随之改变。
 仿真用例 `ov5640_preview_frame_tb.v` 覆盖非法行长、19,200 个灰度样本和显示锁帧期间的缓存保护。
 
+## OV5640 串口拍照
+
+串口台架 `Ov5640UartBench` 使用 OV5640 的 VGA 全视野模式。每 2×2 区域取一个样本，保存 **320×240 灰度 PNG**。测试工程将电机驱动置于停机状态。将 OV5640 接到 `DVP Sensor`，用板载 CH340N 的 Mini-USB 口连接电脑。
+
+在仓库根目录生成工程，在 Efinity 编译 `Ov5640UartBench.xml`，然后用 JTAG 临时加载：
+
+```powershell
+python bench/st7789/make_project.py .scratch/ov5640-uart-bench --snapshot
+tools\dl.bat .scratch\ov5640-uart-bench\outflow\Ov5640UartBench.bit
+```
+
+摄像头准备好后 LED1、LED3 点亮。用 `python -m serial.tools.list_ports` 查 CH340N 的端口号。把下面的 `COM12` 换成实际端口：
+
+```powershell
+python tools/ov5640_capture.py COM12 data/ov5640_capture/turn_point.png
+```
+
+电脑发送 `S` 后，FPGA 从下一张完整画面取样。串口是 **115200、8N1**，每张传输约 6.7 秒。传完 LED0 点亮，电脑校验尺寸和 CRC32 后保存 PNG。省略输出路径时，文件按时间命名，落在 `data/ov5640_capture/`。拍不同位置时使用新文件名，已有照片会保留。电脑端依赖 `pyserial`。
+
+数据包依次为 `OVS1`、宽和高（各 16 位小端）、从上到下且每行从左到右的灰度字节、像素数据的 CRC32（32 位小端）。像素和摄像头的输入图保持同一视角，便于标注车库两角。
+
 ## 复位脚：K1/K2 按键版底板
 
 `make_project.py` 生成工程时会读 `FpgaCar.peri.xml`，按 `key_start_n` → `key_stop_n` → `rst_n` 的顺序挑第一个存在的引脚当复位源，
@@ -103,17 +124,58 @@ FPGA 每 4×4 像素取一个样本并转为 Y8，缓存 160×120 图，再按 2
 按旧模板直接生成会报 `Missing Ti60 board pins: ['rst_n']`。现在自适应，两种底板都能生成。
 按 K1 即复位 bench（bench 不跑车，只是重新初始化屏幕和摄像头）。
 
+## K1 拍照与电脑相册（720p）
+
+独立工程 `Ov5640DdrSnapshot` 将 OV5640 配置为 1280×720，每张保存 900 KiB 原始灰度像素。
+板载 DDR3 可保存 **64 张**，编号按拍摄顺序从 01 到 64。拍满后保留这 64 张，K1 暂停接收。
+坏帧不会入册或占用编号。拍摄时可以拔掉电脑串口，保持 Ti60 供电。重新下载位流或断电会清空相册。
+
+1. 将 OV5640 接到 `DVP Sensor`。通过 JTAG 临时加载 `Ov5640DdrSnapshot.bit`，电机控制输出处于停机状态。
+2. 等 LED1、LED2、LED3 亮，分别表示摄像头配置写完、检测到帧同步、DDR3 校准通过。
+3. 每短按一次 K1 拍一张，等 LED4 熄灭再拍下一张。LED0 常亮表示有图，慢闪表示已拍满。LED4 在拍摄、传输和出错时亮，LED5 为心跳。
+4. 用 **板载 CH340N Mini-USB 串口**连接电脑。启动相册，选串口，点击「读取相册」。
+
+```powershell
+python tools/ov5640_album.py
+```
+
+相册使用 Python 自带的 Tkinter 和 `pyserial`。点选照片即可看 160×90 缩略图。
+「导出选中」保存所选照片的原始 1280×720 PNG。「全部导出」在所选目录下建立一组照片，按编号保存。
+460800 8N1 下原图约 20 秒一张。停止批量导出会先保存当前照片，随后停止。导出完成后可继续按 K1 拍摄。
+如果拍摄后 LED4 持续亮，重新短按 K1 可重试已结束的失败拍摄，已有完整图仍可导出。
+
+`tools/ov5640_capture.py COM12 --stored` 仍可直接导出最后一张。相册状态使用 `L` 查询，
+响应 `OVA1` 加三个单字节字段（照片数、容量、状态）。状态 bit0 表示摄像头和 DDR3 就绪、bit1 表示拍摄中、bit2 表示出错。
+`G` 读取原图，`T` 读取缩略图，后面都跟一个从 1 开始的原始编号字节。
+图像沿用 `OVS1` 帧和 CRC32 校验。若指定照片不可读，板子返回 `N`。
+
+重新编译时，从奥唯思 Ti60 资料里找到带有 `Ti60_Demo.peri.xml` 和 `ip/DdrCtrl` 的
+`02-1_Ti60_OV5640_LCD-HDMI_1080P60` 工程。生成脚本使用其中的 DDR3 引脚、PLL 和控制器文件。
+
+```powershell
+python bench/st7789/make_ddr_snapshot_project.py .scratch/ov5640-ddr-album "<奥唯思示例工程路径>"
+```
+
+在 Efinity 编译生成目录内的 `Ov5640DdrSnapshot.xml`，产物位于该目录的 `outflow`。
+临时调试可使用 `tools\dl.bat .scratch\ov5640-ddr-album\outflow\Ov5640DdrSnapshot.bit`。
+如果 Ti60 的 Flash 内已有小车程序，JTAG 临时版在下一次重新上电时会自动恢复 Flash 内的程序。
+`Ov5640DdrSnapshot.hex` 可用于需要断电后自动启动拍照程序时。
+
 ## 与主工程的关系
 
-本目录是**独立工程**，不参与主工程 `FpgaCar.xml` 的综合，也不进 `tools/run_regression.sh` 的 23 个 tb。
-两个测试台需要手动跑：
+本目录是**独立工程**，不参与主工程 `FpgaCar.xml` 的综合，也不进 `tools/run_regression.sh` 的 24 个 tb。
+测试台可手动运行：
 
 ```bash
 iverilog -g2012 -s St7789Bench_tb -o .scratch/st7789.vvp bench/st7789/St7789Bench.v bench/st7789/St7789Bench_tb.v
 vvp .scratch/st7789.vvp
 iverilog -g2012 -s ov5640_preview_frame_tb -o .scratch/preview.vvp bench/st7789/ov5640_preview_frame.v bench/st7789/ov5640_preview_frame_tb.v
 vvp .scratch/preview.vvp
+iverilog -g2012 -s ov5640_uart_snapshot_tb -o .scratch/snapshot.vvp bench/st7789/ov5640_uart_snapshot_tb.v bench/st7789/ov5640_uart_snapshot.v bench/st7789/ov5640_preview_frame.v src/uart_tx.v
+vvp .scratch/snapshot.vvp
+iverilog -g2012 -s ov5640_ddr_snapshot_tb -o .scratch/snapshot720.vvp bench/st7789/ov5640_ddr_snapshot_tb.v bench/st7789/ov5640_photo_capture.v bench/st7789/ov5640_photo_fifo.v bench/st7789/ov5640_photo_store.v bench/st7789/ov5640_uart_snapshot.v src/uart_tx.v
+vvp .scratch/snapshot720.vvp
 ```
 
-唯一与主工程共用的源文件是 `src/cam_sccb_cfg.v`：本目录的 OV5640 预览用 `FULL_FOV_VGA=1` 切到 4∶3 全阵列，
+独立工程复用主工程的摄像头初始化和串口发送模块。本目录的 OV5640 全视野预览用 `FULL_FOV_VGA=1` 切到 4∶3 全阵列，
 主工程默认 `FULL_FOV_VGA=0` 走原 720p 表，行为不变。

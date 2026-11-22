@@ -8,18 +8,20 @@ module ov5640_preview_frame_tb #(
     localparam integer SAMPLE_STEP = 1 << SAMPLE_LOG2;
     localparam integer SAMPLE_COLS = INPUT_WIDTH / SAMPLE_STEP;
     localparam integer SAMPLES = SAMPLE_COLS * (INPUT_HEIGHT / SAMPLE_STEP);
+    localparam integer ADDRESS_WIDTH = $clog2(SAMPLES+1);
     reg clk = 0, pclk = 0;
     always #7 clk = ~clk;
     always #5 pclk = ~pclk;
     reg rst_n = 0, href = 0, vsync = 0, frame_release = 0;
     reg active_low_vsync = 0;
     reg [7:0] data = 0;
-    reg [14:0] addr = 0;
+    reg [ADDRESS_WIDTH-1:0] addr = 0;
     wire frame_valid;
     wire [7:0] y;
 
     ov5640_preview_frame #(
-        .INPUT_WIDTH(INPUT_WIDTH), .INPUT_HEIGHT(INPUT_HEIGHT), .SAMPLE_LOG2(SAMPLE_LOG2)
+        .INPUT_WIDTH(INPUT_WIDTH), .INPUT_HEIGHT(INPUT_HEIGHT), .SAMPLE_LOG2(SAMPLE_LOG2),
+        .ADDRESS_WIDTH(ADDRESS_WIDTH)
     ) dut (
         .clk(clk), .rst_n(rst_n), .pclk(pclk), .href(href), .vsync(vsync),
         .data(data), .frame_release(frame_release), .frame_valid(frame_valid),

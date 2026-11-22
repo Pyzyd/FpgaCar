@@ -19,5 +19,5 @@
     {"signal":"RST","ti60_user_io":33,"ti60_p4_pin":38,"gpio_def":"GPIOL_P_18"},
     {"signal":"CS","ti60_user_io":35,"ti60_p4_pin":40,"gpio_def":"GPIOT_P_11"}
   ],
-  "lcd_status": "reserved_only_not_added_to_rtl_or_peri"
+  "lcd_status": "instantiated_in_rtl_and_peri_since_2026-11-20"
 }

@@ -67,8 +67,11 @@ def select(width, height, get_pixel, blobs):
     return best
 
 
-def detect(frame):
+def blue_regions(frame):
     blobs = frame.find_blobs([BLUE_LAB], x_stride=2, y_stride=2,
                              pixels_threshold=110, area_threshold=300, merge=False)
-    return select(frame.width(), frame.height(), frame.get_pixel,
-                  [(b.x(), b.y(), b.w(), b.h(), b.pixels()) for b in blobs])
+    return [(b.x(), b.y(), b.w(), b.h(), b.pixels()) for b in blobs]
+
+
+def detect(frame):
+    return select(frame.width(), frame.height(), frame.get_pixel, blue_regions(frame))

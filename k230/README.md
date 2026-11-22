@@ -243,9 +243,26 @@ other（其余流程）及 total。计时不包含相册停留，回到实时后
 
 ### 文件与部署
 
-将本目录的运行文件 `main.py`、`config.py`、`arrow_core.py`、`arrow_templates.py`、
-`detector.py`、`album.py`、`gpio_link.py`、`color_core.py`、`color_detector.py`、
-`multi_tracker.py`、`run_recorder.py` 一起复制到板上 `/sdcard/car_vision/`。
+台架版把所有运行文件复制到板上 `/sdcard/car_vision/`：
+
+```text
+main.py  config.py  arrow_core.py  arrow_templates.py  detector.py  album.py
+gpio_link.py  color_core.py  color_detector.py  multi_tracker.py  run_recorder.py
+```
+
+现场前视版（见[现场前视版](#现场前视版)）在台架版基础上再加：
+
+```text
+/sdcard/car_vision/          field_vision.py  parking_detector.py
+/sdcard/car_vision/turn_verify/   turn_detector.py  turn_shape.py  turn_templates.py
+/sdcard/main.py              field_startup.py 的内容（启动器）
+```
+
+`field_startup.py` 把 `/sdcard/car_vision` 与 `/sdcard/car_vision/turn_verify` 都加进
+`sys.path`，所以 `field_vision.py` 能直接 `from turn_detector import ...`；
+这三个 `turn_*` 文件必须落在 `car_vision/turn_verify/` 子目录里，平铺到 `car_vision/` 反而找不到。
+`field_startup.py` 里 `main(send_gpio=True)` 会绕过 `config.py` 的 `GPIO_ENABLE=False` 直接启用发送。
+
 `tools/` 是电脑端检查工具，不需要复制到板上。不要覆盖整张卡或重新烧录固件。
 
 先在 CanMV IDE K230 中连接设备，打开本地 `main.py`，临时运行。
@@ -369,12 +386,15 @@ API 参考：
 `field_vision.py` 在一帧里运行转向牌识别和四色方块跟踪。画面供调试观察，循迹和转向执行由 Ti60 的红外循迹与状态机负责。
 
 - 转向牌沿用 640×360 识别和连续 3 帧确认。K230 发一次方向，Ti60 先锁存；宽黑后丢线时才消费请求，12 秒未到岔口则过期。宽黑门槛和转向时长仍需在实车岔口确认。
+- 倒车分支可从侧面斜拍识别蓝底白字「P」。屏幕标出牌框和「P」，连续 3 帧确认后记录一次本地事件。部署时将 `parking_detector.py` 放进 SD 卡的 `car_vision/`。停车牌与 Ti60 的联动在后续阶段接入。
 - 色块在画面下方识别，须先稳定确认、向右推进，再在右沿到达画幅 98% 附近后持续至少两帧。边缘裁切的目标沿用已确认的颜色，画面共同横跳时暂停计数。每个物理目标只记录一次。
+- 屏幕用彩框和单字标出本帧找到的色块，并在「当前色块」汇总，可用固定照片测试。色块通过右沿后才加入「色序」。现场版在 `FIELD_COLOR_LAB` 内单独校准红黄阈值。
+- 短按板载用户键（GPIO61）清空 K230 本机色序、跟踪和转向确认，直接开始新一轮识别。Ti60 已收的色序由 Ti60 面板单独清除。
 - 保持 GPIO42/43/34 和 GPIO35 STB 的固定接线。启动器启用 GPIO，并保留引脚复用检查。SD 分析日志优先存到 `/data/field_vision_runs`，不可用时用 `/sdcard/field_vision_runs`。
 
 安装前备份原 SD 卡根目录 `main.py`。将部署包解压到 SD 卡根目录，`main.py` 与 `car_vision/` 同级。原连拍入口可通过恢复备份的 `main.py` 切回。台架联调先让电机侧断电，观察 K230 上的方向和色序，核对 Ti60 OLED 或串口接收结果。
 
-11 月 19 日的 8 组、597 张照片在桌面回放中，两段色序均输出绿、蓝、红、黄，三个转向片段各输出一次正确方向，黄色障碍和停车牌片段无事件。JPEG 回放使用近似的 LAB 和连通域，板端取图、帧率及实车触发时机另做验证。
+11 月 19 日的 8 组、597 张照片在桌面回放中，两段色序均输出绿、蓝、红、黄，三个转向片段各输出一次正确方向。侧拍与正拍停车牌片段各输出一次「P」，黄色障碍片段无事件。JPEG 回放使用近似的 LAB 和连通域，板端取图、帧率及实车触发时机另做验证。
 
 ```powershell
 python k230/tools/replay_field_vision.py ./现场照片-k230 --check-nov19

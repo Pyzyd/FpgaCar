@@ -66,3 +66,6 @@ __pycache__/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# 回归日志目录
+_simout/

@@ -79,14 +79,18 @@ def classify(mask, templates, min_iou=.50, min_margin=.12):
 
 class StableEvent:
     """One event per encounter. Only an absence interval rearms the event."""
-    def __init__(self, confirm=4, rearm=8):
+    def __init__(self, confirm=4, rearm=8, labels=("left", "right")):
         self.confirm, self.rearm = confirm, rearm
+        self.labels = labels
+        self.reset()
+
+    def reset(self):
         self.candidate, self.count, self.absent = "unknown", 0, 0
         self.latched = False
         self.stable = "unknown"
 
     def update(self, label, present=False):
-        if label not in ("left", "right"):
+        if label not in self.labels:
             self.count, self.candidate, self.stable = 0, "unknown", "unknown"
             self.absent = 0 if present else self.absent + 1
             if self.absent >= self.rearm:

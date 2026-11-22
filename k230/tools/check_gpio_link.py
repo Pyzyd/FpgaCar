@@ -136,8 +136,13 @@ class Checks(unittest.TestCase):
             self.assertEqual(gpio['io_standard'],'1.8 V LVCMOS')
             self.assertEqual(gpio['mode'],'input')
             self.assertEqual(allocated.count(row['gpio_def']),1)
+        # 2026-11-20 起 LCD 五脚已真正例化（main 与 bench 共用 src/st7789_panel.v），
+        # 因此这里不再断言“未占用”，而是断言每脚存在且各占一次、方向为 output。
         for row in contract['lcd_reserved']:
-            self.assertNotIn(row['gpio_def'],allocated)
+            self.assertEqual(allocated.count(row['gpio_def']),1)
+            lcd=next(g for g in gpios if g['gpio_def']==row['gpio_def'])
+            self.assertEqual(lcd['mode'],'output')
+            self.assertTrue(lcd['name'].startswith('lcd_'))
         for row in contract['signals']+contract['lcd_reserved']:
             cells=table[row['ti60_p4_pin']]
             self.assertEqual(cells[1],'User_IO%d'%row['ti60_user_io'])

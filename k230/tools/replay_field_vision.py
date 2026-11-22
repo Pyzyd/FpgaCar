@@ -87,6 +87,8 @@ def replay(folder):
         now = int(photo.stem.split('_')[-1].removesuffix('ms'))
         state = vision.update(DesktopFrame(photo), now)
         seen[state['turn']['label']] += 1
+        if state['parking']['label'] == 'P':
+            seen['P'] += 1
         events.extend((now, event['kind'], event['label']) for event in state['events'])
     print(folder.parent.name, folder.name, len(paths), dict(seen), events,
           'uncertain=', vision.tracker.sequence_uncertain, flush=True)
@@ -106,12 +108,13 @@ def main():
         parser.error('No JPEG field captures found')
     if args.check_nov19:
         ordered_colors = [('color', c) for c in ('green','blue','red','yellow')]
-        expected = {'run_0008':[], 'run_0010':ordered_colors, 'run_0011':[],
+        parking = [('parking','P')]
+        expected = {'run_0008':[], 'run_0010':ordered_colors, 'run_0011':parking,
                     'run_0012':[('turn','left')], 'run_0013':[('turn','right')],
-                    'run_0014':ordered_colors, 'run_0015':[], 'run_0016':[('turn','left')]}
+                    'run_0014':ordered_colors, 'run_0015':parking, 'run_0016':[('turn','left')]}
         if results != expected:
             raise SystemExit(f'Field replay differs: {results!r}')
-        print('PASS: two complete color sequences, three turn encounters and three negative runs')
+        print('PASS: two complete color sequences, three turn encounters, two parking encounters and one negative run')
 
 
 if __name__ == '__main__':

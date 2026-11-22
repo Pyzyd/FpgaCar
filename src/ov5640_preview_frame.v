@@ -1,24 +1,25 @@
 `timescale 1ns/1ns
 
 // RGB565 DVP in, one Y8 sample per square block out.
-// PCLK writes one complete frame, then stops until the LCD returns ownership.
+// PCLK writes one complete frame, then stops until the reader returns ownership.
 module ov5640_preview_frame #(
     parameter integer INPUT_WIDTH = 1280,
     parameter integer INPUT_HEIGHT = 720,
-    parameter integer SAMPLE_LOG2 = 3
+    parameter integer SAMPLE_LOG2 = 3,
+    parameter integer ADDRESS_WIDTH = 15
 ) (
     input wire clk, rst_n,
     input wire pclk, href, vsync,
     input wire [7:0] data,
     input wire frame_release,
     output wire frame_valid,
-    input wire [14:0] read_addr,
+    input wire [ADDRESS_WIDTH-1:0] read_addr,
     output reg [7:0] read_y
 );
     localparam [11:0] LINE_BYTES = INPUT_WIDTH * 2;
     localparam [9:0] FRAME_LINES = INPUT_HEIGHT;
-    localparam [14:0] FRAME_SAMPLES = (INPUT_WIDTH >> SAMPLE_LOG2) *
-                                      (INPUT_HEIGHT >> SAMPLE_LOG2);
+    localparam [ADDRESS_WIDTH-1:0] FRAME_SAMPLES = (INPUT_WIDTH >> SAMPLE_LOG2) *
+                                                  (INPUT_HEIGHT >> SAMPLE_LOG2);
     localparam integer SAMPLE_CENTER = 1 << (SAMPLE_LOG2 - 1);
 
     reg request, ack;
@@ -49,7 +50,7 @@ module ov5640_preview_frame #(
     reg href_prev, vsync_prev, capturing, bad_line;
     reg [11:0] byte_count;
     reg [9:0] line_count;
-    reg [14:0] write_addr;
+    reg [ADDRESS_WIDTH-1:0] write_addr;
     reg [7:0] high_byte;
     wire new_frame = vsync && !vsync_prev;
     wire line_end = href_prev && !href;

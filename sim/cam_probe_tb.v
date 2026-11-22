@@ -22,6 +22,8 @@ module cam_probe_tb;
     reg  clk = 1'b0;
     reg  rst_n = 1'b0;
     always #20.8335 clk = ~clk;
+    reg clk_96m = 1'b0;
+    always #5.208333 clk_96m = ~clk_96m;
 
     reg  vsync = 1'b0;
     wire ready, vs_act;
@@ -33,6 +35,14 @@ module cam_probe_tb;
     ) u_dut (
         .clk(clk), .rst_n(rst_n),
         .vsync(vsync), .ready(ready), .vs_cnt(vs_cnt), .vs_act(vs_act)
+    );
+    // The photo bench uses 96 MHz; one millisecond exceeds 16 counter bits.
+    wire ready_96m;
+    cam_probe #(
+        .CLK_FREQ(96_000_000), .RST_LOW_MS(RST_LOW), .CFG_DELAY_MS(CFG_DELAY)
+    ) u_probe_96m (
+        .clk(clk_96m), .rst_n(rst_n), .vsync(vsync),
+        .ready(ready_96m), .vs_cnt(), .vs_act()
     );
 
     // 1 kHz 的 VSYNC（模拟 1000 fps，便于在 10 ms 窗口里数够数）
@@ -49,12 +59,14 @@ module cam_probe_tb;
 
         // 2) 1.3 ms 时 ready 仍未到（还有 20 ms 守卫）
         #1_200_000;
+        if (ready_96m !== 1'b0) $fatal(1, "96 MHz probe ready too early");
         if (ready !== 1'b0)     $display("FAIL: ready came too early at 1.3ms");
         else                    $display("PASS: ready still 0 at 1.3ms (20ms guard)");
 
         // 3) 1+2 ms 之后 ready
         #2_500_000;                            // 3.8 ms
         if (ready !== 1'b1)     $display("FAIL: ready not set after rst+cfg delay");
+        else if (ready_96m !== 1'b1) $fatal(1, "96 MHz probe millisecond counter did not reach 96000");
         else                    $display("PASS: ready=1 after 1+2ms");
 
         // 4) 给 VSYNC，等一个 10 ms 窗口
