@@ -1199,23 +1199,22 @@ WARNING: Mapping into logic memory block 'u_oled/fb' (8192 bits) because read po
 
 色块必须占 page 2~5（细则 4.3.3 / 5.1），因此调试区只占**空闲的 page 1 与 page 6/7**，
 与色块永不重叠。实现见 `FpgaCar/src/oled_driver.v` 的 `S_DBG` 状态与 `dbg_*` 组合绘制块，
-数字点阵在 `FpgaCar/src/oled_driver.v` 例化的 `oled_digits`（16×16，`FpgaCar/tools/gen_oled_digits.py` 生成）。
+ASCII 点阵在 `FpgaCar/src/oled_glyph.v`（5×7，手写、只收这三行用到的字符）。
 
-| 屏上位置 | 内容 | 判读 |
-|---|---|---|
-| page 1（第 9~16 行）| 八路循迹条，8 格 × 16 列 | **格 i 对应 `line[i]`，`line[0]` 在最左（与实物 X1 同侧）**。整格实心 = 压线；只剩底边一条线 = 未压线 |
-| page 6/7 左（col 0..47）| 三位 16×16 数字 | 超声距离，单位 cm。**`---` = 无回波**（`dist_cm == 16'hFFFF`）；超过 999 饱和成 999 |
-| page 7（col 48..63）| 8×8 小字 `cm` | 距离单位 |
-| page 6/7 中（col 64..79）| 一位数字 | 车状态机：0=IDLE 1=RUN 2=LOST 3=SEARCH 4=STOP |
-| page 6/7 右（col 80..127）| 四个 12 px 方格 | 自左向右 = **障碍 / 丢线 / 左转 / 右转**；实心 = 该标志置位（2026-11-19 起：左右红外已拆，两格改显转向方向） |
-| page 0（col 8..71，标号正下方）| 八位二进制串，8 个 8×8 数字 | 循迹原始值，**自左向右 = `line[7]`→`line[0]`（高位在前）**，与串口 `T=` 逐字对照 |
+**2026-11-22 起改成三行纯文字**。此前是「八路竖条 + 16×16 数字 + 四个小方格 + page0 二进制串」，
+现场站远一点、或者屏的角度一斜，条状和格状就只能靠「整格实心 vs 只剩一条底边」来分辨，
+经常看错。改成 ASCII 文字后每个字段自带标签，和串口报文的字段名一一对得上：
 
-> **⚠ 屏上循迹条（page 1）与二进制串（page 0）方向相反，这是有意的。**
-> **page 1 循迹条**按车体左右排：最左 = `line[0]` = 实物 X1 那一侧，对着车看最直观。
-> **page 0 二进制串**按数值高位在前排：最左 = `line[7]` = 实物 X8 那一侧，因为
-> 「八位二进制数」和串口 `T=`（`uart_report` 里 `msg[10]=ln[7]`…`msg[17]=ln[0]`，
-> 首字符是最右路）都是高位在前。**屏上同时给出两种视角**：想看位置看下面那条，
-> 想抄数值看上面那行，两行左右正好互为镜像，别混着读。
+| 行 | 显存位置 | 屏上内容 | 判读 |
+|---|---|---|---|
+| 第 1 行 | page 1 | `ST:RUN  LOST:0  ` | 车状态机 4 字符名（`IDLE/RUN /LOST/SRCH/STOP/A-BK/A-TN/A-PB`）+ 丢线标志 |
+| 第 2 行 | page 6 | `DIST:123 CM OB:1` | 超声距离 cm，**`---` = 无回波**（`dist_cm == 16'hFFFF`），>999 饱和 999；`OB` = 障碍标志 |
+| 第 3 行 | page 7 | `LN:10000001 TR:R` | 循迹原始值，**自左向右 = `line[7]`→`line[0]`（高位在前）**，与串口 `T=` 逐字对照；`TR` = 转向 L/R/- |
+
+字符格宽 8 列（5 列点阵 + 3 列间隙），16 字符正好铺满 128 列。每字符 8 列、每行 16 字符 = 128 字节，
+三行共 384 字节，每次无条件重写，改布局不会留残影。
+
+> **page 0 仍是 `S_MARK` 的地盘**：col 0..7 存活标记、col 120..127 K230 掉线叉号，与上面三行不重叠。
 
 刷新策略：`DBG_SAMPLE_MS = 100` 采样一次，7 个调试输入**任一变化**才整屏重推；
 一次全屏 1026 字节 @400 kHz 约 23 ms，最坏占空比约 23%，不影响颜色识别与电机控制。
@@ -1223,11 +1222,11 @@ WARNING: Mapping into logic memory block 'u_oled/fb' (8192 bits) because read po
 
 判读速查：
 
-- **距离一直 `---`** → 无回波：模块没供电 / Trig 没接 / Echo 线松 / 目标太远或太吸音（3.3 V 供电下超 2 m 开始丢）。
-- **距离恒 `006cm` 之类偏小值** → Echo 线接触不良把脉宽截短、模块被 5 V 反接过、或目标太近落在盲区（<2 cm）。
-- **循迹条八格全实心** → 未校准 / 校准值不匹配当前高度（本模块靠按键校准，无电位器，见 `docs/模块接线说明.md` §2.3），或车停深色地面；抬离桌面做对照。
-- **循迹条八格全空** → 模块没供电，或 ACTIVE_HIGH 极性与实物不符。
-- **状态号恒 0（IDLE）** → 还在上电 2 s 内，或 `rst_n` 没释放。
+- **`DIST:---`** → 无回波：模块没供电 / Trig 没接 / Echo 线松 / 目标太远或太吸音（3.3 V 供电下超 2 m 开始丢）。
+- **距离恒 `DIST:006` 之类偏小值** → Echo 线接触不良把脉宽截短、模块被 5 V 反接过、或目标太近落在盲区（<2 cm）。
+- **`LN=11111111`（全 1）** → 未校准 / 校准值不匹配当前高度（本模块靠按键校准，无电位器，见 `docs/模块接线说明.md` §2.3），或车停深色地面；抬离桌面做对照。
+- **`LN=00000000`（全 0）** → 模块没供电，或 ACTIVE_HIGH 极性与实物不符。
+- **`ST:IDLE` 一直不变** → 还在上电 2 s 内，或 `rst_n` 没释放。
 
 ### 复位键到底接哪根脚（2026-11-16 修正，现场踩坑）
 
@@ -1470,7 +1469,7 @@ PID 和状态机就能写好、能仿真、能综合。等电机到货，只需�
 | 文件 | 作用 | 关键设计 |
 |---|---|---|
 | `src/speed_meter.v` | 固定窗口数编码器脉冲 | 单位 = 每 `WIN_MS`(50 ms) 的净步数，带方向、饱和不翻转；**不做除法**（测周期法低速分辨率差，数脉冲最省逻辑）。当前只写不接（见下） |
-| `src/track_pid.v` | 位置 PID → 左右占空比 | 定点实现：`corr = pos*P_GAIN + (i_acc>>I_SHIFT) + (pos-pos_d)*D_GAIN`，`corr` 限幅 ±`BASE_DUTY`，所以 `duty_l/r = 600±corr` 恒在 0..1200；**积分在累加处钳位**（不在输出处钳，否则 windup 会让倒车冲出去）；丢线时保持上一拍转向（立刻归零会让车冲直） |
+| `src/track_pid.v` | 位置 PID → 左右占空比 | 定点实现：`corr = pos*P_GAIN + (i_acc>>I_SHIFT) + (pos-pos_d)*D_GAIN`，`corr` 限幅 ±`BASE_DUTY`，所以 `duty_l/r = BASE_DUTY±corr` 恒在 0..1200（模块默认 600，顶层覆盖 480，见 §3.42）；**积分在累加处钳位**（不在输出处钳，否则 windup 会让倒车冲出去）；丢线时保持上一拍转向（立刻归零会让车冲直） |
 | `src/car_fsm.v` | 整车状态机 | `IDLE --2s--> RUN --丢线--> LOST(保持300ms) --超时--> SEARCH(原地转，方向按最后线位) --重新压线--> RUN`；障碍 → `STOP`（消除后自动恢复）；找线超时 → `STOP` 且**永久锁存**；**方向切换有 10 ms 死区**（TB6612 同相翻转会有电流尖峰） |
 
 ### 顶层接线
@@ -1519,6 +1518,8 @@ track_line.pos ──► track_pid ──► pid_duty_l/r ──► car_fsm ─�
 参数起步值：`BASE_DUTY=600`（50%）、`P_GAIN=72`、`D_GAIN=40`、`I_SHIFT=5`、`I_LIMIT=640`。
 上车后先只调 `P_GAIN`（摆振就减、跟不上就加），再动 `D_GAIN`。
 
+> **2026-11-22 降速**：顶层加 `TRACK_BASE_DUTY=480`（40%）覆盖模块默认 `BASE_DUTY=600`，解决"修正不及时直接甩出去"。改的是 `src/FpgaCar.v:170` 一个 localparam，模块默认值与 `sim/track_pid_tb.v` 都不动。详见 §3.42。
+
 > **2026-11-18 参数调整（P 40→72、D 24→40）**：原 `P_GAIN=40` 在 pos=7 时只有 280 计数
 > （23% 占空比），`sum_lim` 的 ±`BASE_DUTY`(600) 限幅永远碰不到，两轮只能在 300~900 之间
 > 变化，急弯内侧轮降不到低速。改成 72 后 pos=7 → 504 计数（42%），限幅才真正起作用。
@@ -1540,8 +1541,9 @@ track_line.pos ──► track_pid ──► pid_duty_l/r ──► car_fsm ─�
 
 ### 遗留
 
-- `speed_meter` 已通过仿真但**尚未接入顶层**：当前只做位置环，速度环要先标定
-  "每米多少个脉冲"，否则参数没有物理意义。
+- ~~`speed_meter` 已通过仿真但尚未接入顶层~~ → **2026-11-22 已接入**：`speed_meter` + 新增的
+  `speed_pid.v` 组成左右轮同步环，顶层 `SPEED_LOOP_EN=1'b1`。选「同步」而非「绝对速度」正是为了绕开
+  "每米多少脉冲"的标定：只依赖两个编码器的相对读数，接上就准。详见 §3.42。
 - 串口还没有 `M=`（状态机状态）字段。要加必须同时把 `MSG_LEN` 和 3 行报文索引一起放宽，
   属于下一轮的小改动。
 
@@ -2097,9 +2099,9 @@ Echo 也就是 3.3 V，`pin 14` 可直连，不需要任何分压电阻**。
 | 字段 | 来源 | 含义 |
 |---|---|---|
 | `X=xxxxxxxx` | `track_line.raw`（新增输出端口） | 消抖后的**原始电平**，未经 `ACTIVE_HIGH` 取反。位序同 `T=`，bit7..bit0 = X8..X1 |
-| `C=±nnn` | `track_pid.corr` | PID 转向修正量，带符号三位十进制，限幅 ±`BASE_DUTY`(600)。正 = 向右修 |
-| `DL=xxx` | `ctrl_duty_l` | 实际下发给左轮的占空比，3 位十六进制（0..4B0） |
-| `DR=xxx` | `ctrl_duty_r` | 实际下发给右轮的占空比，3 位十六进制（0..4B0） |
+| `C=±nnn` | `track_pid.corr` | PID 转向修正量，带符号三位十进制，限幅 ±`BASE_DUTY`（顶层现值 480）。正 = 向右修 |
+| `DL=xxx` | `loop_duty_l` | **速度环之后**真正下发给左轮的占空比，3 位十六进制（0..4B0）。2026-11-22 起报环后值，不再是 `ctrl_duty_l` |
+| `DR=xxx` | `loop_duty_r` | 同上，右轮 |
 
 判读要点：
 
@@ -2211,7 +2213,10 @@ parameter integer SEARCH_FAIL_TO_IDLE = 1, // 找线超时后：1=回 IDLE 等�
 
 ### 3.26.3 屏上五块调试区的最终布局
 
-`oled_driver.v` 的 `S_DBG` 每次无条件重写 432 字节（`DK_SEG2=128 / DK_SEG3=224 / DK_SEG4=272 / DK_SEG5=368 / DK_END=432`），
+> **2026-11-22 已改为三行纯文字，本节表格是旧布局，仅作历史记录。** 现行布局见 §5「屏上调试区」一节
+> （`ST:/DIST:/LN:` 三行，page 1 / 6 / 7，共 384 字节）。
+
+当时 `oled_driver.v` 的 `S_DBG` 每次无条件重写 432 字节（`DK_SEG2=128 / DK_SEG3=224 / DK_SEG4=272 / DK_SEG5=368 / DK_END=432`），
 不依赖旧显存，所以改布局不会留残影：
 
 | 显存段 | 屏上位置 | 内容 |
@@ -2341,6 +2346,36 @@ map 699 s / pnr / pgm 全 PASS，`outflow/FpgaCar.bit` = **1840716 B**（比上�
 
 `AVOID_EN=1` 时 `USE_ULTRA` 应同时为 1，否则 `obstacle` 恒 0、避障永不触发。本轮顶层取 `USE_ULTRA=1'b1`、`USE_IR=1'b0`、`USE_K230=1'b0`。
 
+### 3.28.2b 侧绕改为弧线差速（2026-11-22，AVOID_ROUTE_EN=1）
+
+上面三段（后退 → 原地转身 → 试探）在细则上是有问题的：4.3.2 原文禁止「以大转弯的形式绕开障碍物」，而**原地转身恰好是车体横向摆幅最大的动作** —— 驱动轮在距车头 3 cm 处，绕驱动轴原地转时车尾扫出约 √((20−3)² + 6.5²) ≈ 17 cm 的半径，10 cm 立方体旁边根本留不出这个空间。
+
+更关键的是：原来的 `AVOID_ROUTE_EN=1` **并没有跳过倒车和原地转**。四处避障入口当时都写成 `state <= (AVOID_EN != 0) ? S_AVOID_BACK : S_STOP;`，侧绕只是把后面的「试探前进」换成了五段，前面照样先退 400 ms、再原地转 1000 ms。所谓「侧绕」实际是「倒车 + 掉头 + 直冲」的矩形路线。
+
+改法：`AVOID_ROUTE_EN=1` 时改由 `avoid_entry_state` 直接进 `S_AVOID_PROBE`，并把这五段全部改成**两轮都正转、只靠左右差速画弧**：
+
+| 段 | 动作 | 参数（顶层取值） |
+|---|---|---|
+| `BY_OUT` | 朝绕行侧画弧，把车推到障碍侧边 | `AVOID_OUT_MS=524`、`AVOID_OUT_DUTY=860` / `AVOID_OUT_IN_DUTY=380` |
+| `BY_ALIGN` | 反向弧摆正，车沿障碍侧边平行 | `AVOID_ALIGN_MS=524`、`AVOID_ALIGN_DUTY=840` / `AVOID_ALIGN_IN_DUTY=400` |
+| `BY_PASS` | 两轮同速直线超越 | `AVOID_PASS_MS=900`、`AVOID_PASS_DUTY=620` |
+| `BY_TURN_IN` | 反向弧斜切回原线，扫到线提前结束 | `AVOID_TURN_IN_DUTY=860` / `AVOID_TURN_IN_IN_DUTY=420`，上限 `AVOID_TURN_IN_MS` |
+| `BY_REJOIN` | 小差速把残余偏角找回 | `AVOID_REJOIN_DUTY=640` / `AVOID_REJOIN_IN_DUTY=430`，超时 `AVOID_REJOIN_MS` |
+
+约定：`*_DUTY` 是外侧（快）轮，`*_IN_DUTY` 是内侧（慢）轮；`avoid_left=1` 表示从线的左侧绕，OUT 段往左打、其余段往右反打。
+
+**绕行期间不再用超声判阻塞**（`bypass_blocked = 1'b0`）。方块必然处在 25 cm 阈值以内 —— 否则根本不会触发绕行 —— 若继续用 `obstacle` 冻结动作，车会被自己的绕行对象钉在原地。旧逻辑把 `BY_OUT` 也算「正对障碍前进」，一进绕行就停住。安全性改由 `BY_TURN_IN` 扫线上限与 `BY_REJOIN` 超时进 `S_STOP` 兜底。
+
+几何核算（`bench/avoid_sim6.py`，车宽 18.5、方块 10、驱动轮距 16 cm，按车身矩形轮廓逐 0.5 ms 采样与方块求最近距离）：
+
+| 触发距离 | 单弧角度 | 横移 | 最小间隙 |
+|---|---|---|---|
+| 25 cm | 55° | 17.6 cm | 1.96 cm（紧） |
+| 25 cm | 60° | 20.7 cm | **4.47 cm** |
+| 25 cm | 65° | 23.8 cm | 6.46 cm |
+
+车心需偏离线中心 ≥ (18.5+10)/2 = 14.25 cm 才能擦过，所以 60° 是留了约 6 cm 横移余量的取值。**因此 `OBSTACLE_CM` 维持 25 不变**（早先担心 25 cm 来不及，仿真证明够用）。
+
 ### 3.28.3 串口与测试台
 
 - `uart_report.v` 第二行 `MSG2_LEN` 71 → **75**，末尾新增 ` W=`+1 位（`msg2[69]`=空格、`[70]`=`W`、`[71]`=`=`、`[72]`=值、`[73]`=CR、`[74]`=LF）。新端口 `input wire wide`，与其它字段一起在 `R_LOAD` 单拍锁存。
@@ -2352,6 +2387,34 @@ map 699 s / pnr / pgm 全 PASS，`outflow/FpgaCar.bit` = **1840716 B**（比上�
 ### 3.28.4 回归
 
 `bash tools/run_regression.sh` 全量 **20 个 tb 全绿（74 s）**；单项 `track_line_tb` PASS=8、`car_fsm_tb` PASS=44 ALLPASS=1、`uart_report_tb` ALLPASS=1。
+
+### 3.28.5 弧线侧绕的上板编译结果（2026-11-22）
+
+`AVOID_ROUTE_EN=1` 的弧线五段落地后，第一次把 **全量回归 + 综合 + 布局布线 + 烧录生成** 跑通：
+
+| 环节 | 结果 | 关键数据 |
+|---|---|---|
+| 仿真回归 | **24 个 tb 全部无 FAIL**（约 335 条 PASS） | `car_fsm_tb` 85 条 PASS、`bypass_rejoin_tb` 21 条 PASS |
+| `--flow map` | `Stage completed: map`，595 s，**零 ERROR** | LUT 20994（15%）、FF 6184（20%）、RAM 15、DSP 2、ADD 687、SRL 1 |
+| `--flow pnr` | `Stage completed: pnr`，45 s，**零 ERROR** | Setup slack **+30.348 ns**、Hold slack **+0.091 ns**，无违例 |
+| `--flow pgm` | `pgm : PASS` | 产出 `outflow\FpgaCar.bit`（2.12 MB）与 `outflow\FpgaCar.hex`（2.12 MB） |
+
+综合只报了 5 条 `Input/inout port ... is unconnected` 警告，全部是	extbf{设计上就不接}的端口：`ir_l`/`ir_r`（`USE_IR=0`，红外冗余备用）、`i2c_sda_IN`、`cmos_sdat_IN`、`uart_rx`。这类警告不影响功能，但不能当作"没看见"——它们正好印证 §3.20 的红外通道与 §3.19 的相机通道都处于停用状态。
+
+> **烧录已完成（2026-11-22）**：`tools\flash.bat` 三步全部走通——JTAG→SPI bridge 载入 `PROGRAMMING DONE`、
+> 写 flash（Winbond W25Q64 8 MiB，JEDEC `0xEF6017`）后回读比对输出 **`Flash verify successful`**（erase 3 s / write 4 s / read 13 s，692 KiB 区），
+> 最后回装应用位流 `PROGRAMMING DONE`。设备 ID 读回 `0x10660A79`，与 `_jtag.jcf` 的 `id_code` 一致。
+>
+> **踩坑：判断下载器在不在，不能用 `FriendlyName` 匹配 'FTDI'。** 这块 FT232H 由 **libusbK** 驱动，
+> 设备名是 **`ELITES-232DL`**，InstanceId 为 `USB\VID_0403&PID_6014\7&212A54EF&1&2`。
+> 按名字搜 FTDI 会得到 0 个结果，从而误判成"下载器没插"。正确判据是查 `InstanceId -like '*VID_0403*'` 且 `Status = OK`。
+>
+> **另一个坑：`cmd //c tools\flash.bat` 在 MSYS 里不会真正执行**（只弹出一个交互式 cmd 就返回）。
+> 可靠写法是 `cd tools && cmd.exe /c flash.bat`；且**不要用 `| head -N` 截断输出**，那会在第 2 步写 flash 途中杀掉进程。
+
+> **别把历史 ERROR 当成本次失败**：`outflow\FpgaCar.err.log` 是**追加**写入的，里面留着 11 月 10 日的 `instantiating unknown module 'track_line'` 等旧记录。判断本次成败只看 `outflow\FpgaCar.log` 末尾的 `Stage completed: <flow>`。
+
+> **综合卡不卡死怎么判**：日志重定向到文件后是块缓冲的，`FpgaCar.log` 可能十几分钟停在同一个行数。用 `Get-Process efx_map` 的 `CPU` 列采样两次即可——实测 25 s 内从 549 s 涨到 594 s，是多线程全速算，不是死锁。
 
 ---
 
@@ -3224,6 +3287,68 @@ flash.bat 等价流程（tools/flash_hiftdi.sh）：
 - 在 `src/car_fsm.v` 的车控路径上接入停车流程，复用现有电机输出、换向死区、K2 停车和红外循迹。先验证两角同时命中与丢帧超时，再实测 90° 转向、倒车时长和出库后右转接回主线的位置。
 
 K230 已实现侧拍「P」的本地标框和事件记录。Ti60 停车请求接收、库口两角检测及入库动作待实现。
+
+## 3.42 左右轮同步环：speed_meter + speed_pid（2026-11-22）
+
+现场反馈是"循迹修正不及时，车直接甩出去"。根因不是 PID 参数，而是两轮实际转速不一致：同一个占空比给到左右两个 TB6612 通道，两个电机空载转速、负载和轮径都有差异，车会持续偏航，PID 只能靠加大修正去追，修正量大到一定程度就冲出赛道。所以先做一层轮速闭环把两轮拉齐，再让循迹 PID 在上面做位置修正。
+
+### 为什么是"左右同步"而不是"绝对速度环"
+
+绝对速度环要把占空比映射成 m/s，必须标定"每米多少脉冲"。这项标定会随电池电压、地面摩擦、轮胎磨损漂移，每次换场地都得重做。同步环只用两个编码器的相对读数：
+
+```
+diff = spd_l - spd_r                 // 17 位有符号，避免 ±32767 相减溢出
+sum  = P*diff + I_acc>>4             // 限幅 ±SYNC_MAX
+duty_l = duty_l_in - sum
+duty_r = duty_r_in + sum
+```
+
+它保证的只是"两轮同速"，不保证"车跑多快"。速度由上游 `track_pid` 的 `BASE_DUTY` 决定。这个分工的好处是：换电池、换地面、换轮胎都不用重新标定，只要编码器还在出脉冲就有效。
+
+### 降速：基础占空比 600 → 480
+
+同步环只做左右差分，**不动基础占空比**；整车快慢由 `track_pid` 的 `BASE_DUTY` 决定。现场"修正不及时直接甩出去"除了两轮不同步，也有整体太快、留给修正的时间太短的因素，所以同时下调基础占空比。
+
+改法是在顶层加一个覆盖参数，**不动 `src/track_pid.v:24` 的模块默认值**：
+
+```verilog
+// src/FpgaCar.v:189-192
+localparam [10:0] TRACK_BASE_DUTY = 11'd480;   // 480/1200 = 40%
+
+// src/FpgaCar.v:394
+track_pid #( .DUTY_MAX(1200), .BASE_DUTY(TRACK_BASE_DUTY), ... ) u_pid (...);
+```
+
+这样 `sim/track_pid_tb.v:30` 和 `:57` 里硬编码的 `600` 断言仍然成立，单测不用改。调速只需改这一个 localparam：600 = 50%（原值），480 = 40%（现行），420 = 35% 以下会明显发飘。
+
+### 参数与信号
+
+| 参数 | 值 | 含义 |
+|---|---|---|
+| `DUTY_MAX` | 1200 | = CLK_FREQ/PWM_FREQ，占空比上限 |
+| `K_SYNC` | 12 | 同步比例增益（每脉冲差 → 12 计数） |
+| `I_SYNC_SHIFT` | 4 | 同步积分右移（Ki = 1/16） |
+| `I_SYNC_LIMIT` | 400 | 积分累加钳位（抗 windup） |
+| `SYNC_MAX` | 180 | 单侧修正量上限（15% duty） |
+| `NOENC_WIN` | 20 | 连续 20 个窗口无脉冲即判编码器失效 |
+
+修正量上限 `SYNC_MAX`=180 小于基础占空比 480（180/480 = 37.5%），保证任何情况下两轮都不会被拉到反向；`d_l_raw`/`d_r_raw` 另做 0..`DUTY_MAX` 钳位兜底。
+
+### 失效与换相处理
+
+- `active = en && enc_ok && same_dir`。编码器连续 `NOENC_WIN` 个窗口没脉冲 → `enc_ok=0` → 整层直通，退回纯开环，不至于因为编码器坏了车就不走。
+- 两轮转向不同（`dir_l != dir_r`，原地转向/倒车）时 `same_dir=0`，同样直通——原地转向本来就该两轮反向，不能拉齐。
+- `en=0`（停机）时积分清零并直通，避免下次启动带着旧修正。
+
+### 接入点
+
+- `src/FpgaCar.v:185` 顶层开关 `localparam SPEED_LOOP_EN = 1'b1;`
+- `src/FpgaCar.v:283-306` 例化 `speed_meter` + `speed_pid`，`src/FpgaCar.v:194-195` 选择 `loop_duty_l/r = SPEED_LOOP_EN ? spd_duty_* : ctrl_duty_*`。
+- 串口 `DL=`/`DR=` 改报**环后**真实占空比（`loop_duty_l/r`），不再是 `ctrl_duty_l/r`；否则上板看到的数字和车轮实际拿到的对不上。
+
+### 验证
+
+`sim/speed_pid_tb.v` 覆盖：两轮同速不修正、单侧偏快反向修正、修正量钳位、换相直通、编码器失效直通、停机清积分。全量回归通过。
 
 ## 4. 下一步（2026-11-10 按实际到货情况重排）
 
