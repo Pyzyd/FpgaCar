@@ -7,14 +7,22 @@
 //                              |                 |                   |
 //                              |<--(重新压线)----+-------------------+
 //                              |                                     |
-//                              +--(障碍)--> BACK --> TURN --> PROBE -+
-//                              |        (后退)   (原地转)  (试探前进) |
-//                              |                            |        |
-//                              |             (还有障碍 & 未超次数)--+
-//                              |                            |
+//                              +--(障碍)-------------------------+   |
+//                              |                                 |   |
+//   AVOID_ROUTE_EN=1: RUN --障碍--> PROBE（弧线侧绕五段）--------+   |
+//                              |   OUT --> ALIGN --> PASS -->         |
+//                              |   TURN_IN --> REJOIN --> RUN         |
+//                              |                                      |
+//   AVOID_ROUTE_EN=0: RUN --障碍--> BACK --> TURN --> PROBE（老三段） |
+//                    (后退)  (原地转)  (试探前进)                     |
+//                              |             (还有障碍 & 未超次数)---+
 //                              |                     (无障碍) --> RUN
 //                              |                (次数用尽) --> STOP
 //                              +<--找线超时(SEARCH_FAIL_TO_IDLE=1)---+
+//
+// 【侧绕为什么用弧线】细则 4.3.2 禁止"以大转弯形式绕开障碍"，而倒车+原地
+// 掉头恰恰是车尾横向摆幅最大的动作（车尾可扫出约 17 cm）。侧绕模式把整个
+// 动作换成五段两轮正转的差速圆弧，全程不出现反转轮，车体沿弧线平移让开方块。
 //
 // 【为什么要有 LOST 这一级】track_line 的 lost 会在线抖动/短暂离线的瞬间置位，
 // 立刻进找线会让车原地抽搐。先保持最后一刻的转向 HOLD_MS，多数情况下线就回来了。
@@ -63,7 +71,22 @@ module car_fsm #(
     parameter integer AVOID_FIXED_RIGHT = 0, // 侧绕时 1=固定右侧，0=按最后线位选侧
     parameter integer AVOID_PASS_MS = 900, // 车头摆正后沿障碍侧边直行
     parameter integer AVOID_REJOIN_MS = 1200,
-    parameter integer AVOID_REJOIN_DUTY = 400,
+    parameter integer AVOID_REJOIN_DUTY = 640,   // BY_REJOIN 外侧快轮
+    // ---- 弧线绕障（AVOID_ROUTE_EN=1 时使用）----
+    // 每一段都是"两轮都正转、外侧快内侧慢"的圆弧，靠差速而非原地转向改变航向，
+    // 因此车头/车尾的横向摆幅远小于原地转，符合细则"不能大转弯"的要求。
+    // 占空比成对给出：OUT 段把车从线中心推到障碍侧边，ALIGN 段把航向摆正，
+    // TURN_IN 段斜切回线，REJOIN 段用较小的差速把残余偏角慢慢找回来。
+    parameter integer AVOID_OUT_DUTY     = 860,  // BY_OUT 外侧轮
+    parameter integer AVOID_OUT_IN_DUTY  = 380,  // BY_OUT 内侧轮
+    parameter integer AVOID_ALIGN_DUTY   = 840,  // BY_ALIGN 外侧快轮（反向弧，摆正航向）
+    parameter integer AVOID_ALIGN_IN_DUTY= 400,  // BY_ALIGN 内侧慢轮
+    parameter integer AVOID_PASS_DUTY    = 620,  // BY_PASS 直线超越，两轮同速
+    parameter integer AVOID_TURN_IN_DUTY = 860,  // BY_TURN_IN 外侧快轮（反向弧切回线）
+    parameter integer AVOID_TURN_IN_IN_DUTY = 420, // BY_TURN_IN 内侧慢轮
+    parameter integer AVOID_REJOIN_IN_DUTY  = 430, // BY_REJOIN 内侧慢轮
+    parameter integer AVOID_OUT_MS      = 524,  // 外摆弧时长（60° 圆弧）
+    parameter integer AVOID_ALIGN_MS    = 524,  // 摆正弧时长（同角度反向弧）
     parameter integer AVOID_LINE_MS = 20,  // 回线时黑线需稳定出现
     parameter integer AVOID_BLOCK_MS = 250,// 前方受阻先停，再等超声更新
     // ---- 拐角兜底（没有 K230 / 没识别到转向牌时怎么走）----
@@ -169,30 +192,80 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     reg bypass_left_line;
     reg [15:0] bypass_line_cnt, bypass_block_cnt;
     reg [15:0] bypass_turn_in_cnt;   // TURN_IN 期间连续看到线的毫秒数
+    // 【入口分流】AVOID_EN=0 → 停车等待；AVOID_ROUTE_EN=1 → 直接进弧线绕行；
+    // 其余 → 老的三段（后退 → 原地转 → 试探）。
+    // 必须让侧绕跳过 BACK/TURN：那两段正是细则 4.3.2 禁止的"倒车 + 大转弯"。
+    wire [2:0] avoid_entry_state = (AVOID_EN == 0)       ? S_STOP :
+                                   (AVOID_ROUTE_EN != 0) ? S_AVOID_PROBE :
+                                                           S_AVOID_BACK;
     wire avoid_backing = (state == S_AVOID_BACK);
     wire avoid_turning_out = (state == S_AVOID_TURN);
     wire avoid_active = avoid_backing || avoid_turning_out || (state == S_AVOID_PROBE);
     wire bypass_active = (AVOID_ROUTE_EN != 0) && (state == S_AVOID_PROBE);
-    wire bypass_forward = (bypass_step == BY_OUT || bypass_step == BY_PASS || bypass_step == BY_REJOIN);
-    wire bypass_blocked = bypass_active && bypass_forward && obstacle;
+    // 【弧线绕障】绕行全程两轮都正转，只靠左右差速画弧：
+    //   外侧轮快、内侧轮慢 → 车沿圆弧向外侧平移，没有"倒车 + 原地掉头"。
+    // 为什么不用原地转：细则 4.3.2 明文禁止"以大转弯的形式绕开障碍"，
+    // 而原地转虽然转弯半径≈0，车头/车尾摆幅却最大（车尾扫出约 17 cm），
+    // 恰好是 10 cm 立方体旁边最容易蹭上去的动作。
+    // 【绕行期间不看超声】弧线绕障的整条轨迹是预先按几何算好的，方块本来就
+    // 必然处在 25 cm 阈值以内（否则根本不会触发绕行）。若在这里继续用
+    // obstacle 判"受阻"，车会在 BY_OUT/BY_PASS 途中被自己的绕行对象冻住。
+    // 安全性改由三段兜底保证：BY_TURN_IN 扫线上限、BY_REJOIN 超时进 S_STOP。
+    wire bypass_forward = (bypass_step == BY_PASS || bypass_step == BY_REJOIN);
+    wire bypass_blocked = 1'b0;
     wire line_visible = on_line && !lost && !wide;   // 真的压在线上（宽黑不算）
     wire bypass_has_line = line_visible;
 
-    // 出线朝绕行的一侧转，摆正和回线转向则朝相反一侧转。
-    // 转向统一让一轮正转、另一轮反转，两轮使用相同的转向占空比。
-    wire avoid_pivot = avoid_turning_out || (bypass_active && !bypass_forward);
-    wire avoid_turn_left = avoid_turning_out ? avoid_left : !avoid_left;
+    // 转向符号：avoid_left=1 表示从障碍左侧（线的左边）绕过去。
+    // 弧线绕行用外侧轮/内侧轮占空比差实现，"左绕"= 右轮快、左轮慢。
+    // 老的三段试探仍用原地转（avoid_turning_out），这里两者并存互不影响。
+    // 【只有旧三段用原地转】AVOID_ROUTE_EN=1 的侧绕已全部改为两轮正转的差速弧，
+    // 弧线段（ALIGN / TURN_IN）不再是"一正一反原地掉头"，所以不能再走 pivot 通路。
+    wire avoid_pivot = avoid_turning_out;
+    wire avoid_turn_left = avoid_left;
     wire avoid_forward = (state == S_AVOID_PROBE) && !avoid_pivot;
-    wire avoid_dir_l = avoid_forward || (avoid_pivot && !avoid_turn_left);
-    wire avoid_dir_r = avoid_forward || (avoid_pivot && avoid_turn_left);
-    wire [10:0] avoid_duty = avoid_backing ? AVOID_BACK_DUTY[10:0] :
-                            avoid_pivot ? AVOID_TURN_DUTY[10:0] :
-                            (bypass_active && bypass_step == BY_REJOIN) ? AVOID_REJOIN_DUTY[10:0] :
-                            AVOID_PROBE_DUTY[10:0];
+
+    // 每段的 (外侧快轮, 内侧慢轮) 占空比。BY_PASS 单独取同速值。
+    wire [10:0] bypass_outer = (bypass_step == BY_ALIGN)   ? AVOID_ALIGN_DUTY[10:0] :
+                               (bypass_step == BY_TURN_IN) ? AVOID_TURN_IN_DUTY[10:0] :
+                               (bypass_step == BY_REJOIN)  ? AVOID_REJOIN_DUTY[10:0] :
+                                                             AVOID_OUT_DUTY[10:0];
+    wire [10:0] bypass_inner = (bypass_step == BY_ALIGN)   ? AVOID_ALIGN_IN_DUTY[10:0] :
+                               (bypass_step == BY_TURN_IN) ? AVOID_TURN_IN_IN_DUTY[10:0] :
+                               (bypass_step == BY_REJOIN)  ? AVOID_REJOIN_IN_DUTY[10:0] :
+                                                             AVOID_OUT_IN_DUTY[10:0];
+
+    // 【弧向】哪几段往哪边打弯：
+    //   BY_OUT   朝绕行侧偏（左绕就左转）—— 把车推到障碍侧边；
+    //   BY_ALIGN 反打回来，把航向摆正，车沿障碍侧边平行前进；
+    //   BY_PASS  两轮同速直线超越障碍；
+    //   BY_TURN_IN / BY_REJOIN 继续反打，斜切回原线路。
+    // 差速方向：两轮都正转时，左轮慢 = 车头左偏，右轮慢 = 车头右偏。
+    wire bypass_straight = (bypass_step == BY_PASS);
+    wire bypass_arc_left = (bypass_step == BY_OUT) ? avoid_left : !avoid_left;
+
+    // 【必须区分侧绕与老三段】bypass_step 只在 bypass_active 时有效；AVOID_ROUTE_EN=0
+    // 时它恒为 BY_OUT，若直接拿它选弧线占空比，老三段的"试探前进"会跑成 860/380，
+    // 与 AVOID_PROBE_DUTY 不等 → avoid_drive 永不成立 → en 不置位 → 状态机卡死。
+    wire [10:0] avoid_duty_l = avoid_backing ? AVOID_BACK_DUTY[10:0] :
+                               avoid_pivot   ? AVOID_TURN_DUTY[10:0] :
+                               !bypass_active ? AVOID_PROBE_DUTY[10:0] :
+                               bypass_straight ? AVOID_PASS_DUTY[10:0] :
+                               bypass_arc_left ? bypass_inner : bypass_outer;
+    wire [10:0] avoid_duty_r = avoid_backing ? AVOID_BACK_DUTY[10:0] :
+                               avoid_pivot   ? AVOID_TURN_DUTY[10:0] :
+                               !bypass_active ? AVOID_PROBE_DUTY[10:0] :
+                               bypass_straight ? AVOID_PASS_DUTY[10:0] :
+                               bypass_arc_left ? bypass_outer : bypass_inner;
+
+    // 弧线段两轮都正转；后退段两轮都反转；只有老的三段试探里的原地转才一正一反。
+    wire avoid_dir_l = avoid_backing ? 1'b0 : avoid_pivot ? !avoid_turn_left : 1'b1;
+    wire avoid_dir_r = avoid_backing ? 1'b0 : avoid_pivot ?  avoid_turn_left : 1'b1;
+
     // 每段只在死区结束、两轮方向和占空比就绪后计时。
     wire avoid_dirs_ready = !dead && !bypass_blocked &&
                             (dir_l == avoid_dir_l) && (dir_r == avoid_dir_r);
-    wire avoid_drive = avoid_dirs_ready && (duty_l == avoid_duty) && (duty_r == avoid_duty);
+    wire avoid_drive = avoid_dirs_ready && (duty_l == avoid_duty_l) && (duty_r == avoid_duty_r);
 
     wire en_run = (state == S_RUN)   || (state == S_LOST)     || (state == S_SEARCH)
                || avoid_active;
@@ -278,8 +351,8 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                 if (avoid_active) begin
                     dir_l_des <= avoid_dir_l;
                     dir_r_des <= avoid_dir_r;
-                    duty_l <= avoid_dirs_ready ? avoid_duty : 11'd0;
-                    duty_r <= avoid_dirs_ready ? avoid_duty : 11'd0;
+                    duty_l <= avoid_dirs_ready ? avoid_duty_l : 11'd0;
+                    duty_r <= avoid_dirs_ready ? avoid_duty_r : 11'd0;
                 end
                 if (!bypass_active) begin
                     bypass_step <= BY_OUT;
@@ -379,7 +452,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             ms_cnt  <= 16'd0;
                             avoid_tries <= 4'd0;
                             avoid_left  <= avoid_start_left;
-                            state   <= (AVOID_EN != 0) ? S_AVOID_BACK : S_STOP;
+                            state   <= avoid_entry_state;
                         end
                     end else begin
                         dir_l_des <= 1'b1;
@@ -403,7 +476,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             ms_cnt <= 16'd0;
                             avoid_tries <= 4'd0;
                             avoid_left  <= avoid_start_left;
-                            state  <= (AVOID_EN != 0) ? S_AVOID_BACK : S_STOP;
+                            state  <= avoid_entry_state;
                         end else if (lost) begin
                             ms_cnt <= 16'd0;
                             state  <= S_LOST;
@@ -559,11 +632,11 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             bypass_block_cnt <= 16'd0;
                             ms_cnt <= ms_cnt + 16'd1;
                             case (bypass_step)
-                                BY_OUT: if (ms_cnt >= AVOID_PROBE_MS - 1) begin
+                                BY_OUT: if (ms_cnt >= AVOID_OUT_MS - 1) begin
                                     ms_cnt <= 16'd0;
                                     bypass_step <= BY_ALIGN;
                                 end
-                                BY_ALIGN: if (ms_cnt >= AVOID_TURN_MS - 1) begin
+                                BY_ALIGN: if (ms_cnt >= AVOID_ALIGN_MS - 1) begin
                                     ms_cnt <= 16'd0;
                                     bypass_step <= BY_PASS;
                                 end

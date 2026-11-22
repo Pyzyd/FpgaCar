@@ -3,7 +3,8 @@
 module bypass_rejoin_tb;
     localparam [2:0] RUN = 1, LOST = 2, SEARCH = 3, STOP = 4, TURN = 6, BYPASS = 7;
     localparam [2:0] OUT = 0, ALIGN = 1, PASS_SIDE = 2, TURN_IN = 3, REJOIN = 4;
-    localparam integer TURN_TICKS = 6, TURN_IN_TICKS = 40;
+    // 弧线绕障后不再有"原地转"段：OUT/ALIGN 各自是一段定长圆弧。
+    localparam integer OUT_TICKS = 6, TURN_IN_TICKS = 40;
     // AVOID_LINE_MS 用的是默认 3；把 TURN_IN 的上限拉到 40，两条通路才拉开
     // 足够差距（扫线 ~3 拍，定长 40 拍），否则断言区分不出来。
     localparam integer LINE_TICKS = 3;
@@ -18,13 +19,14 @@ module bypass_rejoin_tb;
     wire fixed_en, fixed_dir_l, fixed_dir_r;
     wire [10:0] fixed_duty_l, fixed_duty_r;
     integer exit_ticks = 0, align_ticks = 0, return_ticks = 0;
-    reg fixed_pivot_error = 0;
+    reg fixed_arc_error = 0;
     reg inside_bypass = 0;
 
     car_fsm #(
         .CLK_FREQ(1000), .START_MS(1), .LOST_HOLD_MS(2), .DIR_DEAD_MS(1),
-        .AVOID_ROUTE_EN(1), .AVOID_BACK_MS(4), .AVOID_TURN_MS(TURN_TICKS), .AVOID_PROBE_MS(6),
+        .AVOID_ROUTE_EN(1), .AVOID_BACK_MS(4), .AVOID_TURN_MS(6), .AVOID_PROBE_MS(6),
         .AVOID_TURN_IN_MS(TURN_IN_TICKS),
+        .AVOID_OUT_MS(OUT_TICKS), .AVOID_ALIGN_MS(OUT_TICKS),
         .AVOID_PASS_MS(14), .AVOID_REJOIN_MS(20), .AVOID_LINE_MS(3), .AVOID_BLOCK_MS(5)
     ) dut (
         .clk(clk), .rst_n(rst_n), .on_line(on_line), .lost(lost), .obstacle(obstacle),
@@ -35,8 +37,9 @@ module bypass_rejoin_tb;
     car_fsm #(
         .CLK_FREQ(1000), .START_MS(1), .LOST_HOLD_MS(2), .DIR_DEAD_MS(1),
         .AVOID_ROUTE_EN(1), .AVOID_FIXED_RIGHT(1),
-        .AVOID_BACK_MS(4), .AVOID_TURN_MS(TURN_TICKS), .AVOID_TURN_DUTY(TURN_DUTY),
+        .AVOID_BACK_MS(4), .AVOID_TURN_MS(6), .AVOID_TURN_DUTY(TURN_DUTY),
         .AVOID_PROBE_MS(6), .AVOID_TURN_IN_MS(TURN_IN_TICKS),
+        .AVOID_OUT_MS(OUT_TICKS), .AVOID_ALIGN_MS(OUT_TICKS),
         .AVOID_PASS_MS(14), .AVOID_REJOIN_MS(20), .AVOID_LINE_MS(3), .AVOID_BLOCK_MS(5)
     ) fixed_right (
         .clk(clk), .rst_n(rst_n), .on_line(on_line), .lost(lost), .obstacle(obstacle),
@@ -45,23 +48,37 @@ module bypass_rejoin_tb;
         .duty_l(fixed_duty_l), .duty_r(fixed_duty_r), .state(fixed_state), .turn_dir()
     );
 
-    wire fixed_turn_out = fixed_state == TURN;
-    wire fixed_align = fixed_state == BYPASS && fixed_right.bypass_step == ALIGN;
+    wire fixed_align   = fixed_state == BYPASS && fixed_right.bypass_step == ALIGN;
     wire fixed_turn_in = fixed_state == BYPASS && fixed_right.bypass_step == TURN_IN;
+    wire fixed_out     = fixed_state == BYPASS && fixed_right.bypass_step == OUT;
+    wire fixed_pass    = fixed_state == BYPASS && fixed_right.bypass_step == PASS_SIDE;
+    wire any_arc = fixed_out || fixed_align || fixed_turn_in || fixed_pass;
 
+    // 【弧线断言替代原地转断言】旧的 fixed_pivot_error 检查"两轮反相 + 同为
+    // TURN_DUTY"，那是倒车/原地掉头时代的特征。现在绕障全程两轮同向正转，
+    // 只靠差速画弧，所以改为检查：
+    //   · 绕行段永远不出现反转轮（dir_l/dir_r 必须都为 1）；
+    //   · 非直线段两侧占空比必须不同（真在画弧，而不是直行冲过去）；
+    //   · 直线超越段两轮占空比相同。
+    reg fixed_straight_error = 0;
     always @(negedge clk) begin
         if (!rst_n) begin
             exit_ticks <= 0;
             align_ticks <= 0;
             return_ticks <= 0;
-            fixed_pivot_error <= 0;
-        end else if (fixed_en && (fixed_turn_out || fixed_align || fixed_turn_in)) begin
-            if (fixed_turn_out) exit_ticks <= exit_ticks + 1;
-            if (fixed_align) align_ticks <= align_ticks + 1;
+            fixed_arc_error <= 0;
+            fixed_straight_error <= 0;
+        end else if (fixed_en && any_arc) begin
+            if (fixed_out)     exit_ticks   <= exit_ticks + 1;
+            if (fixed_align)   align_ticks  <= align_ticks + 1;
             if (fixed_turn_in) return_ticks <= return_ticks + 1;
-            if (fixed_dir_l !== fixed_turn_out || fixed_dir_r !== !fixed_turn_out ||
-                fixed_duty_l !== TURN_DUTY || fixed_duty_r !== TURN_DUTY)
-                fixed_pivot_error <= 1;
+            // 只在两轮真的出力时判占空比关系：换相死区/就绪前 duty 都是 0，
+            // 那是"还没动"，不是"画弧却两轮等速"。
+            if (!fixed_dir_l || !fixed_dir_r) fixed_arc_error <= 1;
+            if ((fixed_duty_l != 0) && (fixed_duty_r != 0)) begin
+                if (fixed_pass && (fixed_duty_l !== fixed_duty_r)) fixed_straight_error <= 1;
+                if (!fixed_pass && (fixed_duty_l === fixed_duty_r)) fixed_arc_error <= 1;
+            end
         end
     end
 
@@ -101,7 +118,8 @@ module bypass_rejoin_tb;
             rst_n = 1;
             wait (state == RUN);
             @(negedge clk); obstacle = 1; inside_bypass = 1;
-            wait (state == TURN);
+            // 弧线绕障直接从 RUN 跳到 BYPASS（不再经过 S_AVOID_BACK/S_AVOID_TURN）。
+            wait (state == BYPASS);
             @(negedge clk); on_line = 0; lost = 1;
         end
     endtask
@@ -118,8 +136,12 @@ module bypass_rejoin_tb;
         begin_bypass(0);
         obstacle = 0;
         wait_drive(ALIGN);
-        check(dir_l && !dir_r, "left detour rotates right to align");
-        check(exit_ticks == TURN_TICKS && !fixed_pivot_error, "fixed right starts with a timed right pivot");
+        // 左绕（avoid_left=1）：ALIGN 段是反打回来的弧，快轮在右。
+        // 两轮都必须正转 —— 这正是"用差速画弧代替原地掉头"的关键判据。
+        check(dir_l && dir_r, "left detour keeps both wheels advancing through align");
+        // 左绕：OUT 段左偏（左轮慢），ALIGN 段反打回正（左轮快、右轮慢）。
+        check(dut.duty_l > dut.duty_r, "align arc reverses the steer when detouring left");
+        check(exit_ticks == OUT_TICKS && !fixed_arc_error, "fixed right starts with a timed outward arc");
         wait_drive(PASS_SIDE);
         check(dir_l && dir_r, "both wheels advance along the obstacle side");
         on_line = 1; lost = 0;
@@ -128,9 +150,10 @@ module bypass_rejoin_tb;
         on_line = 0; lost = 1;
 
         wait_drive(REJOIN);
-        check(!fixed_pivot_error, "all powered pivots drive opposite wheels at equal duty");
-        check(align_ticks == TURN_TICKS, "alignment turn lasts the full powered duration");
-        check(return_ticks == TURN_IN_TICKS, "return turn uses its own powered duration");
+        check(!fixed_arc_error, "every bypass step drives both wheels forward with unequal duty");
+        check(!fixed_straight_error, "straight pass keeps both wheels at equal duty");
+        check(align_ticks == OUT_TICKS, "alignment arc lasts the full powered duration");
+        check(return_ticks == TURN_IN_TICKS, "return arc uses its own powered duration");
         on_line = 1; lost = 0; wide = 1;
         repeat (4) @(negedge clk);
         check(state == BYPASS, "wide black does not qualify as the return line");
@@ -146,7 +169,9 @@ module bypass_rejoin_tb;
         begin_bypass(0);
         wait (state == BYPASS && dut.bypass_step == OUT);
         @(negedge clk);
-        check(!en, "obstacle still ahead cuts drive during exit");
+        // 绕行期间不再用超声切电：方块必然处在阈值内（否则不会触发绕行），
+        // 若继续据此断电，车会被自己的绕行对象冻住。这里改为确认仍在推进。
+        check(en, "obstacle inside threshold does not freeze the detour");
         wait (state == STOP);
         @(negedge clk); obstacle = 0;
         repeat (5) @(negedge clk);
@@ -162,7 +187,7 @@ module bypass_rejoin_tb;
         rst_n = 1;
         wait (state == RUN);
         @(negedge clk); obstacle = 1;
-        wait (state == TURN);
+        wait (state == BYPASS);
         @(negedge clk); obstacle = 0;
         // 故意不再改 on_line/lost：全程压线
         wait (state == BYPASS && dut.bypass_step == PASS_SIDE);
@@ -206,8 +231,8 @@ module bypass_rejoin_tb;
         begin_bypass(-5'sd2);
         obstacle = 0;
         wait_drive(ALIGN);
-        check(!dir_l && dir_r, "right detour mirrors alignment turn");
-        check(exit_ticks == TURN_TICKS && !fixed_pivot_error, "fixed right ignores last line position");
+        check(dir_l && dir_r, "right detour also keeps both wheels advancing");
+        check(exit_ticks == OUT_TICKS && !fixed_arc_error, "fixed right ignores last line position");
         wait_drive(REJOIN);
         wait (state == STOP);
         @(negedge clk);
