@@ -58,9 +58,40 @@
 | --- | --- |
 | `env.bat` | Efinity 2026.1 全套环境变量 + `PYEXE`。所有 `.bat` 都先 `call` 它，手敲命令时别漏 |
 | `jtag_program.py` | 修掉 Efinity 自带下载器 `set_up_urls()` 越界 bug 的封装；支持 `jtag` / `jtag_bridge` 等六种模式 |
-| `run_regression.sh` | 全量仿真回归门禁，当前 23 个 tb。**改 `src/` 必跑** |
+| `run_regression.sh` | 全量仿真回归门禁，当前 24 个 tb。**改 `src/` 必跑** |
+| `hiftdi_runner.py` | HiFTDI(D2XX) 后端的启动器，绕过 libusbK 驱动依赖，用法同 `jtag_program.py` |
+| `flash_hiftdi.sh` | 用 HiFTDI 后端烧 Flash 的完整流程（装桥 → 写校验 → 回烧），见第 6 节 |
 | `hooks/pre-push` | 推送门禁：回归不过不许 push。用 `git config core.hooksPath tools/hooks` 启用 |
 
+
+## 6. Windows 上没有 libusbK 时怎么烧（HiFTDI 后端）
+
+`dl.bat` / `flash.bat` 走 pyftdi + libusb，要求 FT232H 绑定 **libusbK** 驱动。
+如果这颗 FT232H 被 FTDI 官方 `ftdibus.inf` 抢到（设备管理器里表现为「USB Serial Port (COMx)」），
+所有命令都会报 `ERROR: No USB target detected, aborting!`。换 USB 口救不了——
+驱动是按 rank 选的，新节点一律落到 FTDIBUS。
+
+这时不用装 Zadig，改用 Efinity 自带的 **HiFTDI（D2XX）后端**：
+
+| 项 | 值 |
+| --- | --- |
+| 环境变量 | `EFX_HIFTDI_ENABLE=1` |
+| 设备 URL | `hiftdi://0x0403:0x6014/-1`（不再是 `ftdi://0x0403:0x6014:0:ff/1`） |
+| 驱动依赖 | 系统自带 `C:\Windows\system32\ftd2xx.dll`，不需要 libusbK |
+
+Efinity 2026.1 的 HiFTDI 后端有三处 bug，必须在运行时打补丁才能跑 jtag_bridge，
+全部在 `hiftdi_runner.py` 里 monkeypatch，不改 `C:\Efinity` 下任何安装文件：
+
+1. `hiftdi/jtag.py:448` 的 `configure(self, url)` 比调用方少一个参数；
+2. `efx_hw_common/manager.py:252-253` 把 hiftdi 的 JTAGFINEGRAIN 分支注释掉了，
+   而 `--jtag_bridge_mode` 恰好强制走这个类型；
+3. 链式引擎会传 0 位 TMS 和裸 `bytes`，hiftdi 的 `write_tms` / `write` 都不接受。
+
+用法：`bash tools/flash_hiftdi.sh [别的.hex]`（装桥镜像 → 烧写校验 → 回烧应用）。
+2026-11-22 用这条路径烧录成功，回读 687104 字节与源文件逐字节一致。
+
+**注意**：`--jtag_bridge_mode all` 第一遍 mismatch 是正常的，工具会自动重试；
+看 `Flash verify successful`，不要看退出码。
 ## 临时脚本的约定
 
 `tools/_*.py` 是一次性探测脚本，已被 `.gitignore` 排除，**不入库**。用完就删，不要留在目录里；

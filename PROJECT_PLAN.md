@@ -3126,6 +3126,82 @@ end
 - 正常直角的实际转向时长。若发现车在岔口明显"转过再回来"，说明 `TURN_LINE_MS=20` 太短、`TURN_MIN_MS=250` 太长，可下调
 - `TURN_DIR_HOLD_MS=1500` 的转向指示保持时间是否符合观感
 
+### 3.40 Flash 烧不进去的真因：FT232H 驱动绑错，改用 HiFTDI(D2XX) 后端（2026-11-22）
+
+#### 3.40.1 现象
+所有 `--jtag_bridge_mode all` 都报 `ERROR: Flash verify unsuccessful... mismatch found`，
+而 `-m jtag` 临时配置 100% 成功（`Device ID read from JTAG: 0x10660A79` + `PROGRAMMING DONE`）。
+中途还出现 `Cannot unprotect flash device`、`Command timeout (1 cycles)`、
+JEDEC 读成 `0x595712`/`0x41921A`/`0x040082` 等一堆互相矛盾的报错。
+
+#### 3.40.2 真因：FT232H 落在了 FTDIBUS 驱动上
+Efinity 的下载器走 pyftdi + libusb，要求 FT232H 绑定 **libusbK** 驱动
+（`C:/Efinity/2026.1/pgm/bin/efx_pgm/ftdi_program.py:92-101` 的注释里写明要用 Zadig 装 libusbK）。
+
+本机这颗 FT232H 被 FTDI 官方 `ftdibus.inf` 抢走了：
+
+```
+pnputil /enum-devices /instanceid "USB\VID_0403&PID_6014\6&253f4ca5&0&4" /drivers
+  oem126.inf  ftdibus.inf   FTDI        2024-10-28 2.12.36.20   Best Ranked / Installed
+  oem128.inf  elites-232dl.inf  libusbK  2014-04-28 3.0.7.0     Outranked
+```
+
+新版 FTDI 官方包按 rank 顶掉了老的 libusbK 包，**换 USB 口无效**——新枚举出的节点一律落 FTDIBUS。
+改驱动绑定要管理员权限跑 Zadig，当前会话没有。
+
+#### 3.40.3 解法：Efinity 自带的 HiFTDI(D2XX) 后端
+`C:/Efinity/2026.1/pgm/bin/efx_pgm/usb_resolver.py:705-713`：
+Windows 下设 `EFX_HIFTDI_ENABLE=1` 就会追加 `HiFTDIDeviceResolver`，走系统自带的
+`C:\Windows\system32\ftd2xx.dll`，**完全不依赖 libusbK**。设备 URL 随之变成
+`hiftdi://0x0403:0x6014/-1`。
+
+#### 3.40.4 该后端的三处 bug（运行时 monkeypatch，不改安装文件）
+
+| # | 位置 | 毛病 | 补丁 |
+| --- | --- | --- | --- |
+| 1 | `hiftdi/jtag.py:448` | `configure(self, url)` 只收 1 个参数，而 `efx_dbg/jcf.py:795` 传 2 个 → `TypeError` | 包一层只取 url |
+| 2 | `efx_hw_common/manager.py:252-253` | hiftdi 的 `JTAGFINEGRAIN` 分支被注释掉，而 `--jtag_bridge_mode` 恰好强制走这个类型 → `NotImplementedError` | 让 `hiftdi://` + `JTAGFINEGRAIN` 返回 `hj.JtagEngine` |
+| 3 | `hiftdi/jtag.py` 的 `write_tms` / `write` | 链式引擎会传 0 位 TMS 和裸 `bytes`，两者都不被接受 | 0 位 TMS 直接返回；bytes 按 pyftdi 语义拆成 bit 序列 |
+
+补丁都在 `tools/hiftdi_runner.py` 里，用 `runpy` 转交给 `tools/jtag_program.py` 原有的命令行逻辑。
+
+#### 3.40.5 结果
+
+```
+flash.bat 等价流程（tools/flash_hiftdi.sh）：
+  [1] 装桥镜像 u10660A79.bit      -> Device ID read from JTAG: 0x10660A79 / PROGRAMMING DONE
+  [2] --jtag_bridge_mode all --verify_method onchipx1 @1.5MHz
+        第一遍：erase 2s / write 5s / read 3s -> ERROR: Flash verify unsuccessful... mismatch found
+        第二遍：erase 2s / write 13s / read 3s -> Flash verify successful
+  [3] 回烧应用位流               -> PROGRAMMING DONE
+```
+
+独立回读验证：`--jtag_bridge_mode read --num_bytes 687104` 落 `.scratch/rb_final.hex`，
+逐行 `int(line,16)&0xFF` 解码后与 `outflow/FpgaCar.hex` 比对：
+**`diff bytes 0 of 687104`，完全一致**。
+
+**第一遍 mismatch 是正常的**，`all` 模式失败会自动重试一轮；判据只看 `Flash verify successful`，
+不要看退出码。
+
+#### 3.40.6 此前所有「Flash 物理故障」结论全部作废
+11-21 到 11-22 之间做过的一大批实验——擦除分区残留 72.2%、双图案 AND 残留、
+写入非确定性、六遍连续写收敛到 7.1%、地址别名回绕、`Cannot unprotect flash device`——
+**根因都是设备在 libusb 路径下根本打不开**，测出来的全是无效数据，不要再引用。
+
+另外两个被这次排查顺带纠正的判断：
+- `u10661A79.bit` 不能当桥镜像（那是别的 die 的，桥版本报 0.0），必须用 `u10660A79.bit`
+- `--spi_active_freq` 对 JTAG 桥模式无效，只写进 `self.spi_flash_program_freq`，走的是 SPI Active 路径；
+  桥的时钟只受 `--jtag_clock_freq` 控制
+
+#### 3.40.7 现场怎么判断板子有没有上电
+整板没电时 JTAG 读回 `Device ID read from JTAG: 0xFFFFFFFF`，**而工具仍打印 `PROGRAMMING DONE`**，
+极易误判成功。判据顺序：
+1. 核心板 D9（`VDD3V3 → R42 4.7K → D9 → GND`）是否常亮——这是全板唯一的电源指示灯
+2. 按钮板船型开关 SS-12D11G5R 有没有被碰关
+3. 六颗 LED 全灭 + OLED 黑屏 + JTAG 读 0xFFFFFFFF 三件事同时出现 = 没电
+
+**核心板 USB-Mini 口只给 CH340 供电，不给整板供电。**
+
 ## 4. 下一步（2026-11-10 按实际到货情况重排）
 
 ### 第 1 步：现在就能做的上板验证（不需要任何待买硬件）
