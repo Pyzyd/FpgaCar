@@ -164,6 +164,11 @@ module FpgaCar (
     localparam        PWM_BENCH_TEST = 1'b0;
     localparam [10:0] BENCH_DUTY     = 11'd300;     // 300/1200 = 25%
 
+    // 【循迹基础占空比】现场反馈"修正不及时直接甩出去"：降到 40% 留出修正余量。
+    //   只改顶层覆盖，track_pid 模块默认值仍是 600，单测 track_pid_tb 不受影响。
+    //   嫌慢就往上调（600 = 50%，原值），嫌甩就往下调（420 = 35% 起会明显发飘）。
+    localparam [10:0] TRACK_BASE_DUTY = 11'd480;
+
     wire              ctrl_en;
     wire              ctrl_dir_l, ctrl_dir_r;
     wire [10:0]       ctrl_duty_l, ctrl_duty_r;
@@ -175,9 +180,28 @@ module FpgaCar (
     wire              motion_rst_n = sys_rst_n && run_enable;
     wire [2:0]        reported_state = (panel_status == 2'd2) ? 3'd4 : car_state;
 
+    // ------------------------------------------------------------------
+    // 速度环（编码器闭环）
+    //   SPEED_LOOP_EN = 0 → 完全直通，行为与加环之前一模一样；
+    //   = 1 → car_fsm 给出的占空比先经 speed_pid 用编码器实测速度拉平两轮。
+    //   编码器没接/没脉冲时 speed_pid 内部自动回退成直通（enc_ok=0），
+    //   所以这一位开着也不影响"没有编码器"的降级调试路径。
+    // ------------------------------------------------------------------
+    localparam SPEED_LOOP_EN = 1'b1;
+
+    wire [10:0]        spd_duty_l, spd_duty_r;
+    // spd_sync / enc_ok 是这一层的观测量：
+    //   DL=/DR= 已经改报环后的真实占空比，本层效果直接看这两个字段
+    //   （DL=BASE+C-同步修正、DR=BASE-C+同步修正）。
+    //   enc_ok=0 说明编码器没出脉冲、本层已自动回退成直通。
+    wire signed [10:0] spd_sync;
+    wire               enc_ok;
+    wire [10:0]        loop_duty_l = SPEED_LOOP_EN ? spd_duty_l : ctrl_duty_l;
+    wire [10:0]        loop_duty_r = SPEED_LOOP_EN ? spd_duty_r : ctrl_duty_r;
+
     wire        motor_en = motion_rst_n && (PWM_BENCH_TEST || ctrl_en);
-    wire [10:0] ml_duty  = PWM_BENCH_TEST ? BENCH_DUTY : ctrl_duty_l;
-    wire [10:0] mr_duty  = PWM_BENCH_TEST ? BENCH_DUTY : ctrl_duty_r;
+    wire [10:0] ml_duty  = PWM_BENCH_TEST ? BENCH_DUTY : loop_duty_l;
+    wire [10:0] mr_duty  = PWM_BENCH_TEST ? BENCH_DUTY : loop_duty_r;
 
     // 三根 CTL 恒 0（官方实测值），与 USE_CAMERA 无关：不驱动就是悬空
     assign cmos_ctl1  = 1'b0;
@@ -257,6 +281,35 @@ module FpgaCar (
         .speed (spd_r),
         .valid (spd_r_v)
     );
+
+    // ------------------------------------------------------------------
+    // 速度环：放在测速模块之后，spd_l/spd_r/spd_*_v 必须先声明
+    // ------------------------------------------------------------------
+    speed_pid #(
+        .DUTY_MAX     (1200),
+        .K_SYNC       (12),
+        .I_SYNC_SHIFT (4),
+        .I_SYNC_LIMIT (400),
+        .SYNC_MAX     (180),
+        .NOENC_WIN    (20)
+    ) u_spd_pid (
+        .clk        (clk),
+        .rst_n      (motion_rst_n),
+        .en         (ctrl_en),
+        .spd_l      (spd_l),
+        .spd_r      (spd_r),
+        .valid_l    (spd_l_v),
+        .valid_r    (spd_r_v),
+        .dir_l      (ctrl_dir_l),
+        .dir_r      (ctrl_dir_r),
+        .duty_l_in  (ctrl_duty_l),
+        .duty_r_in  (ctrl_duty_r),
+        .duty_l_out (spd_duty_l),
+        .duty_r_out (spd_duty_r),
+        .sync_corr  (spd_sync),
+        .enc_ok     (enc_ok)
+    );
+
 
     // ------------------------------------------------------------------
     // 超声波测距（避障 20 分）
@@ -343,7 +396,7 @@ module FpgaCar (
         .CLK_FREQ  (24_000_000),
         .TICK_MS   (10),
         .DUTY_MAX  (1200),
-        .BASE_DUTY (600),
+        .BASE_DUTY (TRACK_BASE_DUTY),
         .P_GAIN    (72),
         .D_GAIN    (40),
         .I_SHIFT   (5),
@@ -422,9 +475,25 @@ module FpgaCar (
         .AVOID_TURN_DUTY  (620),     // PWM 周期 1200 计数，两轮各约 52%
         .AVOID_PROBE_MS   (2400),
         .AVOID_PROBE_DUTY (600),     // 外探和侧边直行均为 50%
-        .AVOID_PASS_MS    (1500),
+        .AVOID_PASS_MS    (900),     // 弧线摆正后沿障碍侧边直线超越
         .AVOID_REJOIN_MS  (2500),
-        .AVOID_REJOIN_DUTY (600),
+        .AVOID_REJOIN_DUTY (640),    // 回线段的差速（外侧快轮）
+        .AVOID_REJOIN_IN_DUTY (430), // 回线段的差速（内侧慢轮）
+        // ---- 弧线绕障（AVOID_ROUTE_EN=1 时生效）----
+        // 全程两轮正转、只靠左右差速画弧，不出现倒车与原地掉头：
+        //   细则 4.3.2 禁止"以大转弯形式绕开障碍"，而原地转的车尾摆幅最大。
+        // 几何核算（车宽 18.5 cm、方块 10 cm、驱动轮距 16 cm）：
+        //   单弧 60°、占空比 860/380 时横移约 20.7 cm（需 ≥14.25 cm），
+        //   在 25 cm 触发距离下最小间隙约 4.5 cm，见 bench/avoid_sim6.py。
+        .AVOID_OUT_MS     (524),     // 外摆弧时长（约 60° 圆弧）
+        .AVOID_ALIGN_MS   (524),     // 摆正弧时长（同角度反向弧）
+        .AVOID_OUT_DUTY   (860),
+        .AVOID_OUT_IN_DUTY(380),
+        .AVOID_ALIGN_DUTY (840),
+        .AVOID_ALIGN_IN_DUTY (400),
+        .AVOID_PASS_DUTY  (620),
+        .AVOID_TURN_IN_DUTY (860),
+        .AVOID_TURN_IN_IN_DUTY (420),
         .AVOID_LINE_MS    (20),
         .AVOID_BLOCK_MS   (250),
         // 转向指示（串口 S= / OLED 左转右转格）保持 1500 ms 后自动熄灭。
@@ -832,8 +901,11 @@ module FpgaCar (
         .raw        (line_raw),
         .pos        (line_pos),
         .corr       (pid_corr),
-        .duty_l     (ctrl_duty_l),
-        .duty_r     (ctrl_duty_r),
+        // DL=/DR= 必须报"真正送到 PWM 的占空比"。速度环接上以后
+        // ctrl_duty_* 只是环前指令，环后还会被 spd_sync 修正；
+        // 报环前值会让现场看到的占空比与车轮实际转动对不上。
+        .duty_l     (loop_duty_l),
+        .duty_r     (loop_duty_r),
         .wide       (line_wide),
         .turn_dir   (turn_dir),
         .obstacle   (obstacle),
