@@ -71,10 +71,10 @@ module oled_driver_tb;
     wire [7:0] eq;
     oled_font u_ref (.addr(eaddr), .q(eq));
 
-    // 数字点阵参照 ROM（调试区期望值靠它逐字节取）
-    reg  [9:0] daddr;
-    wire [7:0] dq;
-    oled_digits u_ref2 (.addr(daddr), .q(dq));
+    // ASCII 字模参照 ROM（与 DUT 同一份 oled_glyph，期望值靠它逐列取）
+    reg  [7:0]  gch;
+    wire [39:0] gq;
+    oled_glyph u_ref_g (.ch(gch), .glyph(gq));
 
     // ------------------------------------------------------------------
     // 从机模型：时钟采样 + 事件检测（比沿触发稳，避免 SCL/SDA 同拍改值的竞争）
@@ -189,117 +189,127 @@ module oled_driver_tb;
         end
     endtask
 
-    // 调试区期望值：与 oled_driver 的组合绘制逻辑一一对应
-    //   page1      col0..127  八路循迹条，line[0] 在最左，每路 16 列
-    //   page6/7    col0..47   三位 16x16 距离数字，无回波显示 "---"
-    //   page7      col48..63  'cm'
-    //   page6/7    col64..79  车状态号
-    //   page6/7    col80..127 四个标志格，每格 12 列
-    task build_exp_dbg;
-        integer b, ln, seg, pg, cl, gi, flg, cxl;
-        reg [15:0] dv;
-        reg [3:0]  d2, d1, d0;
-        reg        sv;
-        reg [319:0] expected_panel;
+    // 调试区期望值：三行 16 字符文本，page1 / page6 / page7 各一行。
+    // tb 侧独立把这三行字拼一遍（不复用 DUT 的任何表达式），再经 oled_glyph
+    // 逐列铺进 exp_fb —— 两边共用同一份字模，但拼字逻辑各写一份，抄错会被抓。
+    function [127:0] exp_row1;
+        input [2:0] st;
+        input       lost;
+        reg [31:0] nm;
         begin
-            // ---- page 1：循迹条 ----
-            for (ln = 0; ln < 8; ln = ln + 1)
-                for (cl = 0; cl < 16; cl = cl + 1)
-                    exp_fb[128 + ln * 16 + cl] =
-                        dbg_line[ln] ? 8'hFF : 8'h80;
-
-            // ---- 距离数字 ----
-            dv = (dbg_dist > 16'd999) ? 16'd999 : dbg_dist;
-            d2 = dv / 100; d1 = (dv % 100) / 10; d0 = dv % 10;
-            for (seg = 0; seg < 3; seg = seg + 1)
-                for (pg = 0; pg < 2; pg = pg + 1)
-                    for (cl = 0; cl < 16; cl = cl + 1) begin
-                        if (dbg_dist == 16'hFFFF)
-                            daddr = 10'd320 + pg * 16 + cl;   // glyph 10 = '-'
-                        else begin
-                            gi = (seg == 0) ? d2 : ((seg == 1) ? d1 : d0);
-                            daddr = gi * 32 + pg * 16 + cl;
-                        end
-                        #1;
-                        exp_fb[(6 + pg) * 128 + seg * 16 + cl] = dq;
-                    end
-
-            // ---- 'cm'：page7 col48..63 ----
-            for (cl = 0; cl < 16; cl = cl + 1) begin
-                daddr = 10'd384 + cl;
-                #1;
-                exp_fb[7 * 128 + 48 + cl] = dq;
-            end
-
-            // ---- 车状态号：page6/7 col64..79 ----
-            for (pg = 0; pg < 2; pg = pg + 1)
-                for (cl = 0; cl < 16; cl = cl + 1) begin
-                    daddr = dbg_state * 32 + pg * 16 + cl;
-                    #1;
-                    exp_fb[(6 + pg) * 128 + 64 + cl] = dq;
-                end
-
-            // ---- page0 col8..71：八位二进制串，自左向右 = line[7]..line[0] ----
-            for (ln = 0; ln < 8; ln = ln + 1)
-                for (cl = 0; cl < 8; cl = cl + 1) begin
-                    daddr = (dbg_line[7 - ln] ? 10'd408 : 10'd400) + cl;
-                    #1;
-                    exp_fb[8 + ln * 8 + cl] = dq;
-                end
-
-            // ---- 四个标志格：page6/7 col80..127 ----
-            case (panel_status)
-                2'd1: expected_panel = 320'h0000000000000000_7f09192946000000_3f4040403f000000_7f0408107f000000_0000000000000000;
-                2'd2: expected_panel = 320'h2649494932000000_01017f0101000000_3e4141413e000000_7f09090906000000_0000000000000000;
-                2'd3: expected_panel = 320'h7f40404040000000_00417f4100000000_7f0408107f000000_7f49494941000000_0000000000000000;
-                default: expected_panel = 320'h7f09192946000000_7f49494941000000_7e1111117e000000_7f4141413e000000_0304780403000000;
+            case (st)
+            3'd0:    nm = "IDLE";
+            3'd1:    nm = "RUN ";
+            3'd2:    nm = "LOST";
+            3'd3:    nm = "SRCH";
+            3'd4:    nm = "STOP";
+            3'd5:    nm = "A-BK";
+            3'd6:    nm = "A-TN";
+            default: nm = "A-PB";
             endcase
-            for (cl = 0; cl < 40; cl = cl + 1)
-                exp_fb[76 + cl] = expected_panel[319 - 8 * cl -: 8];
+            exp_row1 = {"ST:", nm, " LOST:", (lost ? "1" : "0"), "  "};
+        end
+    endfunction
 
-            for (pg = 0; pg < 2; pg = pg + 1)
-                for (cl = 0; cl < 48; cl = cl + 1) begin
-                    flg = cl / 12;
-                    cxl = cl % 12;
-                    case (flg)
-                    0:       sv = dbg_obs;
-                    1:       sv = dbg_lost;
-                    2:       sv = (dbg_turn == 2'd1);   // 左转格
-                    default: sv = (dbg_turn == 2'd2);   // 右转格
-                    endcase
-                    if (cxl == 0 || cxl == 11)     exp_fb[(6 + pg) * 128 + 80 + cl] = 8'hFF;
-                    else if (pg == 0)              exp_fb[(6 + pg) * 128 + 80 + cl] = sv ? 8'hFF : 8'h01;
-                    else                            exp_fb[(6 + pg) * 128 + 80 + cl] = sv ? 8'hFF : 8'h80;
-                end
+    function [127:0] exp_row6;
+        input [15:0] dv;
+        input        ob;
+        reg [3:0]  d2, d1, d0;
+        reg [15:0] t;
+        begin
+            if (dv == 16'hFFFF)
+                exp_row6 = {"DIST:---", " CM OB:", (ob ? "1" : "0")};
+            else begin
+                t  = (dv > 16'd999) ? 16'd999 : dv;
+                d2 = t / 100; d1 = (t % 100) / 10; d0 = t % 10;
+                exp_row6 = {"DIST:", (8'h30 + d2), (8'h30 + d1), (8'h30 + d0),
+                            " CM OB:", (ob ? "1" : "0")};
+            end
+        end
+    endfunction
+
+    function [127:0] exp_row7;
+        input [7:0] ln;
+        input [1:0] tr;
+        reg [7:0] tch;
+        begin
+            case (tr)
+            2'd1:    tch = "L";
+            2'd2:    tch = "R";
+            default: tch = "-";
+            endcase
+            exp_row7 = {"LN:",
+                        (ln[7] ? "1" : "0"), (ln[6] ? "1" : "0"),
+                        (ln[5] ? "1" : "0"), (ln[4] ? "1" : "0"),
+                        (ln[3] ? "1" : "0"), (ln[2] ? "1" : "0"),
+                        (ln[1] ? "1" : "0"), (ln[0] ? "1" : "0"),
+                        " TR:", tch};
+        end
+    endfunction
+
+    // 把一行 16 字符按「5 列点阵 + 3 列空白」铺进指定 page
+    task put_row (input [2:0] pg, input [127:0] txt);
+        integer c, l;
+        reg [7:0] ch;
+        begin
+            for (c = 0; c < 16; c = c + 1) begin
+                ch = txt[127 - 8 * c -: 8];
+                gch = ch;
+                #1;
+                for (l = 0; l < 8; l = l + 1)
+                    exp_fb[pg * 128 + c * 8 + l] = (l < 5) ? gq[8 * l +: 8] : 8'h00;
+            end
         end
     endtask
 
-    // 四标志格硬编码判据：不经过 dbg_* 变量、也不经过 build_exp_dbg，
-    // 直接按「障碍 / 丢线 / 左转 / 右转」的顺序给期望电平。
-    // 这样即使 DUT 与 tb 的期望模型被一起改错，也能被这几条断言抓出来。
-    task check_flags (input e0, input e1, input e2, input e3, input [255:0] tag);
-        integer p2, cl2, flg2, cxl2, bad2;
-        reg     sv2;
-        reg [7:0] ev2;
+    task build_exp_dbg;
         begin
+            put_row(3'd1, exp_row1(dbg_state, dbg_lost));
+            put_row(3'd6, exp_row6(dbg_dist, dbg_obs));
+            put_row(3'd7, exp_row7(dbg_line, dbg_turn));
+        end
+    endtask
+
+    // 硬编码判据：调用点直接把三行「应该长什么样」写成字符串字面量，
+    // 不经过 dbg_* 变量、也不经过 build_exp_dbg 的拼字函数。
+    // 这样即使 DUT 与 tb 的期望模型被一起改错，也能被这条断言抓出来。
+    reg [7:0] chk_fb [0:1023];
+
+    task put_chk (input [2:0] pg, input [127:0] txt);
+        integer c2, l2;
+        reg [7:0] ch2;
+        begin
+            for (c2 = 0; c2 < 16; c2 = c2 + 1) begin
+                ch2 = txt[127 - 8 * c2 -: 8];
+                gch = ch2;
+                #1;
+                for (l2 = 0; l2 < 8; l2 = l2 + 1)
+                    chk_fb[pg * 128 + c2 * 8 + l2] = (l2 < 5) ? gq[8 * l2 +: 8] : 8'h00;
+            end
+        end
+    endtask
+
+    task check_rows (input [255:0] tag,
+                     input [127:0] t1, input [127:0] t6, input [127:0] t7);
+        integer k2, bad2, pgc, fa;
+        begin
+            for (k2 = 0; k2 < 1024; k2 = k2 + 1) chk_fb[k2] = 8'h00;
+            put_chk(3'd1, t1);
+            put_chk(3'd6, t6);
+            put_chk(3'd7, t7);
+            // 只比三行文字所在的 page 1 / 6 / 7；page 2~5 是色块区，不归这里管
             bad2 = 0;
-            for (p2 = 0; p2 < 2; p2 = p2 + 1)
-                for (cl2 = 0; cl2 < 48; cl2 = cl2 + 1) begin
-                    flg2 = cl2 / 12;              // 0 障碍 1 丢线 2 左转 3 右转
-                    cxl2 = cl2 % 12;
-                    case (flg2)
-                    0:       sv2 = e0;
-                    1:       sv2 = e1;
-                    2:       sv2 = e2;
-                    default: sv2 = e3;
-                    endcase
-                    if (cxl2 == 0 || cxl2 == 11) ev2 = 8'hFF;         // 左右边框常亮
-                    else if (p2 == 0)            ev2 = sv2 ? 8'hFF : 8'h01;
-                    else                         ev2 = sv2 ? 8'hFF : 8'h80;
-                    if (model_fb[(6 + p2) * 128 + 80 + cl2] !== ev2) bad2 = bad2 + 1;
+            for (k2 = 0; k2 < 3 * 128; k2 = k2 + 1) begin
+                pgc = (k2 < 128) ? 1 : ((k2 < 256) ? 6 : 7);
+                fa  = pgc * 128 + (k2 % 128);
+                if (model_fb[fa] !== chk_fb[fa]) begin
+                    if (bad2 < 5)
+                        $display("  ROW MISMATCH fb[%0d] = %02h expect %02h", fa, model_fb[fa], chk_fb[fa]);
+                    bad2 = bad2 + 1;
                 end
-            if (bad2 == 0) $display("PASS: %0s four flag cells match hard-coded layout", tag);
-            else           $display("FAIL: %0s %0d bad bytes in four flag cells", tag, bad2);
+            end
+            if (bad2 == 0) $display("PASS: %0s three text rows match hard-coded strings", tag);
+            else           $display("FAIL: %0s %0d bad bytes in text rows", tag, bad2);
         end
     endtask
 
@@ -490,8 +500,9 @@ module oled_driver_tb;
         $display("PHASE: debug-data frame arrived at %0t", $time); $fflush(0);
         build_exp;
         check_fb("debug data 123cm / 10000001 / state2");
-        // 本帧 dbg_obs=1、dbg_lost=0、dbg_turn=2 → 障碍亮 / 丢线灭 / 左转灭 / 右转亮
-        check_flags(1'b1, 1'b0, 1'b0, 1'b1, "right turn (dbg_turn=2)");
+        // 本帧：state=2(LOST) obs=1 lost=0 turn=2(右) dist=123 line=10000001
+        check_rows("right turn (dbg_turn=2)",
+                   "ST:LOST LOST:0  ", "DIST:123 CM OB:1", "LN:10000001 TR:R");
 
         // ---- 第 5b 阶段：只把 dbg_turn 改成左转 ----
         // 右转那一帧左转格是灭的，单看它无法区分「fl=2 接的是 turn_dir」与
@@ -504,7 +515,8 @@ module oled_driver_tb;
         $display("PHASE: left-turn frame arrived at %0t", $time); $fflush(0);
         build_exp;
         check_fb("left turn (dbg_turn=1)");
-        check_flags(1'b1, 1'b0, 1'b1, 1'b0, "left turn (dbg_turn=1)");
+        check_rows("left turn (dbg_turn=1)",
+                   "ST:LOST LOST:0  ", "DIST:123 CM OB:1", "LN:10000001 TR:L");
 
         panel_status = 2'd3;
         @(posedge frame_done);

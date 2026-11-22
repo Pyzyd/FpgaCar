@@ -30,26 +30,19 @@
 //         只剩左上角小方块 = 通，只是还没有颜色顺序要显示；
 //         连白闪都没有 = 初始化 / 接线 / 地址问题（见 PROJECT_PLAN 3.16）。
 //
-// 调试信息区（2026-11-17 增加：屏上要能看到"所有可见的调试数据"）：
-//   色块必须占 page 2~5（细则 4.3.3 / 5.1），所以调试信息只能放空闲的
-//   page 1 与 page 6/7，三块区域互不重叠，色块永远不被覆盖：
-//     page 1            : 八路循迹条 —— 8 格 x 16 列，格 i 对应 line[i]，
-//                         line[0] 在最左（与实物 X1 同侧）。整格实心 = 压线，
-//                         只剩底边一条线 = 未压线。
-//                         注意：与串口 T= 的字符序正好相反（串口 bit7 在前），
-//                         屏上按车体左右排，看实物对得上比抄串口更重要。
-//     page 6/7 col0..47 : 超声距离，三位 16x16 数字（col 0/16/32）；
-//                         无回波（16'hFFFF）显示 "---"，超过 999 饱和成 999。
-//     page 7 col48..63  : 小字 "cm"（8x8）。
-//     page 6/7 col64..79: 车状态号 0=IDLE 1=RUN 2=LOST 3=SEARCH 4=STOP
-//                         5=AVOID_BACK 6=AVOID_TURN 7=AVOID_PROBE（一位数字，0..7）。
-//     page 6/7 col80..127: 四个标志格，每格 12 px（实心 10 px），
-//                         自左向右 = 障碍 / 丢线 / 左转 / 右转；
-//                         （左/右红外模块已从车上卸下，不再显示）
-//     page 0 col8..71   : 八路循迹的八位二进制串（8 个 8x8 数字，每字 8 列），
-//                         自左向右 = line[7]..line[0]，与串口 T= 的字符序一致。
-//                         page 0 两端 col0..7 / col120..127 归 S_MARK，不冲突。
-//                         实心 = 置位，只留底边 = 复位（与循迹条同一套读法）。
+// 调试信息区（2026-11-22 重做：全部改成文字行，不再用条状/格状图形）
+//   色块必须占 page 2~5（细则 4.3.3 / 5.1），空闲的 page 1 / 6 / 7 各放一行
+//   16 字符的 ASCII 文本，凡是屏上能直接读的数字都带单位与标签：
+//     page 1            : ST:<状态> LOST:<0/1>
+//                         IDLE / RUN / LOST / SRCH / STOP / A-BK / A-TN / A-PB
+//     page 6            : DIST:<三位> CM OB:<0/1>   无回波显示 "---"
+//     page 7            : LN:<8 位 0/1> TR:<L/R/->
+//                         LN 自左向右 = line[7]..line[0]，与串口 T= 同序，可逐字对照。
+//   page 0 两端仍是 S_MARK 的两个 8x8 标记（存活方块 / K230 掉线叉号），不冲突。
+//   为什么改成文字：条状/格状显示要靠"实心 vs 只剩底边"去分辨，站位稍远或角度
+//   一斜就看不出来；ASCII 文字一眼可读，且与串口打印的字段完全对得上。
+//   字符 8 列一个（5 列点阵 + 3 列间隙），128 / 8 = 16 字符一行，刚好铺满；
+//   字库来自 oled_glyph.v，测试平台用同一个模块重建期望显存，不会两边抄错。
 //   刷新：调试输入每 DBG_SAMPLE_MS（默认 100 ms）采样一次，值一变就整屏重推。
 //   超声 16 Hz、屏 10 Hz，够用；一次全屏约 23 ms，I2C 占空比约 23%。
 //
@@ -80,8 +73,8 @@ module oled_driver #(
     // ---- 调试区输入（画在空闲的 page 1 与 page 6/7）----
     input  wire [15:0] dbg_dist,   // 超声距离 cm，16'hFFFF = 无回波
     input  wire [7:0]  dbg_line,   // 八路循迹，bit0 = 车体最左（X1）
-    input  wire [2:0]  dbg_state,  // 车状态 0..7
-    input  wire [1:0]  panel_status, // 0 READY / 1 RUN / 2 STOP / 3 LINE
+    input  wire [2:0]  dbg_state,  // 车状态 0..7，屏上显示成 4 字符名字
+    input  wire [1:0]  panel_status, // 保留端口（新布局不再单独显示，状态名已含）
     input  wire        dbg_obs,    // 障碍：1 = 有（当前只看超声近距；红外已拆）
     input  wire [1:0]  dbg_turn,   // 转向方向（0 无 / 1 左 / 2 右），与串口 S= 同源
     //                                （左/右红外模块已从车上卸下，不再显示）
@@ -143,10 +136,10 @@ module oled_driver #(
     wire [7:0] font_q;
     oled_font u_font (.addr(font_addr), .q(font_q));
 
-    // 16x16 数字点阵 ROM（async 读），地址由 S_DBG 分区给出
-    wire [9:0] dg_addr;
-    wire [7:0] dg_q;
-    oled_digits u_digits (.addr(dg_addr), .q(dg_q));
+    // 5x7 ASCII 字模（async 读），三行文字的每个字符都从这里取
+    wire [7:0]  dbg_ch;
+    wire [39:0] dbg_gw;
+    oled_glyph u_glyph (.ch(dbg_ch), .glyph(dbg_gw));
 
     // ------------------------------------------------------------------
     // 事务请求（调度器驱动，引擎在 E_IDLE 且 x_req 时锁存）
@@ -395,14 +388,10 @@ module oled_driver #(
     reg [4:0]  rc;            // col 0..31
     reg [1:0]  pk;            // 推送步进：0=列窗 1=页窗 2=数据流
 
-    // 调试区：dk 是绘制步进（0..471），dbg_*_r 是采样锁存值
-    // 绘制分五段，边界必须写在状态机之前（S_DBG 用 DK_END 判结束）
-    localparam [8:0] DK_SEG2 = 9'd128,   // 段1 结束：page1 循迹条 128 字节
-                     DK_SEG3 = 9'd224,   // 段2 结束：page6/7 三位距离 96 字节
-                     DK_SEG4 = 9'd272,   // 段3 结束：'cm' 16 + 状态号 32 = 48 字节
-                     DK_SEG5 = 9'd368,   // 段4 结束：四标志格 96 字节
-                     DK_SEG6 = 9'd432,   // 段5 结束：page0 八位二进制串 64 字节
-                     DK_END  = 9'd472;   // 段6 结束：page0 操作状态 40 字节
+    // 调试区：dk 是绘制步进（0..383），dbg_*_r 是采样锁存值
+    // 三行文字各 128 字节：dk[8:7] 选行（0=page1 / 1=page6 / 2=page7），
+    // dk[6:3] 选字符（0..15），dk[2:0] 选字符内列（0..7）。
+    localparam [8:0] DK_END = 9'd384;    // 3 行 x 128 字节
     reg [8:0]  dk;
     reg [9:0]  dbg_addr;      // 调试区显存地址（组合）
     reg [7:0]  dbg_data;      // 调试区字节（组合）
@@ -723,22 +712,12 @@ module oled_driver #(
     assign font_addr = ((cur_color - 3'd1) << 7) + (gp << 5) + rc;
 
     // ------------------------------------------------------------------
-    // 调试区绘制：dk 组合出显存地址与字节（S_DBG 每拍写一个字节）
-    //   dk   0..127  page 1   八路循迹条，每路 16 列，col[6:4] 选路并排
-    //   dk 128..223  page 6/7 三位距离数字，s = k[6:5] 选百/十/个位
-    //   dk 224..271  page 7 'cm' 16 列 + page 6/7 车状态号 32 列
-    //   dk 272..367  page 6/7 四个标志格，每格 12 列（实心 10 列 + 两侧边框）
-    //                自左向右 = 障碍 / 丢线 / 左转 / 右转（左/右红外模块已卸）
-    // 全部 432 个字节（dk 0..431）每次无条件重写，不依赖旧显存，改布局不会留残影。
+    // 调试区绘制：三行 16 字符文本，dk 组合出显存地址与字节
+    //   dk[8:7] = 行号 0/1/2 -> page 1 / page 6 / page 7
+    //   dk[6:3] = 字符号 0..15（每字符 8 列：5 列点阵 + 3 列间隙）
+    //   dk[2:0] = 字符内列 0..7（0..4 取点阵，5..7 恒 0）
+    // 384 个字节每次无条件重写，不依赖旧显存，改布局不会留残影。
     // ------------------------------------------------------------------
-    reg [9:0] dga;          // oled_digits 地址（异步读，组合给出）
-    reg [6:0] kk;           // 段内偏移
-    reg [6:0] ci;           // 标志段：页内列号 0..47
-    reg [6:0] cix;          // 标志段：格内列号 0..11
-    reg [5:0] k2;           // 状态号段：段内偏移 0..31
-    reg [1:0] fl;           // 标志序号 0=障碍 1=丢线 2=左转 3=右转
-    reg       pgh;          // 目标页：0 = page 6，1 = page 7
-    reg       setv;         // 该标志是否置位
 
     // 距离拆分：0..999 逐位减十/减百，不用除法器（会例化 16 位除法）
     reg [15:0] dist_tmp;
@@ -760,124 +739,71 @@ module oled_driver #(
         dgt0 = dist_tmp[3:0];
     end
 
-    // 5x7 字模按列存放，最低字节为最左列。
-    function [39:0] panel_glyph;
-        input [7:0] letter;
-        begin
-            case (letter)
-                "A": panel_glyph = 40'h7E1111117E;
-                "D": panel_glyph = 40'h3E4141417F;
-                "E": panel_glyph = 40'h414949497F;
-                "I": panel_glyph = 40'h00417F4100;
-                "L": panel_glyph = 40'h404040407F;
-                "N": panel_glyph = 40'h7F1008047F;
-                "O": panel_glyph = 40'h3E4141413E;
-                "P": panel_glyph = 40'h060909097F;
-                "R": panel_glyph = 40'h462919097F;
-                "S": panel_glyph = 40'h3249494926;
-                "T": panel_glyph = 40'h01017F0101;
-                "U": panel_glyph = 40'h3F4040403F;
-                "Y": panel_glyph = 40'h0304780403;
-                default: panel_glyph = 40'd0;
-            endcase
-        end
-    endfunction
+    // ------------------------------------------------------------------
+    // 三行文本：每行 16 个字符 = 128 位（左起第 0 个字符在最高字节）
+    // 状态名统一 4 字符，正好与 "ST:" / " LOST:" 拼成 16 字符
+    // ------------------------------------------------------------------
+    wire [7:0] dist_c0 = (dbg_dist_r == 16'hFFFF) ? "-" : (8'h30 + {4'd0, dgt0});
 
-    wire [39:0] panel_word = (panel_status_r == 2'd1) ? " RUN " :
-                             (panel_status_r == 2'd2) ? "STOP " :
-                             (panel_status_r == 2'd3) ? "LINE " : "READY";
-    // dk < DK_SEG6 时（段6 之外的拍）不能让 6 位减法下溢成 63，
-    // 否则 panel_letter 的位选 index 会越界取到别处。只在段6 内有意义。
-    wire [5:0] panel_col = (dk >= DK_SEG6) ? (dk - DK_SEG6) : 6'd0;
-    wire [7:0] panel_letter = panel_word[39 - 8 * panel_col[5:3] -: 8];
-    wire [39:0] panel_bitmap = panel_glyph(panel_letter);
+    wire [127:0] row1_txt, row6_txt, row7_txt;
 
+    reg [31:0] st_name;      // 4 字符状态名
     always @(*) begin
-        dbg_addr = 10'd0;
-        dbg_data = 8'h00;
-        dga      = 10'd0;
-        kk       = 7'd0;
-        ci       = 7'd0;
-        cix      = 7'd0;
-        k2       = 6'd0;
-        fl       = 2'd0;
-        pgh      = 1'b0;
-        setv     = 1'b0;
-
-        if (dk < DK_SEG2) begin
-            // ---- page 1：八路循迹条。line[0] = 车体最左（X1），与串口 T= 字符序相反 ----
-            dbg_addr = 10'd128 + {3'd0, dk[6:0]};
-            dbg_data = dbg_line_r[dk[6:4]] ? 8'hFF : 8'h80;
-        end else if (dk < DK_SEG3) begin
-            // ---- page 6/7：三位距离数字，无回波显示 "---"，>999 饱和 999 ----
-            kk  = dk[6:0];                       // 0..95
-            pgh = kk[4];                         // 0 = 字形上半(page6)，1 = 下半(page7)
-            if (dbg_dist_r == 16'hFFFF) begin
-                dga = {1'd0, 4'd10, 5'd0};       // glyph 10 = '-'
-            end else begin
-                case (kk[6:5])
-                2'd0:    dga = {1'd0, dgt2, 5'd0};
-                2'd1:    dga = {1'd0, dgt1, 5'd0};
-                default: dga = {1'd0, dgt0, 5'd0};
-                endcase
-            end
-            dga      = dga + (pgh ? 10'd16 : 10'd0) + {6'd0, kk[3:0]};
-            dbg_addr = 10'd768 + (pgh ? 10'd128 : 10'd0)
-                       + ({6'd0, kk[6:5]} << 4) + {6'd0, kk[3:0]};
-            dbg_data = dg_q;
-        end else if (dk < DK_SEG4) begin
-            // ---- 先 'cm'（page7 col48..63），再车状态号（page6/7 col64..79）----
-            kk = dk - DK_SEG3;                   // 0..47
-            if (kk < 7'd16) begin
-                dbg_addr = 10'd944 + {3'd0, kk};                       // 7*128 + 48
-                dga      = 10'd384 + {3'd0, kk};   // 'c'=384..391, 'm'=392..399，共 16 列
-                dbg_data = dg_q;
-            end else begin
-                k2  = kk[5:0] - 6'd16;           // 0..31
-                pgh = k2[4];
-                dga = {2'd0, dbg_state_r, 5'd0} + (pgh ? 10'd16 : 10'd0)
-                      + {6'd0, k2[3:0]};
-                dbg_addr = 10'd768 + (pgh ? 10'd128 : 10'd0) + 10'd64
-                           + {6'd0, k2[3:0]};
-                dbg_data = dg_q;
-            end
-        end else if (dk < DK_SEG5) begin
-            // ---- page 6/7 col80..127：四个标志格，自左向右 障碍/丢线/左转/右转 ----
-            kk = dk - DK_SEG4;                   // 0..95
-            pgh = (kk >= 7'd48);
-            ci  = pgh ? (kk - 7'd48) : kk;       // 0..47
-            if (ci >= 7'd36)      begin fl = 2'd3; cix = ci - 7'd36; end
-            else if (ci >= 7'd24) begin fl = 2'd2; cix = ci - 7'd24; end
-            else if (ci >= 7'd12) begin fl = 2'd1; cix = ci - 7'd12; end
-            else                  begin fl = 2'd0; cix = ci;          end
-            case (fl)
-            2'd0:    setv = dbg_obs_r;
-            2'd1:    setv = dbg_lost_r;
-            2'd2:    setv = (dbg_turn_r == 2'd1);   // 左转
-            2'd3:    setv = (dbg_turn_r == 2'd2);   // 右转
-            default: setv = 1'b0;                  // fl 只有 0..3，兜底不点亮
-            endcase
-            dbg_addr = 10'd768 + (pgh ? 10'd128 : 10'd0) + 10'd80 + {3'd0, ci};
-            // 列 0 与 11 是边框（常亮），中间 10 列置位时整格实心、清零时只留上下沿
-            if (cix == 7'd0 || cix == 7'd11) dbg_data = 8'hFF;
-            else if (pgh == 1'b0)            dbg_data = setv ? 8'hFF : 8'h01;
-            else                             dbg_data = setv ? 8'hFF : 8'h80;
-        end else if (dk < DK_SEG6) begin
-            // ---- page 0 col8..71：八位二进制串，自左向右 = line[7]..line[0] ----
-            // 与串口 T= 的字符序一致（uart_report 也是 bit7 在前），可以逐字对照抄。
-            // page 0 的 col0..7（存活标记）与 col120..127（K230 叉号）由 S_MARK 写，
-            // 这里只占中间的 col8..71，两边不打架。
-            dbg_addr = 10'd8 + {4'd0, dk[5:0]};       // dk 368..431 -> 段内 0..63
-            dga      = (dbg_line_r[7'd7 - dk[5:3]] ? 10'd408 : 10'd400)
-                       + {7'd0, dk[2:0]};             // '0'=400, '1'=408
-            dbg_data = dg_q;
-        end else begin
-            // ---- page 0 col76..115：操作状态 ----
-            dbg_addr = 10'd76 + {4'd0, panel_col};
-            dbg_data = (panel_col[2:0] < 3'd5) ? panel_bitmap[8 * panel_col[2:0] +: 8] : 8'h00;
-        end
+        case (dbg_state_r)
+        3'd0:    st_name = "IDLE";
+        3'd1:    st_name = "RUN ";
+        3'd2:    st_name = "LOST";
+        3'd3:    st_name = "SRCH";
+        3'd4:    st_name = "STOP";
+        3'd5:    st_name = "A-BK";
+        3'd6:    st_name = "A-TN";
+        default: st_name = "A-PB";
+        endcase
     end
 
-    assign dg_addr = dga;
+    // page 1：ST:<状态名> LOST:<0/1>
+    assign row1_txt = {"ST:", st_name, " LOST:",
+                       dbg_lost_r ? 8'h31 : 8'h30, 8'h20, 8'h20};
+
+    // page 6：DIST:<三位> CM OB:<0/1>，无回波显示 "---"
+    assign row6_txt = {"DIST:",
+                       (dbg_dist_r == 16'hFFFF) ? "-" : (8'h30 + {4'd0, dgt2}),
+                       (dbg_dist_r == 16'hFFFF) ? "-" : (8'h30 + {4'd0, dgt1}),
+                       dist_c0,
+                       " CM OB:", dbg_obs_r ? 8'h31 : 8'h30};
+
+    // page 7：LN:<8 位> TR:<L/R/->
+    // LN 自左向右 = line[7]..line[0]，与串口 T= 同序，可逐字对照。
+    wire [7:0] tr_ch = (dbg_turn_r == 2'd1) ? "L" :
+                       (dbg_turn_r == 2'd2) ? "R" : "-";
+    assign row7_txt = {"LN:",
+                       dbg_line_r[7] ? 8'h31 : 8'h30,
+                       dbg_line_r[6] ? 8'h31 : 8'h30,
+                       dbg_line_r[5] ? 8'h31 : 8'h30,
+                       dbg_line_r[4] ? 8'h31 : 8'h30,
+                       dbg_line_r[3] ? 8'h31 : 8'h30,
+                       dbg_line_r[2] ? 8'h31 : 8'h30,
+                       dbg_line_r[1] ? 8'h31 : 8'h30,
+                       dbg_line_r[0] ? 8'h31 : 8'h30,
+                       " TR:", tr_ch};
+
+    // dk 三层索引
+    wire [3:0] dk_char = dk[6:3];        // 字符号 0..15
+    wire [2:0] dk_col  = dk[2:0];        // 字符内列 0..7
+    wire [1:0] dk_row  = dk[8:7];        // 行号 0=page1 1=page6 2=page7
+
+    // 取该字符的 ASCII（左起第 dk_char 个 = 位 127..112 起）
+    assign dbg_ch = (dk_row == 2'd0) ? row1_txt[127 - 8 * {1'b0, dk_char} -: 8] :
+                    (dk_row == 2'd1) ? row6_txt[127 - 8 * {1'b0, dk_char} -: 8] :
+                                       row7_txt[127 - 8 * {1'b0, dk_char} -: 8];
+
+    always @(*) begin
+        dbg_addr = 10'd128 + {3'd0, dk_char, 3'd0} + {7'd0, dk_col};
+        // 行基址：page1 = 128 / page6 = 768 / page7 = 896
+        if (dk_row == 2'd1)      dbg_addr = 10'd768 + {3'd0, dk_char, 3'd0} + {7'd0, dk_col};
+        else if (dk_row == 2'd2) dbg_addr = 10'd896 + {3'd0, dk_char, 3'd0} + {7'd0, dk_col};
+        // 5 列点阵 + 3 列间隙：col<5 取字模第 col 列（低字节 = 最左列），否则空白
+        dbg_data = (dk_col < 3'd5) ? dbg_gw[8 * {2'd0, dk_col} +: 8] : 8'h00;
+    end
 
 endmodule

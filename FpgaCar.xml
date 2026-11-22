@@ -24,10 +24,12 @@
         <efx:design_file name="src/car_fsm.v" version="default" library="default" />
         <efx:design_file name="src/car_panel.v" version="default" library="default" />
         <efx:design_file name="src/speed_meter.v" version="default" library="default" />
+        <efx:design_file name="src/speed_pid.v" version="default" library="default" />
         <efx:design_file name="src/frame_snap.v" version="default" library="default" />
         <efx:design_file name="src/color_seq.v" version="default" library="default" />
         <efx:design_file name="src/k230_link.v" version="default" library="default" />
         <efx:design_file name="src/oled_font.v" version="default" library="default" />
+        <efx:design_file name="src/oled_glyph.v" version="default" library="default" />
         <efx:design_file name="src/oled_digits.v" version="default" library="default" />
         <efx:design_file name="src/oled_driver.v" version="default" library="default" />
         <efx:design_file name="src/st7789_panel.v" version="default" library="default" />
