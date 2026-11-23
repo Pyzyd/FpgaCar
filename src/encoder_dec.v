@@ -19,7 +19,9 @@
 // =============================================================================
 `timescale 1ns/1ns
 
-module encoder_dec (
+module encoder_dec #(
+    parameter integer STABLE_TICKS = 1  // MC130 取 240：24 MHz 下两相连续稳定 10 us
+) (
     input  wire        clk,       // 24 MHz
     input  wire        rst_n,     // 低有效（已同步化）
     input  wire        a,         // A 相（ enc_la / enc_ra ）
@@ -42,8 +44,31 @@ module encoder_dec (
             b_sync <= {b_sync[0], b};
         end
 
-    wire a_q = a_sync[1];
-    wire b_q = b_sync[1];
+    wire [1:0] synced = {a_sync[1], b_sync[1]};
+    wire [1:0] ab_q;
+    generate
+        if (STABLE_TICKS > 1) begin : g_filter
+            reg [1:0] candidate, settled;
+            reg [$clog2(STABLE_TICKS+1)-1:0] age;
+            always @(posedge clk or negedge rst_n) begin
+                if (!rst_n) begin
+                    candidate <= 2'b00;
+                    settled   <= 2'b00;
+                    age       <= 0;
+                end else if (synced != candidate) begin
+                    candidate <= synced;
+                    age       <= 1;
+                end else if (age < STABLE_TICKS) begin
+                    age <= age + 1'b1;
+                    if (age == STABLE_TICKS - 1)
+                        settled <= candidate;
+                end
+            end
+            assign ab_q = settled;
+        end else begin : g_no_filter
+            assign ab_q = synced;
+        end
+    endgenerate
 
     // ------------------------------------------------------------------
     // 上一拍状态
@@ -54,8 +79,7 @@ module encoder_dec (
             a_prev <= 1'b0;
             b_prev <= 1'b0;
         end else begin
-            a_prev <= a_q;
-            b_prev <= b_q;
+            {a_prev, b_prev} <= ab_q;
         end
 
     // ------------------------------------------------------------------
@@ -64,7 +88,7 @@ module encoder_dec (
     //                00 -> 10 -> 11 -> 01 -> 00（A 先翻，反转）
     // 其余（一次跳两相）视为抖动，step=0，计数不动。
     // ------------------------------------------------------------------
-    wire [3:0] ab = {a_prev, b_prev, a_q, b_q};
+    wire [3:0] ab = {a_prev, b_prev, ab_q};
 
     wire step_fwd = (ab == 4'b00_01) | (ab == 4'b01_11) |
                     (ab == 4'b11_10) | (ab == 4'b10_00);
@@ -82,7 +106,8 @@ module encoder_dec (
         else if (step_fwd) dir_r <= 1'b1;
         else if (step_rev) dir_r <= 1'b0;
 
-    assign direction = dir_r;
+    // 测速和里程在同一拍消费 step，首个换向沿也必须使用新方向。
+    assign direction = step ? step_fwd : dir_r;
 
     // ------------------------------------------------------------------
     // 里程累计
