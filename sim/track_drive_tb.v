@@ -7,13 +7,15 @@ module track_drive_tb;
     reg lost = 0;
     wire en, dir_l, dir_r;
     wire [2:0] state;
-    wire [10:0] pid_l, pid_r, cmd_l, cmd_r, pwm_l, pwm_r;
+    wire [10:0] pid_l, pid_r, cmd_l, cmd_r, shape_l, shape_r;
+    wire [10:0] pwm_l = shape_l >> 1;
+    wire [10:0] pwm_r = shape_r >> 1;
     wire follow = (state == 3'd1 || state == 3'd2) && dir_l == dir_r;
 
     // 1 clk = 1 ms in the control modules. Use the main project's tuning.
     track_pid #(
         .CLK_FREQ(1000), .TICK_MS(10), .BASE_DUTY(480),
-        .P_GAIN(48), .D_GAIN(0), .I_LIMIT(0), .EDGE_POS(4), .EDGE_SLOWDOWN(48)
+        .P_GAIN(48), .P_DEADBAND(1), .D_GAIN(0), .I_LIMIT(0), .EDGE_POS(4), .EDGE_SLOWDOWN(48)
     ) u_pid (
         .clk(clk), .rst_n(rst_n), .en(en), .pos(pos), .on_line(!lost), .lost(lost),
         .duty_l(pid_l), .duty_r(pid_r), .corr()
@@ -31,7 +33,7 @@ module track_drive_tb;
 
     duty_shaper #(.CLK_FREQ(1000), .DIFF_SHIFT(1)) u_shaper (
         .clk(clk), .rst_n(rst_n), .en(en), .follow(follow),
-        .duty_l_in(cmd_l), .duty_r_in(cmd_r), .duty_l_out(pwm_l), .duty_r_out(pwm_r)
+        .duty_l_in(cmd_l), .duty_r_in(cmd_r), .duty_l_out(shape_l), .duty_r_out(shape_r)
     );
 
     task check_pwm(input [10:0] left, input [10:0] right, input string name);
@@ -45,28 +47,36 @@ module track_drive_tb;
         repeat (3) @(negedge clk);
         rst_n = 1;
         repeat (20) @(negedge clk);
-        check_pwm(480, 480, "straight");
+        check_pwm(240, 240, "straight");
 
         pos = 1;
         repeat (13) @(negedge clk);
-        check_pwm(504, 456, "small error, within one PID period plus output latency");
+        check_pwm(240, 240, "right center probe");
+
+        pos = -1;
+        repeat (13) @(negedge clk);
+        check_pwm(240, 240, "left center probe");
+
+        pos = 2;
+        repeat (13) @(negedge clk);
+        check_pwm(252, 228, "small right correction outside the deadband");
 
         pos = 4;
         repeat (13) @(negedge clk);
-        check_pwm(528, 336, "right edge slows and steers right");
+        check_pwm(252, 180, "right edge slows and steers right");
 
         pos = -4;
         repeat (13) @(negedge clk);
-        check_pwm(336, 528, "left edge slows and steers left");
+        check_pwm(180, 252, "left edge slows and steers left");
 
         lost = 1;
         pos = 0;
         repeat (4) @(negedge clk);
-        check_pwm(252, 396, "lost line slows immediately and holds left bias");
+        check_pwm(135, 189, "lost line slows immediately and holds left bias");
 
         lost = 0;
         repeat (13) @(negedge clk);
-        check_pwm(480, 480, "reacquire center without a steering spike");
+        check_pwm(240, 240, "reacquire center without a steering spike");
 
         pos = -4;
         repeat (13) @(negedge clk);
@@ -77,7 +87,7 @@ module track_drive_tb;
         repeat (18) @(negedge clk);
         if (state !== 3'd3 || dir_l !== 1'b0 || dir_r !== 1'b1)
             $fatal(1, "FAIL: search must turn toward last visible side");
-        check_pwm(500, 500, "search left after timeout");
+        check_pwm(250, 250, "search left at half duty after timeout");
         $finish;
     end
 endmodule

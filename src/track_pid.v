@@ -28,7 +28,8 @@ module track_pid #(
     parameter integer I_SHIFT    = 5,         // 积分右移（相当于 Ki = 1/32）
     parameter integer I_LIMIT    = 640,        // 0: 关闭积分
     parameter integer EDGE_POS   = 4,          // 误差绝对值达到此值时提前减速
-    parameter integer EDGE_SLOWDOWN = 0        // 边缘基础占空比减量
+    parameter integer EDGE_SLOWDOWN = 0,       // 边缘基础占空比减量
+    parameter integer P_DEADBAND = 0           // 中心比例死区，外侧从边界连续增加
 ) (
     input  wire              clk,
     input  wire              rst_n,
@@ -67,7 +68,10 @@ module track_pid #(
                                (err - {{11{pos_d[4]}}, pos_d});
 
     // 各项（全部 16 位有符号）
-    wire signed [15:0] p_term = err   * P_GAIN;
+    wire signed [15:0] band = P_DEADBAND;
+    wire signed [15:0] p_err = (err > band) ? err - band :
+                               (err < -band) ? err + band : 16'sd0;
+    wire signed [15:0] p_term = p_err * P_GAIN;
     wire signed [15:0] d_term = err_d * D_GAIN;
     wire signed [15:0] i_term = i_acc >>> I_SHIFT;
 

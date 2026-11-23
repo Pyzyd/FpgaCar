@@ -237,12 +237,14 @@ module FpgaCar (
         .duty_r_out (shape_duty_r)
     );
 
-    // 整形后的最终占空比：同时送给 PWM 与串口（DL=/DR= 必须报真正到电机的值）
-    wire [10:0] final_duty_l = DUTY_SHAPE_EN ? shape_duty_l : loop_duty_l;
-    wire [10:0] final_duty_r = DUTY_SHAPE_EN ? shape_duty_r : loop_duty_r;
-
-    wire [10:0] ml_duty  = PWM_BENCH_TEST ? BENCH_DUTY : final_duty_l;
-    wire [10:0] mr_duty  = PWM_BENCH_TEST ? BENCH_DUTY : final_duty_r;
+    // 低速循迹试验：所有状态在 PWM 入口统一缩放，串口 DL/DR 也报缩放后的值。
+    localparam integer MOTOR_DUTY_SHIFT = 1;  // 1=减半，0=全量
+    wire [10:0] motor_cmd_l = PWM_BENCH_TEST ? BENCH_DUTY :
+                              (DUTY_SHAPE_EN ? shape_duty_l : loop_duty_l);
+    wire [10:0] motor_cmd_r = PWM_BENCH_TEST ? BENCH_DUTY :
+                              (DUTY_SHAPE_EN ? shape_duty_r : loop_duty_r);
+    wire [10:0] final_duty_l = motor_cmd_l >> MOTOR_DUTY_SHIFT;
+    wire [10:0] final_duty_r = motor_cmd_r >> MOTOR_DUTY_SHIFT;
 
     // 三根 CTL 恒 0（官方实测值），与 USE_CAMERA 无关：不驱动就是悬空
     assign cmos_ctl1  = 1'b0;
@@ -256,7 +258,7 @@ module FpgaCar (
         .clk   (clk),
         .rst_n (sys_rst_n),
         .en    (motor_en),
-        .duty  (ml_duty),
+        .duty  (final_duty_l),
         .pwm   (ml_pwm)
     );
 
@@ -264,7 +266,7 @@ module FpgaCar (
         .clk   (clk),
         .rst_n (sys_rst_n),
         .en    (motor_en),
-        .duty  (mr_duty),
+        .duty  (final_duty_r),
         .pwm   (mr_pwm)
     );
 
@@ -433,7 +435,7 @@ module FpgaCar (
     //          只测循迹、不想被墙摁停时改成 0。
     //   1'b1 = 恢复超声波避障（原行为）。现在遇障碍不再原地干停，
     //          而是走 car_fsm 的 BACK → TURN → PROBE 三段绕行。
-    localparam USE_ULTRA = 1'b1;
+    localparam USE_ULTRA = 1'b0;  // 低速循迹试验：保留距离读数，屏蔽避障触发
 
     // ---- 超声波多帧确认 + 滞回 ----
     reg  [1:0]  hc_near_cnt;     // 连续近帧数
@@ -480,6 +482,7 @@ module FpgaCar (
         .DUTY_MAX  (1200),
         .BASE_DUTY (TRACK_BASE_DUTY),
         .P_GAIN    (48),
+        .P_DEADBAND (1),  // 中间两探头切换时 |pos|<=1，保持同速
         .D_GAIN    (0),
         .I_SHIFT   (5),
         .I_LIMIT   (0),

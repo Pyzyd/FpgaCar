@@ -230,6 +230,22 @@ module FpgaCar_tb;
         else $display("FAIL: K2 hold clear failed");
         release u_dut.u_panel.ms_tick;
 
+        // 两类传感器同时触发时，低速版仍关闭避障。PWM 入口统一缩放。
+        @(negedge clk);
+        force u_dut.hc_near = 1'b1;
+        ir_l = 1'b0;
+        ir_r = 1'b0;
+        force u_dut.shape_duty_l = 11'd500;
+        force u_dut.shape_duty_r = 11'd700;
+        @(negedge clk);
+        if (u_dut.obstacle !== 1'b0 || u_dut.u_pwm_l.duty !== 11'd250 ||
+            u_dut.u_pwm_r.duty !== 11'd350)
+            $fatal(1, "FAIL: low speed profile obstacle mask or PWM scale");
+        $display("PASS: low speed profile masks both sensors and halves PWM commands");
+        release u_dut.hc_near;
+        release u_dut.shape_duty_l;
+        release u_dut.shape_duty_r;
+
         $display("INFO: FpgaCar smoke test done, heartbeat=%0d", u_dut.heartbeat);
         $finish;
     end
