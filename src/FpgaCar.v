@@ -253,8 +253,27 @@ module FpgaCar (
     wire [10:0] final_duty_l = DUTY_SHAPE_EN ? shape_duty_l : loop_duty_l;
     wire [10:0] final_duty_r = DUTY_SHAPE_EN ? shape_duty_r : loop_duty_r;
 
-    wire [10:0] ml_duty  = PWM_BENCH_TEST ? BENCH_DUTY : final_duty_l;
-    wire [10:0] mr_duty  = PWM_BENCH_TEST ? BENCH_DUTY : final_duty_r;
+    // ------------------------------------------------------------------
+    // 【接线补偿】2026-11-23 驱动轮从距车头 30 mm 后移到 75 mm 之后，电机
+    // 的接法也跟着变了：左右两个通道对调，且每个电机的正反转都反了。
+    //
+    // 这两个错误只在这一层修，上层的「左轮/右轮」「前进/后退」语义一概不动。
+    // 原因是上层语义一旦跟着翻，串口 DL=/DR=、OLED 四格、拐角方向判定、避障
+    // 左右绕行会同时反过来，现场再出问题时就没法区分是接线错了还是控制错了。
+    //
+    // 两个开关互相独立，组合起来正好覆盖「哪个通道驱动哪个轮」×「正转是往前
+    // 还是往后」四种情况。改机械时如果只动了一样，就只翻对应的那一个。
+    //
+    // 验证方法（架空车、手动让车上电但不跑循迹）：
+    //   1) 给前进指令，两个轮子都应该朝车头方向转；反了就翻 MOTOR_INVERT。
+    //   2) 给左转指令（左轮后退、右轮前进），车应该向左转；反了就翻 WHEEL_SWAP。
+    // ------------------------------------------------------------------
+    localparam WHEEL_SWAP   = 1'b1;   // 1 = 左右两个电机通道对调（ml_* 驱动右轮）
+    localparam MOTOR_INVERT = 1'b1;   // 1 = 前进/后退取反（两个电机极性都反了）
+
+    // 物理通道占空比：交换之后 ml_* 通道拿的是右轮的指令
+    wire [10:0] ml_duty  = PWM_BENCH_TEST ? BENCH_DUTY : (WHEEL_SWAP ? final_duty_r : final_duty_l);
+    wire [10:0] mr_duty  = PWM_BENCH_TEST ? BENCH_DUTY : (WHEEL_SWAP ? final_duty_l : final_duty_r);
 
     // 三根 CTL 恒 0（官方实测值），与 USE_CAMERA 无关：不驱动就是悬空
     assign cmos_ctl1  = 1'b0;
@@ -484,13 +503,31 @@ module FpgaCar (
     // ------------------------------------------------------------------
     // 运动闭环：track_pid（位置 PID）+ car_fsm（状态机）
     // ------------------------------------------------------------------
+    // 【2026-11-23 重新整定】驱动轮后移到距车头 75 mm 之后重扫的增益。
+    // 旧的 P=72/D=40 是按探头在驱动轴前 30 mm 整定的，那套几何下预瞄只有
+    // 30 mm，控制永远慢半拍；换成 75 mm 后同样速度下提前量翻了一倍多。
+    //
+    // 扫描结果（解析仿真 bench/fast_corner.py，radius 320~100 mm × 入弯偏差
+    // ±15 mm × 电机滞后 0/0.15/0.30 s，共 90 组）：
+    //   P=72  D=40  （旧）  5/90 失败，最差 59.2 mm
+    //   P=72  D=140        5/90 失败，最差 57.5 mm
+    //   P=120 D=140        0/90 失败，最差 17.5 mm
+    //   P=120 D=220  ←本值  0/90 失败，最差 16.3 mm
+    //   P=144 D=260        0/90 失败，最差 15.2 mm
+    // 再往上（P=168/D=260）最差只降到 15.1，但 pos 量化抖动的抗性变差，
+    // 所以停在这里。旧参数在 R=100 mm 的小弯上直接冲出去（59.2 mm）。
+    //
+    // 【为什么 D 拉这么大】pos 只有 ±7 且是整数，一格跳变乘 40 只有 40 计数
+    // （3% 占空比），几乎不起阻尼作用。220 让一格跳变产生 18% 的修正，
+    // 才真正压住弯内超调。代价是线边缘抖动会更明显地传到电机，已用 25%
+    // 概率的 pos ±1 抖动仿真验证过：最差 6.6 mm，不失败。
     track_pid #(
         .CLK_FREQ  (24_000_000),
         .TICK_MS   (10),
         .DUTY_MAX  (1200),
         .BASE_DUTY (TRACK_BASE_DUTY),
-        .P_GAIN    (72),
-        .D_GAIN    (40),
+        .P_GAIN    (120),
+        .D_GAIN    (220),
         .I_SHIFT   (5),
         .I_LIMIT   (640)
     ) u_pid (
@@ -624,10 +661,17 @@ module FpgaCar (
     );
 
     // TB6612 方向脚：使能时才驱动，且 IN1/IN2 永不同时为 1（否则短路刹车）
-    assign ml_in1     = motor_en & (PWM_BENCH_TEST |  ctrl_dir_l);
-    assign ml_in2     = motor_en & (~PWM_BENCH_TEST & ~ctrl_dir_l);
-    assign mr_in1     = motor_en & (~PWM_BENCH_TEST &  ctrl_dir_r);
-    assign mr_in2     = motor_en & (~PWM_BENCH_TEST & ~ctrl_dir_r);
+    // 先按 WHEEL_SWAP 把逻辑轮的指令分配到物理通道（见 ml_duty 附近的接线补偿说明）
+    wire ch_l_dir = WHEEL_SWAP ? ctrl_dir_r : ctrl_dir_l;
+    wire ch_r_dir = WHEEL_SWAP ? ctrl_dir_l : ctrl_dir_r;
+    // 再按 MOTOR_INVERT 取反极性。自测模式一律当「前进」，同样要跟着反。
+    wire ch_l_fwd = (PWM_BENCH_TEST ? 1'b1 : ch_l_dir) ^ MOTOR_INVERT;
+    wire ch_r_fwd = (PWM_BENCH_TEST ? 1'b1 : ch_r_dir) ^ MOTOR_INVERT;
+
+    assign ml_in1     = motor_en &  ch_l_fwd;
+    assign ml_in2     = motor_en & ~ch_l_fwd;
+    assign mr_in1     = motor_en &  ch_r_fwd;
+    assign mr_in2     = motor_en & ~ch_r_fwd;
     assign motor_stby = motor_en;
 
     // ------------------------------------------------------------------
