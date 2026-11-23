@@ -102,6 +102,15 @@ module car_fsm #(
     // 走完动作，不会卡死在半路。正常有编码器时提前里程到了就切换。
     parameter integer AVOID_OUT_MS      = 2500, // 外摆弧超时上限
     parameter integer AVOID_ALIGN_MS    = 2500, // 摆正弧超时上限
+    // 【v1.17：编码器在线后，超时值必须放大】
+    //   没装编码器时 arc_diff 恒 0，上面两个 *_MS 就是**真实弧长**（v1.16 按
+    //   27~46 cm/s 标成 780/850/720）。一旦编码器真的出脉冲，弧线改由里程
+    //   闭环提前结束，这组数退回纯兜底；若还按 780 卡，车速一慢（60° 弧要
+    //   1160 ms）就会被提前截断，绕障又变成转不够。
+    //   所以这里按「本段是否真的收到过编码器脉冲」二选一：
+    //     enc_alive=1 → 用 AVOID_*_MS × AVOID_ENC_MULT 当宽松上限；
+    //     enc_alive=0 → 原值（等于真实时长），与 v1.16 完全一致。
+    parameter integer AVOID_ENC_MULT    = 4,
     parameter integer AVOID_LINE_MS = 20,  // 回线时黑线需稳定出现
     parameter integer AVOID_BLOCK_MS = 250,// 前方受阻先停，再等超声更新
     // ---- 拐角兜底（没有 K230 / 没识别到转向牌时怎么走）----
@@ -244,6 +253,12 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     wire [31:0] arc_sum     = arc_cnt_l + arc_cnt_r;
     wire        arc_diff_done = (arc_diff >= ARC_DIFF_TARGET);
     wire        arc_sum_done  = (arc_sum  >= (PASS_SUM_TARGET * 2));
+    // 本段内是否真的收到过脉冲：收到就说明编码器在线，超时值可以放宽成纯兜底；
+    // 一个都没有就说明没装/线松，此时 *_MS 仍是真实弧长，不能放大。
+    wire        arc_enc_alive = (arc_cnt_l != 32'd0) || (arc_cnt_r != 32'd0);
+    wire [31:0] avoid_out_ceil   = arc_enc_alive ? (AVOID_OUT_MS   * AVOID_ENC_MULT) : AVOID_OUT_MS;
+    wire [31:0] avoid_align_ceil = arc_enc_alive ? (AVOID_ALIGN_MS * AVOID_ENC_MULT) : AVOID_ALIGN_MS;
+    wire [31:0] avoid_pass_ceil  = arc_enc_alive ? (AVOID_PASS_MS  * AVOID_ENC_MULT) : AVOID_PASS_MS;
     // 【入口分流】AVOID_EN=0 → 停车等待；AVOID_ROUTE_EN=1 → 直接进弧线绕行；
     // 其余 → 老的三段（后退 → 原地转 → 试探）。
     // 必须让侧绕跳过 BACK/TURN：那两段正是细则 4.3.2 禁止的"倒车 + 大转弯"。
@@ -726,15 +741,15 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             bypass_block_cnt <= 16'd0;
                             ms_cnt <= ms_cnt + 16'd1;
                             case (bypass_step)
-                                BY_OUT: if (arc_diff_done || (ms_cnt >= AVOID_OUT_MS - 1)) begin
+                                BY_OUT: if (arc_diff_done || (ms_cnt >= avoid_out_ceil - 1)) begin
                                     ms_cnt <= 16'd0;
                                     bypass_step <= BY_ALIGN;
                                 end
-                                BY_ALIGN: if (arc_diff_done || (ms_cnt >= AVOID_ALIGN_MS - 1)) begin
+                                BY_ALIGN: if (arc_diff_done || (ms_cnt >= avoid_align_ceil - 1)) begin
                                     ms_cnt <= 16'd0;
                                     bypass_step <= BY_PASS;
                                 end
-                                BY_PASS: if (arc_sum_done || (ms_cnt >= AVOID_PASS_MS - 1)) begin
+                                BY_PASS: if (arc_sum_done || (ms_cnt >= avoid_pass_ceil - 1)) begin
                                     ms_cnt <= 16'd0;
                                     // 侧边超越结束后要判断"还能不能自己回线"：
                                     //   · 绕行途中离过线（bypass_left_line=1）且此刻仍

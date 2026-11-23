@@ -310,11 +310,29 @@ module FpgaCar (
     wire signed [15:0] spd_l, spd_r;
     wire        spd_l_v, spd_r_v;
 
+    // 【v1.17 修正：编码器必须跟着 WHEEL_SWAP 一起对调】
+    //   v1.15 换接线时只翻了电机通道（ml_* 去驱动物理右轮），编码器还是照引脚
+    //   直连，于是速度环拿「物理左轮」的读数去修「物理右轮」的占空比——修正
+    //   方向正好相反，一装编码器就会正反馈发散（左轮看着快就越减，实际减的
+    //   是右轮，差速被越推越大）。
+    //
+    //   修法放在接线层：逻辑左轮 = WHEEL_SWAP ? 物理右编码器 : 物理左编码器。
+    //   这样 enc_l_pos / spd_l / enc_l_step 一开始就是「逻辑左轮」，下游的
+    //   speed_pid、uart_report（L= / R= / VL= / VR=）全都不用动，串口报的
+    //   L= 与 DL= 也自然对应同一个轮子。
+    //
+    //   注意 enc_l_step / enc_r_step 给 car_fsm 算 arc_diff / arc_sum 时取了
+    //   绝对值（src/car_fsm.v:242-244），换不换对它都等价。
+    wire enc_la_i = WHEEL_SWAP ? enc_ra : enc_la;
+    wire enc_lb_i = WHEEL_SWAP ? enc_rb : enc_lb;
+    wire enc_ra_i = WHEEL_SWAP ? enc_la : enc_ra;
+    wire enc_rb_i = WHEEL_SWAP ? enc_lb : enc_rb;
+
     encoder_dec u_enc_l (
         .clk       (clk),
         .rst_n     (sys_rst_n),
-        .a         (enc_la),
-        .b         (enc_lb),
+        .a         (enc_la_i),
+        .b         (enc_lb_i),
         .step      (enc_l_step),
         .direction (enc_l_dir),
         .position  (enc_l_pos)
@@ -323,8 +341,8 @@ module FpgaCar (
     encoder_dec u_enc_r (
         .clk       (clk),
         .rst_n     (sys_rst_n),
-        .a         (enc_ra),
-        .b         (enc_rb),
+        .a         (enc_ra_i),
+        .b         (enc_rb_i),
         .step      (enc_r_step),
         .direction (enc_r_dir),
         .position  (enc_r_pos)
@@ -363,7 +381,8 @@ module FpgaCar (
         .I_SYNC_SHIFT (4),
         .I_SYNC_LIMIT (400),
         .SYNC_MAX     (180),
-        .NOENC_WIN    (20)
+        .NOENC_WIN    (20),
+        .SYNC_DIFF_MAX(120)
     ) u_spd_pid (
         .clk        (clk),
         .rst_n      (motion_rst_n),

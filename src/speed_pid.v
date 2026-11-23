@@ -24,7 +24,8 @@ module speed_pid #(
     parameter integer I_SYNC_SHIFT  = 4,     // 积分右移（Ki = 1/16）
     parameter integer I_SYNC_LIMIT  = 400,   // 积分累加钳位（抗饱和）
     parameter integer SYNC_MAX      = 180,   // 单次修正上限（15% 占空比）
-    parameter integer NOENC_WIN     = 20     // 连续多少个窗口没脉冲就判定编码器失效
+    parameter integer NOENC_WIN     = 20,    // 连续多少个窗口没脉冲就判定编码器失效
+    parameter integer SYNC_DIFF_MAX = 120    // 两轮指令差超过这个值就不介入（见下方 active 说明）
 ) (
     input  wire              clk,
     input  wire              rst_n,
@@ -78,7 +79,25 @@ module speed_pid #(
     reg signed [31:0] i_acc;
 
     wire same_dir = (dir_l == dir_r);
-    wire active   = en && enc_ok && same_dir;
+
+    // ------------------------------------------------------------------
+    // 【v1.17：只在小差速时介入】
+    //   同步环的职责是抹平「两轮机械/驱动失配」，不是抹平「上层要它转弯」。
+    //   car_fsm 在转弯和绕障时是故意给大差速的（避障 BY_OUT 860/380 差 480、
+    //   循迹饱和 960/0 差 960）。这些指令若被同步环当失配拉平，转弯会被
+    //   直接抹掉。实测（bench/_sync_avoid.py，SYNC_MAX=180）：
+    //       860/380 → 680/560，等效半径 206.7 → 826.7 mm，
+    //       780 ms 的 60° 弧只剩 16.8°（差速只剩 25%）→ 绕障必擦方块。
+    //   循迹期间同步环本来也几乎没有收益：位置环 P120/D220 已把直道横向
+    //   误差压到 0.3~1 mm，开同步环平均误差反而从 0.69 涨到 1.18 mm，
+    //   带 25% 漏检时峰值从 9.97 涨到 11.62 mm。
+    //   所以门控取在「直道巡航正常差速」之上一点点：120 计数（10% 占空比）。
+    // ------------------------------------------------------------------
+    wire [10:0] cmd_diff = (duty_l_in > duty_r_in) ?
+                           (duty_l_in - duty_r_in) : (duty_r_in - duty_l_in);
+    wire small_diff = (cmd_diff <= SYNC_DIFF_MAX);
+
+    wire active   = en && enc_ok && same_dir && small_diff;
 
     // 17 位有符号差，避免 ±32767 相减溢出
     wire signed [16:0] diff = $signed({spd_l[15], spd_l}) - $signed({spd_r[15], spd_r});
