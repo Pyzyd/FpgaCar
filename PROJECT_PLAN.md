@@ -3350,7 +3350,11 @@ track_pid #( .DUTY_MAX(1200), .BASE_DUTY(TRACK_BASE_DUTY), ... ) u_pid (...);
 
 `sim/speed_pid_tb.v` 覆盖：两轮同速不修正、单侧偏快反向修正、修正量钳位、换相直通、编码器失效直通、停机清积分。全量回归通过。
 
-## 3.43 差速幅度整形：过弯不再把内侧轮压到 0（2026-11-23）
+## 3.43 差速幅度整形：过弯不再把内侧轮压到 0（2026-11-23，**v1.14 已整级关闭**）
+
+> **结论先行**：本节实现的 `SHAPE_DIFF_SHIFT=1` 已被闭环仿真证伪，v1.14 起整级旁路
+> （`DUTY_SHAPE_EN=0`）。保留本节是为了记录当时的问题分析与踩坑，**不要照着它开回
+> `DIFF_SHIFT=1`**。推翻过程见本节末「后续：v1.14 整级关闭」。
 
 ### 问题：PID 饱和时的等效指令是「绕车体中心原地转」
 
@@ -3372,11 +3376,13 @@ track_pid ──► car_fsm ──► speed_pid ──► duty_shaper ──► 
 
 | 步 | 参数 | 作用 | 默认 |
 |---|---|---|---|
-| ① 差速缩放 | `SHAPE_DIFF_SHIFT=1` | `mid=(dl+dr)>>1`、`diff=(dl-dr)>>1`，只把 `diff` 右移 `DIFF_SHIFT` 再回代。**均值不变**，所以压幅度不改整体速度 | 开 |
+| ① 差速缩放 | `SHAPE_DIFF_SHIFT=1` | `mid=(dl+dr)>>1`、`diff=(dl-dr)>>1`，只把 `diff` 右移 `DIFF_SHIFT` 再回代。**均值不变**，所以压幅度不改整体速度 | ~~开~~ **已废弃**（v1.14 起 `SHAPE_DIFF_SHIFT=0`） |
 | ② 低占空比地板 | `SHAPE_MIN_DUTY=0` | 占空比非零但低于地板时抬到地板；**`0` 保持 `0`** | 关（需实测死区） |
 | ③ 斜率限制 | `SHAPE_SLEW_STEP=0` | 每个 ms 占空比变化不超过 `SLEW_STEP` 计数 | 关（有相位滞后） |
 
-`960/0 → 720/240`（`DIFF_SHIFT=1`）：均值仍是 480，等效最小转弯半径从 80 mm 变成 240 mm，内侧轮保持能出力的区间。**动作幅度减半，而平均前进速度完全不变**。
+`960/0 → 720/240`（`DIFF_SHIFT=1`）：均值仍是 480，内侧轮保持能出力的区间，平均前进速度完全不变。
+~~等效最小转弯半径从 80 mm 变成 240 mm~~ —— **这句算错了**：`R = W·(o+i)/(2(o-i))`，代入 720/240 得
+`R = 160·960/960 = 160 mm`，不是 240 mm。半径变大意味着**可用曲率变小**，这在下面「后续」一节成了致命问题。
 
 ### 为什么只在「循迹同向」时整形
 
@@ -3390,7 +3396,7 @@ track_pid ──► car_fsm ──► speed_pid ──► duty_shaper ──► 
 ### 接入点
 
 - `src/duty_shaper.v`：参数 `CLK_FREQ` / `DUTY_MAX` / `DIFF_SHIFT` / `MIN_DUTY` / `SLEW_STEP`，端口 `en` / `follow` / `duty_l_in` / `duty_r_in` → `duty_l_out` / `duty_r_out`。
-- `src/FpgaCar.v` 开关 `DUTY_SHAPE_EN=1'b1`、`SHAPE_DIFF_SHIFT=1`、`SHAPE_MIN_DUTY=0`、`SHAPE_SLEW_STEP=0`；`final_duty_l/r` 送 `pwm_gen` 与串口 `DL=`/`DR=`。
+- `src/FpgaCar.v` 开关：本节实现时为 `DUTY_SHAPE_EN=1'b1`、`SHAPE_DIFF_SHIFT=1`、`SHAPE_MIN_DUTY=0`、`SHAPE_SLEW_STEP=0`；**v1.14 起已改为 `DUTY_SHAPE_EN=1'b0`、`SHAPE_DIFF_SHIFT=0`（整级旁路）**，理由见本节末「后续」。
 - **串口 `DL=`/`DR=` 现在报的是整形后的最终值**，与 `480±C` 的偏差又多了一个来源（见 `docs/上板使用说明.md` 第 2 节末）。
 
 ### 验证
@@ -3409,10 +3415,34 @@ track_pid ──► car_fsm ──► speed_pid ──► duty_shaper ──► 
 > 这比 v1.12 记录的 22442 XLR（36.91%）**降了约 3300**，是同期 OLED 调试区改三行文字省下的逻辑，
 > 整形器那 107 XLR 完全被它盖住。29.704 ns 是 setup **松弛量**（约束 41.667 ns），余量充裕。
 
-### 待实车确认
+### 待实车确认（已被下一节推翻，保留原文备查）
 
-- 整形后弯道是否还跟得住（`DIFF_SHIFT=2` 更保守，`0` 等于关掉）。
+- ~~整形后弯道是否还跟得住（`DIFF_SHIFT=2` 更保守，`0` 等于关掉）。~~ —— 闭环仿真已给出答案：跟不住，见下。
 - `SHAPE_MIN_DUTY` 需要用实测的电机起转死区来定；工程里目前**没有任何起转死区数据**，所以默认必须是 0。
+
+### 后续：v1.14 整级关闭 —— 本节的核心假设被仿真证伪（2026-11-23）
+
+本节的前提是「`960/0` 的等效半径 80 mm 远超赛道弯半径，所以要压小」。闭环运动学仿真
+（`bench/final_compare.py`，8 路探头 + `track_line` 宽黑判据 + `track_pid` + 差速车体，
+1 kHz 采样，R=400/300/250/200/175/160 六档 × 车速 0.35~0.80 mm/s-per-duty 共 24 组）证明
+前提正好相反：
+
+| 配置 | 失败 | 平均 maxLat | 最差 maxLat |
+|---|---|---|---|
+| `DIFF_SHIFT=1`（本节实现） | **8/24** | 68.4 mm | 152.5 mm |
+| `DIFF_SHIFT=0`（直通） | 0/24 | 14.0 mm | 19.1 mm |
+
+失败集中在 R≤175 mm：`DIFF_SHIFT=1` 把 `960/0` 变成 `720/240`，等效最小转弯半径从
+**80 mm 变成 160 mm** —— 不是「放宽到 240 mm」，而是把可用曲率砍掉一半。小半径弯所需的
+曲率超过 160 mm 对应的值，车根本转不过来；而直通时 80 mm 的曲率对小半径弯反而是余量。
+`SHAPE_MIN_DUTY` 地板（扫 120/240/300/360）不改善任何指标，R=250 时 `md360` 还从 11.0 恶化到 22.0。
+
+因此 `src/FpgaCar.v:224-225` 改为 `DUTY_SHAPE_EN=1'b0` / `SHAPE_DIFF_SHIFT=0`。模块本身保留
+（只占 23 FF + 55 LUT4），将来若要做电机**起转死区补偿**，正确用法是 `DUTY_SHAPE_EN=1` +
+`SHAPE_DIFF_SHIFT=0` + 实测的 `SHAPE_MIN_DUTY` —— 即只用地板，不用差速缩放。
+
+**教训**：把「减小动作幅度」当成治甩尾的手段是错的。甩尾/跟不住弯的根因在
+「方向判断」（§3.45 的拐角方位）与「`pos` 冻结期的漂移」，不在执行器幅度。
 
 ## 3.44 超声波：单阈值改滞回 + 多帧确认（2026-11-23）
 
@@ -3447,6 +3477,151 @@ track_pid ──► car_fsm ──► speed_pid ──► duty_shaper ──► 
 ### 验证
 
 全量回归 28 个 tb 全绿（该逻辑在顶层，由 `FpgaCar_tb` 覆盖编译与时序）。
+
+## 3.45 拐角方向：从「一律左转」改成「按入弯前最后方位」（2026-11-23）
+
+### 问题：90° 拐角整排探头失明，方向猜错就救不回来
+
+实车反馈「弯道还是不行」。用闭环运动学仿真（`bench/corner_poly_sim.py` +
+`bench/corner_fix_sim2.py`，8 路探头 + `track_line` 的宽黑判据 + `track_pid` +
+差速车体，1 kHz 采样）逐拍还原了 90° 左拐的过程：
+
+| 时刻 | `cnt` | `wide` | `pos` | 发生了什么 |
+|---|---|---|---|---|
+| t=2.35 s | 5 | 1 | 冻结 0 | 八路同时压线，车**完全不修正**，直冲 |
+| t=2.39 s | 4 | 1 | 冻结 0 | 质心其实是 +3/+4（线在右），信息被丢掉 |
+| t=2.41 s | 0 | 0 | 0 | 整排探头越过拐角，失明 |
+| t=2.71 s | 0 | 0 | 0 | `LOST_HOLD_MS=300` 走完，此时已偏 46 mm、车头偏 −32° |
+
+关键在第三行：**宽黑那 200 ms 里 `pos` 被冻结**（§3.28.1 影子兜底的设计，
+不能采信「八路全黑 = 居中」的假信号），车按过期位置全速漂移，等真的丢线时
+方向已经定了；此时「一律左转」对左拐是对的、对右拐是反的，猜错就再也找不回。
+
+### 定量依据：126 组入弯位姿四策略对照
+
+扫描维度：横向偏移 DY = −30…+30 mm（步长 10）× 车头偏角 TH = −3/0/+3° ×
+拐角角度 90/75/60° × 左/右 → 共 126 组。
+
+| 策略 | 失败 | 最差 maxLat | 平均 maxLat |
+|---|---|---|---|
+| `left`（现状，一律左转） | **21/126** | 46.3 mm | 34.1 mm |
+| `last`（按最后 `pos` 符号） | 0/126 | 44.0 mm | 35.3 mm |
+| `last_or_left`（**采用**） | 0/126 | 44.0 mm | 35.3 mm |
+| `calc+last_or_left`（宽黑照算质心） | 0/126 | 40.6 mm | 35.1 mm |
+
+失败样本全部集中在 **90° 左拐、DY=−20/−30 mm**（车偏在拐角内侧）——正是
+「方向必须是右转但被强制左转」的组合。
+
+同时被否掉的两条：
+
+- **提高 `WIDE_CNT_TH`（5/6/7/8/9）完全无效**：失败数恒为 1/8（单角度矩阵），
+  因为正常弯道上 `cnt` 最多只到 2（`bench/sensor_cnt_probe.py`，pitch 10/11/12
+  与 fwd 10/30/50/70 全为 cmax=2），拐角处才短暂到 5。
+- **宽黑期间照算质心（`calc`）单独用也无效**：仍 1/8 失败。它只有配合方向
+  修正才把最差情况从 44.0 改善到 40.6，收益不足以推翻 §3.28.1 的冻结设计。
+
+### 改法：新增 `corner_side` / `corner_side_valid`
+
+```verilog
+// src/car_fsm.v:178-179
+reg corner_side;        // 1 = 线在左
+reg corner_side_valid;  // 1 = 至少明确看到过一次方位
+```
+
+锁存在 `S_RUN` 内、且只采信**明确方位**（`pos != 0`）：
+
+```verilog
+// src/car_fsm.v:380-391
+if (on_line && !lost) begin
+    last_pos_neg <= pos[4];
+    if ((state == S_RUN) && (pos != 5'sd0)) begin
+        corner_side       <= pos[4];
+        corner_side_valid <= 1'b1;
+    end
+end
+```
+
+两个限定各有原因：
+
+- **不能直接用 `last_pos_neg`**：它每个压线毫秒都写，直道正中 `pos=0` 会被
+  写成「右」，拐角就朝反方向转。这也是 §3.33.6 当年驳回「按 `last_pos_neg`
+  做分支」的正当理由——本方案没有推翻那个驳回，而是把「明确方位」与
+  「每秒刷新的瞬时符号」拆开。
+- **限定 `S_RUN`**：拐角只在 `S_RUN` 被识别（`corner_cnt` 武装条件就是这样），
+  而 `S_SEARCH`/`S_AVOID` 期间车体是横着扫过线的，方位没有意义。
+
+兜底分支改为（`src/car_fsm.v:606-623`）：
+
+```verilog
+end else if (((DEFAULT_TURN_LEFT != 0) || corner_side_valid) &&
+             (corner_cnt != 16'd0) &&
+             ((TURN_WAIT_FOR_CORNER == 0) || !wide)) begin
+    if (corner_side_valid && !corner_side) begin
+        dir_l_des <= 1'b1; dir_r_des <= 1'b0; turn_dir <= 2'd2;  // 线在右 -> 右转
+    end else begin
+        dir_l_des <= 1'b0; dir_r_des <= 1'b1; turn_dir <= 2'd1;  // 兜底左转
+    end
+    turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
+    corner_cnt <= 16'd0;
+```
+
+`DEFAULT_TURN_LEFT` 的语义收窄为「**方位未知**时往哪边转」：只在从未看到过
+明确方位（刚起步就压上拐角）时生效。用户 2026-11-18 提的「没装 K230 一律
+左转」在实现意义上被保住了 —— 正常菱形/直角入弯前车都能看到线在哪边（仿真
+126 组里全部看得到），只有在正中压上拐角的极端情况才回落到硬编码左转。
+
+第三级（普通跑偏没有宽黑）**完全没动**：仍是 `dir_l_des <= ~last_pos_neg`，
+测试用例 13 专守这条边界。
+
+### 测试台同步（`sim/car_fsm_tb.v`）
+
+原用例 12 断言的正是被证伪的行为（`pos=+3` 时兜底仍强制左转），必须改：
+
+| 用例 | 激励 | 断言 |
+|---|---|---|
+| 12（改） | `pos=+3`（线在右）+ 宽黑 + 丢线 | `dir_l=1, dir_r=0, td5=2`（右转） |
+| 12b（新增） | `pos=-3`（线在左）+ 宽黑 + 丢线 | `dir_l=0, dir_r=1, td5=1`（左转） |
+| 12c（新增） | 第九实例 `u_dut9`，`pos` 恒 0、从未压线 | `state9=S_SEARCH` 且 `dir_l9=0, dir_r9=1`（兜底左转） |
+
+`sim/turn_at_corner_tb.v` 未改：它 `pos` 恒 `5'sd1`（线在右），H1 守的是
+「牌驱动的右转不得被自激宽黑翻转」，改后仍 PASS。
+
+### 验证
+
+- `bash tools/run_regression.sh` 全量 28 个 tb 全绿（`car_fsm_tb` 从 COMPILE_FAIL
+  修到 PASS，见下条教训）。
+- **教训**：Verilog 负字面量必须写 `-5'sd3`，写成 `5'sd-3` 会报
+  `sim/car_fsm_tb.v:654: syntax error` / `error: Malformed statement`。
+
+### 待实车确认
+
+串口 `S=` 现在能区分方向：拐角处 `S=1`（左转）/`S=2`（右转）。若实车仍然
+往反方向转，先看丢线前最后几帧 `P=` 的符号 —— 若一直是 `+000`，说明车是
+正中压上拐角的，`corner_side_valid` 没采到方位，此时改 `DEFAULT_TURN_LEFT`
+或调整入弯位置。宽黑期间照算质心（`calc`）是下一步可选项，仿真收益
+44.0 → 40.6 mm，不足以单独改 `track_line` 的冻结设计。
+
+### 综合、布局布线与烧录（2026-11-23）
+
+改了 `src/car_fsm.v` 必须 **从 `--flow map` 重跑**，不能只跑 `pnr`：
+`efx_run_pnr.py` 是拿 `--vdb_file outflow\FpgaCar.vdb` 当输入的，只跑 pnr 会
+复用旧综合网表，位流时间戳不变、逻辑还是旧的。本次就踩了这个坑（第一次
+`--flow pnr` 只花 39 s，`FpgaCar.bit` 仍是 14:14:50 的旧文件）。
+
+| 阶段 | 结果 | 耗时 |
+|---|---|---|
+| `--flow map` | PASS，EFX_FF 4951 / EFX_ADD 1007 / EFX_LUT4 17086 / RAM10 15 / DSP48 2 | 约 14 min |
+| `--flow pnr` | PASS，整片 19070(71) XLR = **31.4%**（上一版 19078） | 35 s |
+| `--flow pgm` | PASS，`FpgaCar.bit` 2011752 B、`FpgaCar.hex` 2011812 B | 数秒 |
+
+- `u_car`（car_fsm）占 980 XLR（上一版 975），新增的 `corner_side` /
+  `corner_side_valid` 只多用了 5 个 XLR。
+- 时序无恶化：setup slack **29.748 ns**（上一版 29.704）、hold **0.089 ns**
+  （上一版 0.090）。
+- 烧录用 `bash tools/flash_hiftdi.sh`（HiFTDI/D2XX 后端，1.5 MHz）。本次擦除
+  656 KiB、写 654 KiB，**第一遍 verify mismatch，自动重试第二遍通过**，最后回
+  烧应用位流 → `FLASH DONE`。（`tools/flash.bat` 仍会报
+  `No USB target detected`，因为 FT232H 绑的是 FTDI VCP 驱动而不是 libusbK。）
 
 ## 4. 下一步（2026-11-10 按实际到货情况重排）
 

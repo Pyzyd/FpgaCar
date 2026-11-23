@@ -268,6 +268,39 @@ module car_fsm_tb;
         .duty_l (duty_l7), .duty_r (duty_r7), .state (state7), .turn_dir (td7)
     );
 
+    // 第九个实例：拐角「方位未知」时的兜底。pos 恒 0、驱动它时也一直是 lost=1，
+    // 所以 corner_side_valid 永远不会置位，只能靠 DEFAULT_TURN_LEFT=1 左转。
+    reg               on9 = 1'b0;
+    reg               lost9 = 1'b0;
+    reg               wide9 = 1'b0;
+    reg signed [4:0]  pos9 = 5'sd0;
+    wire              en9, dir_l9, dir_r9;
+    wire [10:0]       duty_l9, duty_r9;
+    wire [2:0]        state9;
+    wire [1:0]        td9;
+
+    car_fsm #(
+        .CLK_FREQ     (24_000_000),
+        .START_MS     (1),
+        .START_REQUIRE_LINE (0),               // 不要求压线起跑：本实例从不压线
+        .LOST_HOLD_MS (2),
+        .SEARCH_MS    (10),
+        .SEARCH_DUTY  (500),
+        .SEARCH_FAIL_TO_IDLE (1),
+        .DIR_DEAD_MS  (1),
+        .AVOID_EN     (0),
+        .DEFAULT_TURN_LEFT (1),
+        .CORNER_WIDE_MS    (500),
+        .TURN_DIR_HOLD_MS  (50)
+    ) u_dut9 (
+        .clk (clk), .rst_n (rst_n),
+        .on_line (on9), .lost (lost9), .obstacle (1'b0), .wide (wide9), .pos (pos9),
+        .dir_evt (3'd0),
+        .pid_l (11'd700), .pid_r (11'd500), .enc_l_step(1'b0), .enc_r_step(1'b0),
+        .en (en9), .dir_l (dir_l9), .dir_r (dir_r9),
+        .duty_l (duty_l9), .duty_r (duty_r9), .state (state9), .turn_dir (td9)
+    );
+
     // 第八个实例：转向闭环（菱形锐角）。TURN_MS=40 只是上限，TURN_MIN_MS=5 +
     // TURN_LINE_MS=3 表示"转开 5 ms 后连续 3 ms 压回线就提前收工"。
     // 第七个实例的 TURN_MS=20 小于默认 TURN_MIN_MS=250，闭环恒不触发，
@@ -327,6 +360,7 @@ module car_fsm_tb;
     endtask
 
     integer fails = 0;
+    integer i9 = 0;
 
     task chk6 (input integer cond, input [8*28-1:0] msg);
         begin
@@ -394,6 +428,17 @@ module car_fsm_tb;
                 n = n + 100;
             end
             #1;
+        end
+    endtask
+
+    task chk9 (input integer cond, input [8*28-1:0] msg);
+        begin
+            if (cond) $display("PASS: %0s", msg);
+            else begin
+                $display("FAIL: %0s | st9=%0d dir9=%b%b td9=%0d",
+                         msg, state9, dir_l9, dir_r9, td9);
+                fails = fails + 1;
+            end
         end
     endtask
 
@@ -598,9 +643,11 @@ module car_fsm_tb;
         wait_us(4000);
         chk4(state4 == S_RUN && en4 === 1'b1, "avoid: obstacle gone -> RUN");
 
-        // ---- 12) 拐角兜底：宽黑之后丢线、且没有转向牌 -> 一律左转 ----
-        // 故意把 pos 设成 +3（线在右侧）：若走原逻辑应右转，只有兜底生效才会左转。
-        lost5 = 1'b0; on5 = 1'b1; pos5 = 5'sd3;
+        // ---- 12) 拐角：宽黑后丢线，方向按"入弯前最后看到的线方位" ----
+        // 原来是"一律左转"（DEFAULT_TURN_LEFT=1 硬编码），闭环仿真证明那是
+        // 90° 拐角失败的主因：126 组入弯位姿里一律左转失败 21 组、按线方位转 0 组。
+        // 下面两条分别守"线在右→右转"和"线在左→左转"。
+        lost5 = 1'b0; on5 = 1'b1; pos5 = 5'sd3;   // 入弯前明确看到线在右
         wait_us(3000);
         chk5(state5 == S_RUN, "corner: in RUN");
         wide5 = 1'b1;                      // 宽黑 = 拐角特征
@@ -610,8 +657,43 @@ module car_fsm_tb;
         wait_state5(S_SEARCH, 20000);
         wait_us(4000);                     // 等方向死区走完
         chk5(state5 == S_SEARCH, "corner: in SEARCH");
-        chk5(dir_l5 === 1'b0 && dir_r5 === 1'b1, "corner: forced LEFT");
-        chk5(td5 == 2'd1, "corner: S=1 left");
+        chk5(dir_l5 === 1'b1 && dir_r5 === 1'b0, "corner: turn to RIGHT side");
+        chk5(td5 == 2'd2, "corner: S=2 right");
+
+        // ---- 12b) 拐角：入弯前看到线在左 -> 左转 ----
+        // 上一条结束时 dut5 停在 S_SEARCH（SEARCH_MS=10），直接等 S_RUN 是等不到的
+        // —— 必须先把线放回去，S_SEARCH 见到 on_line 才会回 S_RUN。
+        lost5 = 1'b0; on5 = 1'b1; pos5 = -5'sd3;   // 回到线上，明确看到线在左
+        wait_state5(S_RUN, 20000);
+        chk5(state5 == S_RUN, "corner2: back to RUN");
+        wait_us(3000);                             // 让 corner_side 采到「线在左」
+        wide5 = 1'b1;
+        wait_us(2000);
+        wide5 = 1'b0;
+        lost5 = 1'b1; on5 = 1'b0;
+        wait_state5(S_SEARCH, 20000);
+        wait_us(4000);
+        chk5(dir_l5 === 1'b0 && dir_r5 === 1'b1, "corner2: turn to LEFT side");
+        chk5(td5 == 2'd1, "corner2: S=1 left");
+
+        // ---- 12c) 从未看到过明确方位 -> 仍用 DEFAULT_TURN_LEFT 兜底左转 ----
+        // 由第九个实例守：pos 恒 0（探头一直居中或没压线），corner_side_valid 永不置位。
+        lost9 = 1'b0; on9 = 1'b1; pos9 = 5'sd0;
+        wait_us(3000);
+        chk9(state9 == S_RUN, "fallback: in RUN");
+        wide9 = 1'b1;
+        wait_us(2000);
+        wide9 = 1'b0;
+        lost9 = 1'b1; on9 = 1'b0;
+        // dut9 的 SEARCH_MS=10，等 20 ms 就已经走到 IDLE 了；
+        // LOST_HOLD_MS=2 后才置方向，再经 DIR_DEAD_MS=1 死区才真正换相。
+        // 定长延时容易卡在「已置方向、还没换相」那一拍，改成轮询等方向真正翻过来。
+        for (i9 = 0; i9 < 80; i9 = i9 + 1) begin
+            if (dir_l9 === 1'b0) i9 = 80;
+            else wait_us(100);
+        end
+        chk9(state9 == S_SEARCH, "fallback: in SEARCH");
+        chk9(dir_l9 === 1'b0 && dir_r9 === 1'b1, "fallback: unknown -> LEFT");
 
         // ---- 13) 普通跑偏（没有宽黑）仍按"线在哪边往哪边转" ----
         // 这一条是兜底的边界：不能因为加了默认左转，就让正常右弯跑偏也左转。

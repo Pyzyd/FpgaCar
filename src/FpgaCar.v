@@ -211,8 +211,18 @@ module FpgaCar (
     //   直接减半，而平均前进速度不变。
     //   只对循迹同向工况生效：原地转/找线/避障/停车一律直通，语义不变。
     // ------------------------------------------------------------------
-    localparam        DUTY_SHAPE_EN = 1'b1;   // 总开关
-    localparam integer SHAPE_DIFF_SHIFT = 1;  // 差速 >> 1（减半）
+    // 2026-11-23 实车+仿真结论：DIFF_SHIFT=1 是错的，本项目关闭。
+    //   bench/corner_loop_sim2.py 与 bench/final_compare.py 的闭环仿真
+    //   （8 路探头 + track_line + track_pid + 差速车体，R=400/300/250/200/175/160
+    //   × 车速 0.35~0.80 mm/s-per-duty 共 24 组）：
+    //     DIFF_SHIFT=1 → 8/24 失败，弯道横向误差平均 68.4 mm，最大 152.5 mm
+    //                    （横向误差超过约 32 mm 线就跑出 77 mm 宽的探头阵列）
+    //     DIFF_SHIFT=0 → 0/24 失败，平均 14.0 mm，最大 19.1 mm
+    //   把差速压一半等于把可用转向曲率压一半，弯道反而跟不上；
+    //   SHAPE_MIN_DUTY 地板（120~360）实测也不改善任何指标。
+    //   保留本模块仅为将来做电机起转死区补偿，默认全程直通。
+    localparam        DUTY_SHAPE_EN = 1'b0;   // 总开关（0=整级旁路）
+    localparam integer SHAPE_DIFF_SHIFT = 0;  // 差速不缩放
     localparam integer SHAPE_MIN_DUTY   = 0;  // 低占空比地板（0=关闭，需实测死区）
     localparam integer SHAPE_SLEW_STEP  = 0;  // 斜率限制/ms（0=关闭，有相位滞后）
 

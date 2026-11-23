@@ -105,8 +105,10 @@ module car_fsm #(
     parameter integer AVOID_LINE_MS = 20,  // 回线时黑线需稳定出现
     parameter integer AVOID_BLOCK_MS = 250,// 前方受阻先停，再等超声更新
     // ---- 拐角兜底（没有 K230 / 没识别到转向牌时怎么走）----
-    // 1 = 判到"直角/菱形拐角"而没有任何转向牌事件时，一律向左转；
+    // 1 = 判到"直角/菱形拐角"而没有任何转向牌事件时，**方位未知**才向左转；
     // 0 = 退回旧行为（按最后看到线的方位转，线在左就左转、在右就右转）。
+    // 现在优先按"入弯前最后明确看到的线方位"决定方向（corner_side_valid），
+    // 本参数只在**从未看到过明确方位**（刚起步就压上拐角）时兜底。
     parameter integer DEFAULT_TURN_LEFT = 1,
     // 宽黑（wide）出现后多久内仍算"拐角"。0 = 完全不做拐角判断。
     parameter integer CORNER_WIDE_MS = 500,
@@ -170,6 +172,11 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     // ---------------- 状态 ----------------
     reg        final_stop;          // 找线超时后的永久停车（只能靠复位解除）
     reg        last_pos_neg;        // 最后看到线时 pos<0（线在左）
+    // 拐角方向记忆：只记"明确方位"（pos != 0），pos==0 视为没有信息，不覆盖。
+    // 为什么不能直接用 last_pos_neg：它每个压线毫秒都写，直道正中 pos=0 会
+    // 被写成"右"，拐角兜底就会朝反方向转（闭环仿真 90° 拐角 21/126 失败）。
+    reg        corner_side;         // 1 = 线在左
+    reg        corner_side_valid;   // 1 = 至少明确看到过一次方位
 
     // ---------------- 交通牌强制转向 ----------------
     reg        turning;             // 1 = 正在按交通牌转向
@@ -182,7 +189,15 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     // ---------------- 拐角兜底（没有 K230 时的默认左转）----------------
     // 直角/菱形拐角在八路阵列上表现为"先宽黑、后全丢线"。宽黑出现后
     // CORNER_WIDE_MS 内丢线，就认为这是拐角而不是普通跑偏，此时若没有
-    // 转向牌事件（K230 没装/没识别到），一律按 DEFAULT_TURN_LEFT 左转。
+    // 转向牌事件（K230 没装/没识别到），就按 corner_side 决定往哪边转。
+    //
+    // 为什么不再"一律左转"：闭环运动学仿真（8 路探头 + track_line 宽黑判据 +
+    // track_pid + 差速车体）在 90° 拐角上扫了 126 组入弯位姿（横向偏移 ±30 mm、
+    // 车头偏角 ±3°、90/75/60°、左右各一次）：一律左转 21 组冲出赛道；
+    // 按入弯前最后看到的线方位转 0 组失败。机理是宽黑那 200 ms 里 pos 被冻结，
+    // 车按过期位置直冲，等真的丢线时已经偏出 40~50 mm，方向猜错就救不回来。
+    // DEFAULT_TURN_LEFT 保留为"从未看到过明确方位"时的兜底（菱形左转两次的场景
+    // 正常情况下入弯前都能看到线在哪边）。
     // 不做这个区分的话，正常右弯跑偏丢线也会被强制左转，车会往反方向找线。
     reg  [15:0] corner_cnt;         // 距离上次宽黑还有多少 ms
     reg  [15:0] turn_dir_cnt;       // 转向指示还要亮多久（0 = 灭）
@@ -335,6 +350,8 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
             ms_cnt      <= 16'd0;
             final_stop  <= 1'b0;
             last_pos_neg <= 1'b0;
+            corner_side  <= 1'b1;
+            corner_side_valid <= 1'b0;
             dir_l       <= 1'b1;
             dir_r       <= 1'b1;
             dir_l_des   <= 1'b1;
@@ -363,6 +380,14 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
             // ---- 记住线的方位 ----
             if (on_line && !lost) begin
                 last_pos_neg <= pos[4];
+                // 拐角方向记忆只采信"明确偏左/偏右"，居中（pos==0）不覆盖已有记忆。
+                // 直接用 last_pos_neg 会在直道正中把它写成"右"，拐角就朝反方向转。
+                // 限定 S_RUN：拐角只在这一态被识别（见 corner_cnt 武装条件），
+                // 而 S_SEARCH/S_AVOID 期间车体是横着扫过线的，方位没有意义。
+                if ((state == S_RUN) && (pos != 5'sd0)) begin
+                    corner_side       <= pos[4];
+                    corner_side_valid <= 1'b1;
+                end
             end
 
             // ---- 方向死区计数 ----
@@ -564,8 +589,9 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                         // ---- 找线方向决策（三级优先级）----
                         // ① 有转向牌事件（K230 识别到左/右转）：完全按牌走。
                         // ② 刚过拐角（宽黑后 CORNER_WIDE_MS 内）且没有牌：
-                        //    按 DEFAULT_TURN_LEFT 一律左转。这正是"没装 K230 /
-                        //    没识别到牌"时的兜底，菱形那两段各触发一次。
+                        //    按入弯前最后明确看到的线方位转（corner_side）；
+                        //    从未看到过明确方位才用 DEFAULT_TURN_LEFT 兜底。
+                        //    这是"没装 K230 / 没识别到牌"时的主要路径。
                         // ③ 其余情况（普通跑偏丢线）：线在哪边就往哪边转，
                         //    否则正常赛道上一旦偏出去就会朝反方向找，越找越远。
                         if (turn_req && turn_allowed &&
@@ -577,12 +603,22 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             turn_dir  <= turn_left ? 2'd1 : 2'd2;
                             turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
                             corner_cnt <= 16'd0;
-                        end else if ((DEFAULT_TURN_LEFT != 0) && (corner_cnt != 16'd0) &&
+                        end else if (((DEFAULT_TURN_LEFT != 0) || corner_side_valid) &&
+                                     (corner_cnt != 16'd0) &&
                                      ((TURN_WAIT_FOR_CORNER == 0) || !wide)) begin
-                            // 拐角兜底：默认左转（左轮后退、右轮前进）
-                            dir_l_des <= 1'b0;
-                            dir_r_des <= 1'b1;
-                            turn_dir  <= 2'd1;
+                            // 拐角兜底：方向按"入弯前最后明确看到的线方位"决定。
+                            // 线在左 → 左转（左轮后退、右轮前进）；
+                            // 线在右 → 右转（左轮前进、右轮后退）。
+                            // 只有从未看到过明确方位时才回落到 DEFAULT_TURN_LEFT（左转）。
+                            if (corner_side_valid && !corner_side) begin
+                                dir_l_des <= 1'b1;
+                                dir_r_des <= 1'b0;
+                                turn_dir  <= 2'd2;
+                            end else begin
+                                dir_l_des <= 1'b0;
+                                dir_r_des <= 1'b1;
+                                turn_dir  <= 2'd1;
+                            end
                             turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
                             corner_cnt <= 16'd0;
                         end else begin
