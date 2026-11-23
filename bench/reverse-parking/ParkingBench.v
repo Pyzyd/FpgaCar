@@ -50,6 +50,7 @@ module ParkingBench (
     wire signed [10:0] follow_corr;
     wire following, forward_l, forward_r, fault;
     wire [2:0] status;
+    wire [1:0] reverse_fault;
     track_pid #(
         .CLK_FREQ(CLOCK_HZ), .BASE_DUTY(240), .P_GAIN(18), .D_GAIN(8), .I_LIMIT(0)
     ) line_controller (
@@ -64,7 +65,8 @@ module ParkingBench (
         .line_valid(line_valid), .line_centered(line_centered),
         .follow_duty_l(follow_l), .follow_duty_r(follow_r),
         .active(motor_stby), .following(following), .stopped(motion_stopped),
-        .fault(fault), .status(status), .forward_l(forward_l), .forward_r(forward_r),
+        .fault(fault), .reverse_fault(reverse_fault), .status(status),
+        .forward_l(forward_l), .forward_r(forward_r),
         .duty_l(duty_l), .duty_r(duty_r)
     );
 
@@ -99,7 +101,7 @@ module ParkingBench (
     uart_report #(.CLK_FREQ(CLOCK_HZ)) reporter (
         .clk(clk), .rst_n(rst_n), .dist_cm(16'hffff), .dist_valid(report_tick),
         .line(line), .raw(raw), .pos(line_pos), .corr(follow_corr),
-        .duty_l(duty_l), .duty_r(duty_r), .wide(wide), .turn_dir(2'd0),
+        .duty_l(duty_l), .duty_r(duty_r), .wide(wide), .turn_dir(reverse_fault),
         .obstacle(fault), .state(status), .enc_l(pos_l), .enc_r(pos_r),
         .spd_l(speed_l), .spd_r(speed_r), .tx(uart_tx)
     );

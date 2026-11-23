@@ -25,6 +25,7 @@ module parking_motion #(
     output wire               following,
     output wire               stopped,
     output reg                fault,
+    output reg  [1:0]         reverse_fault,
     output reg  [2:0]         status,
     output reg                forward_l,
     output reg                forward_r,
@@ -54,6 +55,11 @@ module parking_motion #(
     localparam integer WRONG_WAY_COUNTS = 36, START_COUNTS = 24;
     localparam integer PIVOT_DRIFT = 180, STRAIGHT_DRIFT = 300;
     localparam signed [31:0] TRIM_LIMIT = 36;
+    localparam signed [31:0] REVERSE_TRIM_LIMIT = 60, CATCH_GAP = 144, RESUME_GAP = 72;
+    localparam [10:0] CATCH_DUTY = STRAIGHT_DUTY + REVERSE_TRIM_LIMIT;
+    localparam integer REVERSE_DRIFT_LIMIT = 600, REVERSE_STALL_MS = 800, PROGRESS_COUNTS = 8;
+    localparam [1:0] REVERSE_OK = 0, REVERSE_WRONG_WAY = 1,
+                     REVERSE_STALLED = 2, REVERSE_LIMIT = 3;
 
     reg [3:0] state, next_state;
     reg [TICK_W-1:0] tick_count;
@@ -61,6 +67,9 @@ module parking_motion #(
     reg [7:0] hold_ms;
     reg exit_armed;
     reg signed [31:0] start_l, start_r;
+    reg pause_l, pause_r;
+    reg [9:0] idle_l_ms, idle_r_ms;
+    reg signed [31:0] last_progress_l, last_progress_r;
 
     wire ms_tick = (tick_count == MS_CYCLES - 1);
     wire signed [31:0] delta_l = position_l - start_l;
@@ -73,8 +82,9 @@ module parking_motion #(
                                  + $signed({along_r[31], along_r});
     wire signed [31:0] straight_error = along_l - along_r;
     wire signed [31:0] trim_raw = straight_error / 4;
-    wire signed [31:0] trim = (trim_raw > TRIM_LIMIT) ? TRIM_LIMIT :
-                              (trim_raw < -TRIM_LIMIT) ? -TRIM_LIMIT : trim_raw;
+    wire signed [31:0] trim_limit = (state == REVERSE) ? REVERSE_TRIM_LIMIT : TRIM_LIMIT;
+    wire signed [31:0] trim = (trim_raw > trim_limit) ? trim_limit :
+                              (trim_raw < -trim_limit) ? -trim_limit : trim_raw;
     wire signed [11:0] straight_l = $signed({1'b0, STRAIGHT_DUTY}) - $signed(trim[11:0]);
     wire signed [11:0] straight_r = $signed({1'b0, STRAIGHT_DUTY}) + $signed(trim[11:0]);
 
@@ -89,6 +99,15 @@ module parking_motion #(
                            (straight_error < -STRAIGHT_DRIFT) ||
                            (elapsed_ms >= CHECK_ENCODER_MS &&
                             (along_l < START_COUNTS || along_r < START_COUNTS));
+    wire reverse_done_l = (along_l >= REVERSE_COUNTS);
+    wire reverse_done_r = (along_r >= REVERSE_COUNTS);
+    wire brake_l = reverse_done_l || pause_l;
+    wire brake_r = reverse_done_r || pause_r;
+    wire reverse_wrong_way = (along_l < -WRONG_WAY_COUNTS) || (along_r < -WRONG_WAY_COUNTS);
+    wire reverse_stalled = (idle_l_ms >= REVERSE_STALL_MS) || (idle_r_ms >= REVERSE_STALL_MS);
+    wire reverse_over_limit = (straight_error > REVERSE_DRIFT_LIMIT) ||
+                              (straight_error < -REVERSE_DRIFT_LIMIT) ||
+                              (elapsed_ms >= REVERSE_LIMIT_MS);
     wire qualifying = ((state == EXIT_STRAIGHT) && (exit_armed ? line_seen : !line_seen)) ||
                       ((state == EXIT_TURN) && (pivot_yaw >= RETURN_MIN) && line_centered) ||
                       ((state == FOLLOW) && !line_valid);
@@ -111,8 +130,8 @@ module parking_motion #(
                 end
                 ENTRY_BRAKE: if (elapsed_ms >= BRAKE_MS) next_state = REVERSE;
                 REVERSE: begin
-                    if (straight_failed || elapsed_ms >= REVERSE_LIMIT_MS) next_state = FAULT;
-                    else if (sum_along >= 2 * REVERSE_COUNTS) next_state = PARKED;
+                    if (reverse_wrong_way || reverse_stalled || reverse_over_limit) next_state = FAULT;
+                    else if (reverse_done_l && reverse_done_r) next_state = PARKED;
                 end
                 PARKED: if (elapsed_ms >= PARK_MS + BRAKE_MS) next_state = EXIT_STRAIGHT;
                 EXIT_STRAIGHT: begin
@@ -144,6 +163,7 @@ module parking_motion #(
             start_l <= 0;
             start_r <= 0;
             fault <= 1'b0;
+            reverse_fault <= REVERSE_OK;
         end else if (state != next_state) begin
             state <= next_state;
             tick_count <= 0;
@@ -152,10 +172,17 @@ module parking_motion #(
             exit_armed <= 1'b0;
             start_l <= position_l;
             start_r <= position_r;
-            if (next_state == FAULT)
+            if (next_state == FAULT) begin
                 fault <= 1'b1;
-            else if (next_state == DELAY)
+                if (state == REVERSE) begin
+                    if (reverse_wrong_way) reverse_fault <= REVERSE_WRONG_WAY;
+                    else if (reverse_stalled) reverse_fault <= REVERSE_STALLED;
+                    else reverse_fault <= REVERSE_LIMIT;
+                end
+            end else if (next_state == DELAY) begin
                 fault <= 1'b0;
+                reverse_fault <= REVERSE_OK;
+            end
         end else begin
             tick_count <= ms_tick ? 0 : tick_count + 1'b1;
             if (ms_tick) begin
@@ -170,6 +197,41 @@ module parking_motion #(
                 end else if (hold_ms != 8'hff) begin
                     hold_ms <= hold_ms + 1'b1;
                 end
+            end
+        end
+    end
+
+    // 倒车起步时先约束领先轮。只有被要求转动却一直没有净进度的轮才判堵转。
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            pause_l <= 1'b0;
+            pause_r <= 1'b0;
+            idle_l_ms <= 0;
+            idle_r_ms <= 0;
+            last_progress_l <= 0;
+            last_progress_r <= 0;
+        end else if (state != REVERSE || next_state != REVERSE) begin
+            pause_l <= 1'b0;
+            pause_r <= 1'b0;
+            idle_l_ms <= 0;
+            idle_r_ms <= 0;
+            last_progress_l <= 0;
+            last_progress_r <= 0;
+        end else if (ms_tick) begin
+            pause_l <= (straight_error >= (pause_l ? RESUME_GAP : CATCH_GAP));
+            pause_r <= (straight_error <= -(pause_r ? RESUME_GAP : CATCH_GAP));
+
+            if (brake_l || along_l - last_progress_l >= PROGRESS_COUNTS) begin
+                idle_l_ms <= 0;
+                last_progress_l <= along_l;
+            end else if (idle_l_ms < REVERSE_STALL_MS) begin
+                idle_l_ms <= idle_l_ms + 1'b1;
+            end
+            if (brake_r || along_r - last_progress_r >= PROGRESS_COUNTS) begin
+                idle_r_ms <= 0;
+                last_progress_r <= along_r;
+            end else if (idle_r_ms < REVERSE_STALL_MS) begin
+                idle_r_ms <= idle_r_ms + 1'b1;
             end
         end
     end
@@ -194,8 +256,8 @@ module parking_motion #(
                     status = 3'd3;
                     forward_l = 1'b0;
                     forward_r = 1'b0;
-                    duty_l = straight_l[10:0];
-                    duty_r = straight_r[10:0];
+                    duty_l = brake_l ? 11'd0 : (pause_r ? CATCH_DUTY : straight_l[10:0]);
+                    duty_r = brake_r ? 11'd0 : (pause_l ? CATCH_DUTY : straight_r[10:0]);
                 end
                 PARKED: status = 3'd4;
                 EXIT_STRAIGHT: begin

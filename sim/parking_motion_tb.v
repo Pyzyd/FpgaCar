@@ -8,6 +8,7 @@ module parking_motion_tb;
     reg line_seen = 0, line_valid = 0, line_centered = 0;
     wire active, following, stopped, fault, forward_l, forward_r;
     wire [2:0] status;
+    wire [1:0] reverse_fault;
     wire [10:0] duty_l, duty_r;
 
     // 每个模拟时钟推进一毫秒，里程和持续时间阈值与实机一致。
@@ -17,13 +18,22 @@ module parking_motion_tb;
         .line_valid(line_valid), .line_centered(line_centered),
         .follow_duty_l(11'd400), .follow_duty_r(11'd210),
         .active(active), .following(following), .stopped(stopped),
-        .fault(fault), .status(status), .forward_l(forward_l), .forward_r(forward_r),
+        .fault(fault), .reverse_fault(reverse_fault), .status(status),
+        .forward_l(forward_l), .forward_r(forward_r),
         .duty_l(duty_l), .duty_r(duty_r)
     );
 
     task step_ms;
         input integer n;
         begin repeat (n) @(negedge clk); end
+    endtask
+
+    task begin_reverse;
+        begin
+            begin_turn();
+            pos_l = -3077;
+            step_ms(152);
+        end
     endtask
 
     task check;
@@ -76,11 +86,21 @@ module parking_motion_tb;
         pos_r = -84;
         step_ms(2);
         check(duty_l == 296 && duty_r == 304, "distance error slows the leading wheel");
-        pos_l = -3080 - 3582;
+        pos_l = -3080 - 325;
+        step_ms(2);
+        check(status == 3 && duty_l == 0 && duty_r == 360,
+              "startup mismatch beyond old cutoff uses catch-up instead of stopping");
+        pos_r = -250;
+        step_ms(2);
+        check(duty_l == 0 && duty_r == 360, "keep leader braked until gap closes");
+        pos_r = -255;
+        step_ms(2);
+        check(duty_l != 0 && duty_r != 0, "resume both wheels after catch-up");
+        pos_l = -3080 - 3584;
         pos_r = -3582;
         step_ms(2);
-        check(status == 3, "keep reversing below 300 mm mean distance");
-        pos_l = -3080 - 3584;
+        check(status == 3 && duty_l == 0 && duty_r != 0, "wait for each wheel to reach 300 mm");
+        pos_r = -3583;
         step_ms(1);
         check(status == 4 && duty_l == 0 && duty_r == 0, "park at 300 mm");
         step_ms(5149);
@@ -132,6 +152,21 @@ module parking_motion_tb;
         begin_turn();
         step_ms(902);
         check(fault && !active, "stop if left encoder never moves");
+
+        begin_reverse();
+        pos_l = -3077 - 160;
+        step_ms(802);
+        check(fault && !active && reverse_fault == 2, "report reverse stall on commanded wheel");
+
+        begin_reverse();
+        pos_r = 37;
+        step_ms(2);
+        check(fault && !active && reverse_fault == 1, "report reverse wrong direction");
+
+        begin_reverse();
+        pos_r = -601;
+        step_ms(2);
+        check(fault && !active && reverse_fault == 3, "report extreme reverse mismatch");
 
         begin_turn();
         run_enable = 0;
