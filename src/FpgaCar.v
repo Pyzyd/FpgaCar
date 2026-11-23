@@ -199,9 +199,52 @@ module FpgaCar (
     wire [10:0]        loop_duty_l = SPEED_LOOP_EN ? spd_duty_l : ctrl_duty_l;
     wire [10:0]        loop_duty_r = SPEED_LOOP_EN ? spd_duty_r : ctrl_duty_r;
 
+    // 整形器的 en 就是这个信号（停机/换相死区/非 RUN 时直通），
+    // 所以必须在例化之前声明，否则 Verilog 会当成隐式 wire。
     wire        motor_en = motion_rst_n && (PWM_BENCH_TEST || ctrl_en);
-    wire [10:0] ml_duty  = PWM_BENCH_TEST ? BENCH_DUTY : loop_duty_l;
-    wire [10:0] mr_duty  = PWM_BENCH_TEST ? BENCH_DUTY : loop_duty_r;
+
+    // ------------------------------------------------------------------
+    // 差速幅度整形（duty_shaper）
+    //   见 src/duty_shaper.v 顶部说明。一句话：track_pid 饱和时会把内侧轮压到
+    //   占空比 0，等效于"绕车体中心原地转"（R = WHEEL_BASE_MM/2 = 80 mm），
+    //   远超赛道弯半径；把差速压一半后内侧轮仍有 240，R≈240 mm，弯道动作幅度
+    //   直接减半，而平均前进速度不变。
+    //   只对循迹同向工况生效：原地转/找线/避障/停车一律直通，语义不变。
+    // ------------------------------------------------------------------
+    localparam        DUTY_SHAPE_EN = 1'b1;   // 总开关
+    localparam integer SHAPE_DIFF_SHIFT = 1;  // 差速 >> 1（减半）
+    localparam integer SHAPE_MIN_DUTY   = 0;  // 低占空比地板（0=关闭，需实测死区）
+    localparam integer SHAPE_SLEW_STEP  = 0;  // 斜率限制/ms（0=关闭，有相位滞后）
+
+    // follow：正在循迹、两轮同向。S_RUN=1 / S_LOST=2（car_fsm.v:148-149）
+    wire shape_follow = ((car_state == 3'd1) || (car_state == 3'd2)) &&
+                        (ctrl_dir_l == ctrl_dir_r);
+
+    wire [10:0] shape_duty_l, shape_duty_r;
+
+    duty_shaper #(
+        .CLK_FREQ   (24_000_000),
+        .DUTY_MAX   (1200),
+        .DIFF_SHIFT (SHAPE_DIFF_SHIFT),
+        .MIN_DUTY   (SHAPE_MIN_DUTY),
+        .SLEW_STEP  (SHAPE_SLEW_STEP)
+    ) u_shaper (
+        .clk        (clk),
+        .rst_n      (sys_rst_n),
+        .en         (motor_en),
+        .follow     (shape_follow),
+        .duty_l_in  (loop_duty_l),
+        .duty_r_in  (loop_duty_r),
+        .duty_l_out (shape_duty_l),
+        .duty_r_out (shape_duty_r)
+    );
+
+    // 整形后的最终占空比：同时送给 PWM 与串口（DL=/DR= 必须报真正到电机的值）
+    wire [10:0] final_duty_l = DUTY_SHAPE_EN ? shape_duty_l : loop_duty_l;
+    wire [10:0] final_duty_r = DUTY_SHAPE_EN ? shape_duty_r : loop_duty_r;
+
+    wire [10:0] ml_duty  = PWM_BENCH_TEST ? BENCH_DUTY : final_duty_l;
+    wire [10:0] mr_duty  = PWM_BENCH_TEST ? BENCH_DUTY : final_duty_r;
 
     // 三根 CTL 恒 0（官方实测值），与 USE_CAMERA 无关：不驱动就是悬空
     assign cmos_ctl1  = 1'b0;
@@ -360,7 +403,19 @@ module FpgaCar (
     // 【绕行要用到的两个分量】ir_l / ir_r 单独留着：只知道"有障碍"没法决定
     //   往左还是往右偏，必须知道障碍压在哪一侧。
     // ------------------------------------------------------------------
-    localparam [15:0] OBSTACLE_CM = 16'd25;    // 刹车/绕行阈值，实测后调
+    // 【触发距离 28 cm】原来 25 cm 是按"车头到方块"算的，但几何核算
+    // （bench/geo_fix.py，按实测车长 20 cm / 含轮宽 18.5 cm / 轮距 16 cm）
+    // 显示：25 cm 触发时，五段弧的最小间隙只有 1.9 cm，方块稍有摆放偏差就蹭上。
+    // 28 cm 触发时最小间隙 4.5 cm，还有余量。方块必须在线上，太晚触发就来不及。
+    localparam [15:0] OBSTACLE_CM = 16'd28;    // 刹车/绕行阈值
+    // 【滞回】释放距离要比触发距离大，否则车在阈值边缘会反复进出避障：
+    // 超声波本身有 ±1 cm 抖动，车又刚好在动，单阈值必然抖。留 6 cm 死区。
+    localparam [15:0] OBSTACLE_RELEASE_CM = 16'd34;
+    // 【多帧确认】hc_sr04 单帧就可能因为地面反射/斜射丢回波给出一个假的近距，
+    // 只判一帧会让车在路上被一个毛刺直接摁停或绕障。连续 N 帧都近才算真的近，
+    // 连续 N 帧都远才算真的远。60 ms 一帧 → 3 帧约 180 ms，车速 0.3 m/s 时
+    // 车已走 5.4 cm，仍在 28 cm 阈值的安全余量内。
+    localparam [3:0]  OBSTACLE_CONFIRM_N = 4'd3;
 
     // 【总开关】红外避障（E18-D80NK）—— 现阶段不用，默认关闭。
     //   1'b0 = 不参与障碍判定（超声波单独决定 obstacle），接线与 RTL 全部保留；
@@ -380,7 +435,32 @@ module FpgaCar (
     //          而是走 car_fsm 的 BACK → TURN → PROBE 三段绕行。
     localparam USE_ULTRA = 1'b1;
 
-    wire hc_near  = (dist_cm != 16'hFFFF) && (dist_cm <= OBSTACLE_CM);
+    // ---- 超声波多帧确认 + 滞回 ----
+    reg  [1:0]  hc_near_cnt;     // 连续近帧数
+    reg  [1:0]  hc_far_cnt;      // 连续远帧数
+    reg         hc_near_lat;     // 锁存后的"近"标志
+
+    wire hc_frame_ok   = dist_valid && (dist_cm != 16'hFFFF);
+    wire hc_frame_near = hc_frame_ok && (dist_cm <= OBSTACLE_CM);
+    wire hc_frame_far  = hc_frame_ok && (dist_cm >  OBSTACLE_RELEASE_CM);
+
+    always @(posedge clk or negedge sys_rst_n)
+        if (!sys_rst_n) begin
+            hc_near_cnt <= 2'd0;
+            hc_far_cnt  <= 2'd0;
+            hc_near_lat <= 1'b0;
+        end else if (dist_valid) begin
+            // 无回波（FFFF）既不算近也不算远：保持现状，不计入任何一边。
+            // 否则空旷场地持续无回波会把 hc_far_cnt 一直加，掩盖真实的近距。
+            hc_near_cnt <= hc_frame_near ? ((hc_near_cnt >= OBSTACLE_CONFIRM_N - 1)
+                                            ? OBSTACLE_CONFIRM_N - 1 : hc_near_cnt + 2'd1) : 2'd0;
+            hc_far_cnt  <= hc_frame_far  ? ((hc_far_cnt  >= OBSTACLE_CONFIRM_N - 1)
+                                            ? OBSTACLE_CONFIRM_N - 1 : hc_far_cnt  + 2'd1) : 2'd0;
+            if (hc_near_cnt >= OBSTACLE_CONFIRM_N - 1) hc_near_lat <= 1'b1;
+            else if (hc_far_cnt >= OBSTACLE_CONFIRM_N - 1) hc_near_lat <= 1'b0;
+        end
+
+    wire hc_near  = hc_near_lat;
     wire ir_l_det = ~ir_l;                      // NPN 低有效
     wire ir_r_det = ~ir_r;
     // 注意：OLED 的四格已改成 障碍/丢线/左转/右转（红外模块已卸下），
@@ -485,8 +565,18 @@ module FpgaCar (
         // 几何核算（车宽 18.5 cm、方块 10 cm、驱动轮距 16 cm）：
         //   单弧 60°、占空比 860/380 时横移约 20.7 cm（需 ≥14.25 cm），
         //   在 25 cm 触发距离下最小间隙约 4.5 cm，见 bench/avoid_sim6.py。
-        .AVOID_OUT_MS     (524),     // 外摆弧时长（约 60° 圆弧）
-        .AVOID_ALIGN_MS   (524),     // 摆正弧时长（同角度反向弧）
+        // 【弧线段改成里程闭环】下面两条 ms 已不再是"定长"，而是编码器不
+        // 出脉冲时的超时上限。真正的段切换由两轮计数差（转角）和计数和
+        // （里程）决定：同样 60°，车速快慢、电池电压高低都走得一样。
+        //   60° 对应计数差 2774（20 线四倍频 80 × 减速 48 = 3840/圈）
+        .AVOID_OUT_MS     (2500),    // 外摆弧超时上限（正常约 300~500 ms 就够）
+        .AVOID_ALIGN_MS   (2500),    // 摆正弧超时上限（同角度反向弧）
+        // 标定：轮周长 / 轮距 / 每圈计数。换轮子或换编码器只改这三个。
+        .ENC_CNT_PER_REV  (3840),
+        .WHEEL_CIRC_MM    (232),
+        .WHEEL_BASE_MM    (160),
+        .AVOID_ARC_DEG    (60),      // 单弧目标转角
+        .AVOID_PASS_MM    (200),     // BY_PASS 直线超越距离
         .AVOID_OUT_DUTY   (860),
         .AVOID_OUT_IN_DUTY(380),
         .AVOID_ALIGN_DUTY (840),
@@ -511,6 +601,8 @@ module FpgaCar (
         .dir_evt  (dir_evt_mux),    // 交通牌方向：K230 提供，停用时恒 0
         .pid_l    (pid_duty_l),
         .pid_r    (pid_duty_r),
+        .enc_l_step (enc_l_step),
+        .enc_r_step (enc_r_step),
         .en       (ctrl_en),
         .dir_l    (ctrl_dir_l),
         .dir_r    (ctrl_dir_r),
@@ -904,8 +996,8 @@ module FpgaCar (
         // DL=/DR= 必须报"真正送到 PWM 的占空比"。速度环接上以后
         // ctrl_duty_* 只是环前指令，环后还会被 spd_sync 修正；
         // 报环前值会让现场看到的占空比与车轮实际转动对不上。
-        .duty_l     (loop_duty_l),
-        .duty_r     (loop_duty_r),
+        .duty_l     (final_duty_l),
+        .duty_r     (final_duty_r),
         .wide       (line_wide),
         .turn_dir   (turn_dir),
         .obstacle   (obstacle),

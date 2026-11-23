@@ -3,7 +3,7 @@
 FpgaCar top level emits two ASCII lines per HC-SR04 frame (every 60 ms):
 
     D=123cm T=00011000 P=+02 O=0 M=01          (35 bytes)
-    L=00000123 R=FFFFFFF0 VL=0005 VR=FFF0 X=00011000 C=+036 DL=27C DR=234   (71 bytes)
+    L=00000123 R=FFFFFFF0 VL=0005 VR=FFF0 X=00011000 C=+036 DL=27C DR=234 W=1 S=0   (79 bytes)
 
   D   ultrasonic distance in cm, "---" when no echo / out of range
   T   track_line 8-channel bitmap, bit7..bit0 = track[7]..track[0], 1 = on tape
@@ -11,6 +11,7 @@ FpgaCar top level emits two ASCII lines per HC-SR04 frame (every 60 ms):
   O   obstacle flag (ultrasonic too close OR either E18-D80NK triggered)
   M   car_fsm state, two decimal digits:
         00 IDLE  01 RUN  02 LOST  03 SEARCH  04 STOP
+        05 AVOID_BACK  06 AVOID_TURN  07 AVOID_PROBE
   L/R left/right encoder accumulated position, 8 hex digits, two's complement
   VL/VR left/right speed = net steps in the last 50 ms window, 4 hex digits,
         two's complement
@@ -26,6 +27,14 @@ FpgaCar top level emits two ASCII lines per HC-SR04 frame (every 60 ms):
         (0..4B0 = 0..1200). DL = BASE + C and DR = BASE - C when the FSM is
         passing the PID straight through; a mismatch means LOST-hold, SEARCH
         or TURN has taken over the duty.
+  W   wide-dark flag. 1 = track_line judged this sample "too wide to trust"
+        (shadow / whole-sensor black) and held the previous pos; sustained
+        beyond WIDE_MS it degrades to a lost line, so T still shows several 1s
+        while M goes 02 LOST. The one field that exposes being fooled by your
+        own shadow or a lamp reflection.
+  S   last turn direction: 0 none / 1 left / 2 right. SEARCH only runs 1.5 s,
+        and watching which way the car drives cannot separate "corner fallback
+        turned left" from "the old logic turned right" -- S does.
 
 Both of the last two groups are hex on purpose: a 32-bit signed value would
 need eight cascaded div10 stages in fabric, which costs far more than the
@@ -43,7 +52,9 @@ import time
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-STATE_NAME = {0: "IDLE", 1: "RUN", 2: "LOST", 3: "SEARCH", 4: "STOP"}
+STATE_NAME = {0: "IDLE", 1: "RUN", 2: "LOST", 3: "SEARCH", 4: "STOP",
+              5: "AVOID_BACK", 6: "AVOID_TURN", 7: "AVOID_PROBE"}
+TURN_NAME = {0: "无", 1: "左", 2: "右"}
 
 # line 1 全是十进制；line 2 全是十六进制二补码
 FIELDS1 = (
@@ -66,6 +77,8 @@ FIELDS3 = (
     ("C",  re.compile(r"(?:^|\s)C=([+-]\d{3})")),
     ("DL", re.compile(r"(?:^|\s)DL=([0-9A-Fa-f]{3})")),
     ("DR", re.compile(r"(?:^|\s)DR=([0-9A-Fa-f]{3})")),
+    ("W",  re.compile(r"(?:^|\s)W=(\d)")),
+    ("S",  re.compile(r"(?:^|\s)S=(\d)")),
 )
 
 
@@ -233,6 +246,18 @@ def main():
                 print("  DL %d..%d   DR %d..%d  (BASE=600)"
                       % (min(dls), max(dls), min(drs), max(drs)))
                 print("        -> 若某一侧恒为 0 或恒为 1200，说明状态机在接管（LOST/SEARCH/TURN）")
+            # ---- W= 宽黑 / S= 转向方向 ----
+            if f3.get("W"):
+                uniq = show_uniq("W", f3["W"])
+                n1 = sum(1 for v in f3["W"] if v == "1")
+                print("        -> 宽黑(影子/整片黑) %d/%d 帧%s"
+                      % (n1, len(f3["W"]),
+                         "；持续超过 WIDE_MS 会降级成 02 LOST" if n1 else ""))
+            if f3.get("S"):
+                uniq = show_uniq("S", f3["S"])
+                names = [TURN_NAME.get(int(v), "?") for v in uniq]
+                print("        -> 最近转向 %s" % " ".join(
+                    "%s %s" % (v, n) for v, n in zip(uniq, names)))
             # X 与 T 应逐位互补：X = ~T（ACTIVE_HIGH=0 时）
             pair = []
             for ln in line2:

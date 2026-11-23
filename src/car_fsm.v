@@ -85,8 +85,23 @@ module car_fsm #(
     parameter integer AVOID_TURN_IN_DUTY = 860,  // BY_TURN_IN 外侧快轮（反向弧切回线）
     parameter integer AVOID_TURN_IN_IN_DUTY = 420, // BY_TURN_IN 内侧慢轮
     parameter integer AVOID_REJOIN_IN_DUTY  = 430, // BY_REJOIN 内侧慢轮
-    parameter integer AVOID_OUT_MS      = 524,  // 外摆弧时长（60° 圆弧）
-    parameter integer AVOID_ALIGN_MS    = 524,  // 摆正弧时长（同角度反向弧）
+    // 【弧线段改为里程闭环】原来 OUT/ALIGN/PASS 都是按毫秒截断的，而同样的
+    // 毫秒数在不同车速下转过的角度完全不同 —— 电池电压、地面摩擦、载重一变，
+    // 弧就画歪，轻则回不了线，重则直接蹭上方块。改成数编码器后，两轮计数
+    // **差**只由航向变化决定，与车速无关，转角就稳定了。
+    //   转角(度) = diff_cnt * 轮周长 / (每轮圈计数 * 轮距) * 180/pi
+    //   默认 20 线编码器四倍频 = 80 计数/电机圈，减速 1:48 -> 3840 计数/轮圈
+    //   轮周长 23.2 cm、轮距 16.0 cm 时：60 度 = 2774 个计数差
+    // 真要改标定，只改 ENC_CNT_PER_REV / WHEEL_CIRC_MM / WHEEL_BASE_MM 三个数。
+    parameter integer ENC_CNT_PER_REV  = 3840, // 每轮圈计数（四倍频 × 减速比）
+    parameter integer WHEEL_CIRC_MM    = 232,  // 轮周长, mm
+    parameter integer WHEEL_BASE_MM    = 160,  // 轮距, mm
+    parameter integer AVOID_ARC_DEG    = 60,   // 单弧目标转角（度）
+    parameter integer AVOID_PASS_MM    = 200,  // BY_PASS 直线超越距离, mm
+    // 下面两条 *_MS 已降级为**超时上限**：编码器不出脉冲时（没装/线松）仍能
+    // 走完动作，不会卡死在半路。正常有编码器时提前里程到了就切换。
+    parameter integer AVOID_OUT_MS      = 2500, // 外摆弧超时上限
+    parameter integer AVOID_ALIGN_MS    = 2500, // 摆正弧超时上限
     parameter integer AVOID_LINE_MS = 20,  // 回线时黑线需稳定出现
     parameter integer AVOID_BLOCK_MS = 250,// 前方受阻先停，再等超声更新
     // ---- 拐角兜底（没有 K230 / 没识别到转向牌时怎么走）----
@@ -115,6 +130,9 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     // 闭环输出
     input  wire [10:0]       pid_l,
     input  wire [10:0]       pid_r,
+    // 编码器里程（弧线绕障的闭环量，各 1 clk 脉冲）
+    input  wire              enc_l_step,
+    input  wire              enc_r_step,
     // 执行
     output wire              en,              // 1 = 电机使能（同时接 TB6612 STBY）
     output reg               dir_l,           // 1 = 正转（车前进）
@@ -192,6 +210,25 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     reg bypass_left_line;
     reg [15:0] bypass_line_cnt, bypass_block_cnt;
     reg [15:0] bypass_turn_in_cnt;   // TURN_IN 期间连续看到线的毫秒数
+
+    // ---------------- 弧线里程闭环计数器 ----------------
+    // 为什么数里程而不是数毫秒：同一段毫秒数在不同车速下转过的角度完全不同。
+    // 两轮编码器计数**差**只由航向变化决定（与车速无关）：
+    //   Δ航向 = (d_r - d_l) / 轮距，d = 计数 × 轮周长 / 每圈计数
+    // 所以数够固定的计数差，转角就是固定的，电池掉压、地面变滑都不影响。
+    localparam integer ARC_CNT_PER_RAD  = (ENC_CNT_PER_REV * WHEEL_BASE_MM) / WHEEL_CIRC_MM;
+    localparam integer ARC_MRAD         = (AVOID_ARC_DEG * 31416 + 900) / 1800;  // 毫弧度
+    localparam integer ARC_DIFF_TARGET  = (ARC_MRAD * ARC_CNT_PER_RAD) / 1000;
+    localparam integer PASS_SUM_TARGET  = (AVOID_PASS_MM * ENC_CNT_PER_REV) / WHEEL_CIRC_MM;
+
+    reg [31:0] arc_cnt_l, arc_cnt_r;   // 本段内两轮各自累计脉冲
+    reg [2:0]  arc_step_d, arc_state_d;// 上一拍的段号/状态，用来切段清零
+    wire       arc_seg_new  = (state != arc_state_d) || (bypass_step != arc_step_d);
+    wire [31:0] arc_diff    = (arc_cnt_l > arc_cnt_r) ? (arc_cnt_l - arc_cnt_r)
+                                                      : (arc_cnt_r - arc_cnt_l);
+    wire [31:0] arc_sum     = arc_cnt_l + arc_cnt_r;
+    wire        arc_diff_done = (arc_diff >= ARC_DIFF_TARGET);
+    wire        arc_sum_done  = (arc_sum  >= (PASS_SUM_TARGET * 2));
     // 【入口分流】AVOID_EN=0 → 停车等待；AVOID_ROUTE_EN=1 → 直接进弧线绕行；
     // 其余 → 老的三段（后退 → 原地转 → 试探）。
     // 必须让侧绕跳过 BACK/TURN：那两段正是细则 4.3.2 禁止的"倒车 + 大转弯"。
@@ -212,6 +249,10 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     // obstacle 判"受阻"，车会在 BY_OUT/BY_PASS 途中被自己的绕行对象冻住。
     // 安全性改由三段兜底保证：BY_TURN_IN 扫线上限、BY_REJOIN 超时进 S_STOP。
     wire bypass_forward = (bypass_step == BY_PASS || bypass_step == BY_REJOIN);
+
+    // ---------------- 弧线里程计数 ----------------
+    // 每进一个新段（BY_OUT/ALIGN/PASS）清零重来；只在真的驱动时计数，
+    // 换相死区/未就绪那几拍编码器可能还在滑行，不该算进本段里程。
     wire bypass_blocked = 1'b0;
     wire line_visible = on_line && !lost && !wide;   // 真的压在线上（宽黑不算）
     wire bypass_has_line = line_visible;
@@ -270,6 +311,23 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     wire en_run = (state == S_RUN)   || (state == S_LOST)     || (state == S_SEARCH)
                || avoid_active;
     assign en = en_run && !dead && (!avoid_active || avoid_drive);
+
+    always @(posedge clk or negedge rst_n)
+        if (!rst_n) begin
+            arc_cnt_l  <= 32'd0;
+            arc_cnt_r  <= 32'd0;
+            arc_step_d <= 3'd0;
+            arc_state_d<= 3'd0;
+        end else if (arc_seg_new) begin
+            arc_cnt_l  <= 32'd0;
+            arc_cnt_r  <= 32'd0;
+            arc_step_d <= bypass_step;
+            arc_state_d<= state;
+        end else if (bypass_active && avoid_drive) begin
+            if (enc_l_step) arc_cnt_l <= arc_cnt_l + 32'd1;
+            if (enc_r_step) arc_cnt_r <= arc_cnt_r + 32'd1;
+        end
+
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -632,15 +690,15 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             bypass_block_cnt <= 16'd0;
                             ms_cnt <= ms_cnt + 16'd1;
                             case (bypass_step)
-                                BY_OUT: if (ms_cnt >= AVOID_OUT_MS - 1) begin
+                                BY_OUT: if (arc_diff_done || (ms_cnt >= AVOID_OUT_MS - 1)) begin
                                     ms_cnt <= 16'd0;
                                     bypass_step <= BY_ALIGN;
                                 end
-                                BY_ALIGN: if (ms_cnt >= AVOID_ALIGN_MS - 1) begin
+                                BY_ALIGN: if (arc_diff_done || (ms_cnt >= AVOID_ALIGN_MS - 1)) begin
                                     ms_cnt <= 16'd0;
                                     bypass_step <= BY_PASS;
                                 end
-                                BY_PASS: if (ms_cnt >= AVOID_PASS_MS - 1) begin
+                                BY_PASS: if (arc_sum_done || (ms_cnt >= AVOID_PASS_MS - 1)) begin
                                     ms_cnt <= 16'd0;
                                     // 侧边超越结束后要判断"还能不能自己回线"：
                                     //   · 绕行途中离过线（bypass_left_line=1）且此刻仍

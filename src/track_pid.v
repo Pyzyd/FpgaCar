@@ -21,7 +21,8 @@ module track_pid #(
     parameter integer CLK_FREQ   = 24_000_000,
     parameter integer TICK_MS    = 10,        // 控制周期（100 Hz）
     parameter integer DUTY_MAX   = 1200,      // = CLK_FREQ/PWM_FREQ
-    parameter integer BASE_DUTY  = 600,       // 直行占空比（50%）
+    parameter integer BASE_DUTY  = 600,       // 直行占空比默认值（50%）；顶层实际传
+                                              // TRACK_BASE_DUTY=480（40%），见 src/FpgaCar.v:170
     parameter integer P_GAIN     = 72,        // 比例：pos=7 → 504 计数（42% duty）
     parameter integer D_GAIN     = 40,        // 微分：pos 突变 1 格 → 40 计数
     parameter integer I_SHIFT    = 5,         // 积分右移（相当于 Ki = 1/32）

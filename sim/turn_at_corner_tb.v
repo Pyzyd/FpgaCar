@@ -15,7 +15,7 @@ module turn_at_corner_tb;
     ) dut (
         .clk(clk), .rst_n(rst_n), .on_line(on_line), .lost(lost),
         .wide(wide), .obstacle(1'b0), .pos(5'sd1), .dir_evt(dir_evt),
-        .pid_l(11'd300), .pid_r(11'd300), .en(), .dir_l(dir_l),
+        .pid_l(11'd300), .pid_r(11'd300), .enc_l_step(1'b0), .enc_r_step(1'b0), .en(), .dir_l(dir_l),
         .dir_r(dir_r), .duty_l(), .duty_r(), .state(), .turn_dir(turn_dir)
     );
 
@@ -35,7 +35,7 @@ module turn_at_corner_tb;
     ) dut2 (
         .clk(clk), .rst_n(rst_n), .on_line(on_line2), .lost(lost2),
         .wide(wide2), .obstacle(1'b0), .pos(5'sd1), .dir_evt(dir_evt2),
-        .pid_l(11'd300), .pid_r(11'd300), .en(), .dir_l(dir_l2),
+        .pid_l(11'd300), .pid_r(11'd300), .enc_l_step(1'b0), .enc_r_step(1'b0), .en(), .dir_l(dir_l2),
         .dir_r(dir_r2), .duty_l(), .duty_r(), .state(), .turn_dir(turn_dir2)
     );
 

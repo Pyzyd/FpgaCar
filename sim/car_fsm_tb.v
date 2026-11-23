@@ -56,7 +56,7 @@ module car_fsm_tb;
         .on_line (on_line), .lost (lost), .obstacle (obstacle), .pos (pos),
         .wide (wide),
         .dir_evt (3'd0),                // 本实例不测转向牌；悬空会在仿真里变成 X
-        .pid_l (pid_l), .pid_r (pid_r),
+        .pid_l (pid_l), .pid_r (pid_r), .enc_l_step(1'b0), .enc_r_step(1'b0),
         .en (en), .dir_l (dir_l), .dir_r (dir_r),
         .duty_l (duty_l), .duty_r (duty_r), .state (state), .turn_dir (td)
     );
@@ -82,7 +82,7 @@ module car_fsm_tb;
         .on_line (on_line), .lost (lost), .obstacle (obstacle), .pos (pos),
         .wide (wide),
         .dir_evt (3'd0),
-        .pid_l (pid_l), .pid_r (pid_r),
+        .pid_l (pid_l), .pid_r (pid_r), .enc_l_step(1'b0), .enc_r_step(1'b0),
         .en (en2), .dir_l (dir_l2), .dir_r (dir_r2),
         .duty_l (duty_l2), .duty_r (duty_r2), .state (state2), .turn_dir (td2)
     );
@@ -108,7 +108,7 @@ module car_fsm_tb;
         .on_line (on_line), .lost (lost), .obstacle (obstacle), .pos (pos),
         .wide (wide),
         .dir_evt (3'd0),
-        .pid_l (pid_l), .pid_r (pid_r),
+        .pid_l (pid_l), .pid_r (pid_r), .enc_l_step(1'b0), .enc_r_step(1'b0),
         .en (en3), .dir_l (dir_l3), .dir_r (dir_r3),
         .duty_l (duty_l3), .duty_r (duty_r3), .state (state3), .turn_dir (td3)
     );
@@ -147,7 +147,7 @@ module car_fsm_tb;
         .clk (clk), .rst_n (rst_n),
         .on_line (on4), .lost (lost4), .obstacle (obs4), .pos (5'sd0),
         .wide (1'b0), .dir_evt (3'd0),
-        .pid_l (11'd700), .pid_r (11'd500),
+        .pid_l (11'd700), .pid_r (11'd500), .enc_l_step(1'b0), .enc_r_step(1'b0),
         .en (en4), .dir_l (dir_l4), .dir_r (dir_r4),
         .duty_l (duty_l4), .duty_r (duty_r4), .state (state4), .turn_dir (td4)
     );
@@ -181,7 +181,7 @@ module car_fsm_tb;
         .clk (clk), .rst_n (rst_n),
         .on_line (on5), .lost (lost5), .obstacle (1'b0), .wide (wide5), .pos (pos5),
         .dir_evt (3'd0),
-        .pid_l (11'd700), .pid_r (11'd500),
+        .pid_l (11'd700), .pid_r (11'd500), .enc_l_step(1'b0), .enc_r_step(1'b0),
         .en (en5), .dir_l (dir_l5), .dir_r (dir_r5),
         .duty_l (duty_l5), .duty_r (duty_r5), .state (state5), .turn_dir (td5)
     );
@@ -224,7 +224,7 @@ module car_fsm_tb;
         .clk (clk), .rst_n (rst_n),
         .on_line (on6), .lost (lost6), .obstacle (obs6), .wide (1'b0), .pos (5'sd0),
         .dir_evt (3'd0),
-        .pid_l (11'd700), .pid_r (11'd500),
+        .pid_l (11'd700), .pid_r (11'd500), .enc_l_step(1'b0), .enc_r_step(1'b0),
         .en (en6), .dir_l (dir_l6), .dir_r (dir_r6),
         .duty_l (duty_l6), .duty_r (duty_r6), .state (state6), .turn_dir (td6)
     );
@@ -263,7 +263,7 @@ module car_fsm_tb;
         .clk (clk), .rst_n (rst_n),
         .on_line (on7), .lost (lost7), .obstacle (1'b0), .wide (wide7), .pos (pos7),
         .dir_evt (dir_evt7),
-        .pid_l (11'd700), .pid_r (11'd500),
+        .pid_l (11'd700), .pid_r (11'd500), .enc_l_step(1'b0), .enc_r_step(1'b0),
         .en (en7), .dir_l (dir_l7), .dir_r (dir_r7),
         .duty_l (duty_l7), .duty_r (duty_r7), .state (state7), .turn_dir (td7)
     );
@@ -302,7 +302,7 @@ module car_fsm_tb;
         .clk (clk), .rst_n (rst_n),
         .on_line (on8), .lost (lost8), .obstacle (1'b0), .wide (wide8), .pos (5'sd0),
         .dir_evt (dir_evt8),
-        .pid_l (11'd700), .pid_r (11'd500),
+        .pid_l (11'd700), .pid_r (11'd500), .enc_l_step(1'b0), .enc_r_step(1'b0),
         .en (en8), .dir_l (dir_l8), .dir_r (dir_r8),
         .duty_l (duty_l8), .duty_r (duty_r8), .state (state8), .turn_dir (td8)
     );

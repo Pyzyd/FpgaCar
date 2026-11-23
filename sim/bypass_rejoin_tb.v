@@ -30,7 +30,7 @@ module bypass_rejoin_tb;
         .AVOID_PASS_MS(14), .AVOID_REJOIN_MS(20), .AVOID_LINE_MS(3), .AVOID_BLOCK_MS(5)
     ) dut (
         .clk(clk), .rst_n(rst_n), .on_line(on_line), .lost(lost), .obstacle(obstacle),
-        .wide(wide), .pos(pos), .dir_evt(3'd0), .pid_l(11'd450), .pid_r(11'd450),
+        .wide(wide), .pos(pos), .dir_evt(3'd0), .pid_l(11'd450), .pid_r(11'd450), .enc_l_step(1'b0), .enc_r_step(1'b0),
         .en(en), .dir_l(dir_l), .dir_r(dir_r), .duty_l(), .duty_r(), .state(state), .turn_dir()
     );
 
@@ -43,7 +43,7 @@ module bypass_rejoin_tb;
         .AVOID_PASS_MS(14), .AVOID_REJOIN_MS(20), .AVOID_LINE_MS(3), .AVOID_BLOCK_MS(5)
     ) fixed_right (
         .clk(clk), .rst_n(rst_n), .on_line(on_line), .lost(lost), .obstacle(obstacle),
-        .wide(wide), .pos(pos), .dir_evt(3'd0), .pid_l(11'd450), .pid_r(11'd450),
+        .wide(wide), .pos(pos), .dir_evt(3'd0), .pid_l(11'd450), .pid_r(11'd450), .enc_l_step(1'b0), .enc_r_step(1'b0),
         .en(fixed_en), .dir_l(fixed_dir_l), .dir_r(fixed_dir_r),
         .duty_l(fixed_duty_l), .duty_r(fixed_duty_r), .state(fixed_state), .turn_dir()
     );

@@ -19,9 +19,15 @@
 //             而"全压线"与"模块真在报全黑"在 T= 上无法区分 —— X= 就是那面镜子。
 //   C=±nnn  : track_pid 的转向修正量（corr，±BASE_DUTY 内）。
 //             只看 T=/P= 无法判断 PID 到底在做什么；调 P/D 时必须看这一项。
-//   DL=/DR= : car_fsm 实际下发的左右占空比，3 位十六进制（0..4B0=1200）。
-//             它与 C= 的关系是 DL=BASE+C、DR=BASE-C，BASE=600=0x258。
-//             两者对不上说明 PID 输出被状态机改写（LOST 保持/SEARCH/TURN）。
+//   DL=/DR= : 实际下发的左右占空比，3 位十六进制（0..4B0=1200）。
+//             **这是速度环之后的最终值**，被三处依次改写，逐层排查：
+//               1) track_pid  : BASE+corr / BASE-corr，BASE=TRACK_BASE_DUTY
+//                               （src/FpgaCar.v:170，当前 480=0x1E0，40%）
+//               2) car_fsm    : LOST 保持 / SEARCH / TURN / 避障分段会覆盖它
+//               3) speed_pid  : 左右轮同步闭环，最多再叠 ±SYNC_MAX(180)
+//             所以"DL 不等于 480+C"是正常的。要判断是哪一层，看 M=（状态机）
+//             和 VL=/VR=（编码器有没有脉冲：都为 0 说明速度环已自动直通，
+//             此时 DL=BASE+C、DR=BASE-C 严格成立）。
 //   W=      : 宽黑标志。1 = 这一拍被判成"压线太宽"（影子/整片黑），
 //             track_line 不采信它的位置并保持上一拍 pos；持续超过 WIDE_MS
 //             会降级成丢线（此时 T= 仍然有多个 1，但 M 会走 02 LOST）。
