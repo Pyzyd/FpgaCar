@@ -39,7 +39,8 @@ module car_fsm #(
     parameter integer CLK_FREQ      = 24_000_000,
     parameter integer START_MS      = 2000,   // 连续压线多久后起跑（留时间松手）
     parameter integer START_REQUIRE_LINE = 1, // 1 = 必须压线才起跑（安全锁）
-    parameter integer LOST_HOLD_MS  = 300,    // 丢线先保持多久
+    parameter integer LOST_HOLD_MS  = 300,    // 丢线后进入找线的等待时间
+    parameter integer LOST_SLOWDOWN = 0,      // 1: 等待时保留转向比例，两轮 PWM 降至约 3/4
     parameter integer SEARCH_MS     = 1500,   // 原地找线最长多久
     parameter integer SEARCH_DUTY   = 500,    // 找线时的占空比
     parameter integer SEARCH_FAIL_TO_IDLE = 1, // 找线超时后：1=回 IDLE 等重新压线，0=永久停车
@@ -311,6 +312,8 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     wire en_run = (state == S_RUN)   || (state == S_LOST)     || (state == S_SEARCH)
                || avoid_active;
     assign en = en_run && !dead && (!avoid_active || avoid_drive);
+    wire [10:0] lost_duty_l = (LOST_SLOWDOWN != 0) ? pid_l - (pid_l >> 2) : pid_l;
+    wire [10:0] lost_duty_r = (LOST_SLOWDOWN != 0) ? pid_r - (pid_r >> 2) : pid_r;
 
     always @(posedge clk or negedge rst_n)
         if (!rst_n) begin
@@ -361,7 +364,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
             turn_dir_cnt <= 16'd0;
         end else begin
             // ---- 记住线的方位 ----
-            if (on_line && !lost) begin
+            if (line_visible) begin
                 last_pos_neg <= pos[4];
             end
 
@@ -536,6 +539,10 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             avoid_left  <= avoid_start_left;
                             state  <= avoid_entry_state;
                         end else if (lost) begin
+                            if (!dead) begin
+                                duty_l <= lost_duty_l;
+                                duty_r <= lost_duty_r;
+                            end
                             ms_cnt <= 16'd0;
                             state  <= S_LOST;
                         end
@@ -543,16 +550,17 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                 end
 
                 S_LOST: begin
-                    // 保持最后一刻的占空比与方向
-                    duty_l <= pid_l;
-                    duty_r <= pid_r;
+                    // 保留上一拍转向趋势，等待找线时降低两轮 PWM。
+                    if (!dead) begin
+                        duty_l <= lost ? lost_duty_l : pid_l;
+                        duty_r <= lost ? lost_duty_r : pid_r;
+                    end
                     if (!lost && on_line) begin
                         ms_cnt <= 16'd0;
                         state  <= S_RUN;
                     end else if (obstacle) begin
                         // 【盲区补漏】obstacle 原来只在 S_RUN 与 S_AVOID_PROBE 里检查。
-                        // S_LOST 会按上一刻占空比继续前进 LOST_HOLD_MS(300 ms)，
-                        // 按 0.4 m/s 约 10 cm —— 在 25 cm 阈值下完全来得及撞上去。
+                        // 等待找线时车还在走，障碍检测仍然有效。
                         // 这里补上，与 S_RUN 走同一套避障入口。
                         ms_cnt <= 16'd0;
                         avoid_tries <= 4'd0;

@@ -166,7 +166,7 @@ module FpgaCar (
 
     // 【循迹基础占空比】现场反馈"修正不及时直接甩出去"：降到 40% 留出修正余量。
     //   只改顶层覆盖，track_pid 模块默认值仍是 600，单测 track_pid_tb 不受影响。
-    //   嫌慢就往上调（600 = 50%，原值），嫌甩就往下调（420 = 35% 起会明显发飘）。
+    //   MC130 实测探头前伸 44 mm、相邻间距 11.1 mm；大偏差时降速，见 u_pid。
     localparam [10:0] TRACK_BASE_DUTY = 11'd480;
 
     wire              ctrl_en;
@@ -187,7 +187,7 @@ module FpgaCar (
     //   编码器没接/没脉冲时 speed_pid 内部自动回退成直通（enc_ok=0），
     //   所以这一位开着也不影响"没有编码器"的降级调试路径。
     // ------------------------------------------------------------------
-    localparam SPEED_LOOP_EN = 1'b1;
+    localparam SPEED_LOOP_EN = 1'b0;  // 旧同步环会抵消弯道差速，先保留 10 ms 位置控制
 
     wire [10:0]        spd_duty_l, spd_duty_r;
     // spd_sync / enc_ok 是这一层的观测量：
@@ -206,9 +206,7 @@ module FpgaCar (
     // ------------------------------------------------------------------
     // 差速幅度整形（duty_shaper）
     //   见 src/duty_shaper.v 顶部说明。一句话：track_pid 饱和时会把内侧轮压到
-    //   占空比 0，等效于"绕车体中心原地转"（R = WHEEL_BASE_MM/2 = 80 mm），
-    //   远超赛道弯半径；把差速压一半后内侧轮仍有 240，R≈240 mm，弯道动作幅度
-    //   直接减半，而平均前进速度不变。
+    //   占空比 0。把差速压一半后内侧轮仍有驱动力，保留平均占空比。
     //   只对循迹同向工况生效：原地转/找线/避障/停车一律直通，语义不变。
     // ------------------------------------------------------------------
     localparam        DUTY_SHAPE_EN = 1'b1;   // 总开关
@@ -281,7 +279,9 @@ module FpgaCar (
     wire signed [15:0] spd_l, spd_r;
     wire        spd_l_v, spd_r_v;
 
-    encoder_dec u_enc_l (
+    localparam integer ENC_STABLE_TICKS = 240;
+
+    encoder_dec #(.STABLE_TICKS(ENC_STABLE_TICKS)) u_enc_l (
         .clk       (clk),
         .rst_n     (sys_rst_n),
         .a         (enc_la),
@@ -291,11 +291,11 @@ module FpgaCar (
         .position  (enc_l_pos)
     );
 
-    encoder_dec u_enc_r (
+    encoder_dec #(.STABLE_TICKS(ENC_STABLE_TICKS)) u_enc_r (
         .clk       (clk),
         .rst_n     (sys_rst_n),
-        .a         (enc_ra),
-        .b         (enc_rb),
+        .a         (enc_rb),  // MC130 台架验证：右轮 A/B 交换后前进计正
+        .b         (enc_ra),
         .step      (enc_r_step),
         .direction (enc_r_dir),
         .position  (enc_r_pos)
@@ -479,10 +479,12 @@ module FpgaCar (
         .TICK_MS   (10),
         .DUTY_MAX  (1200),
         .BASE_DUTY (TRACK_BASE_DUTY),
-        .P_GAIN    (72),
-        .D_GAIN    (40),
+        .P_GAIN    (48),
+        .D_GAIN    (0),
         .I_SHIFT   (5),
-        .I_LIMIT   (640)
+        .I_LIMIT   (0),
+        .EDGE_POS  (4),  // 横向约 22.2 mm，约为探头前伸的一半
+        .EDGE_SLOWDOWN (48)  // 基础占空比 40% → 36%
     ) u_pid (
         .clk     (clk),
         .rst_n   (motion_rst_n),
@@ -528,7 +530,8 @@ module FpgaCar (
     car_fsm #(
         .CLK_FREQ     (24_000_000),
         .START_MS     (1),           // K1 已确认；状态机再确认一次压线启动
-        .LOST_HOLD_MS (300),
+        .LOST_HOLD_MS (80),
+        .LOST_SLOWDOWN (1),
         .SEARCH_MS    (1500),
         .SEARCH_DUTY  (500),
         .SEARCH_FAIL_TO_IDLE (0),    // 找线失败后由按键面板锁停
@@ -570,13 +573,13 @@ module FpgaCar (
         // 【弧线段改成里程闭环】下面两条 ms 已不再是"定长"，而是编码器不
         // 出脉冲时的超时上限。真正的段切换由两轮计数差（转角）和计数和
         // （里程）决定：同样 60°，车速快慢、电池电压高低都走得一样。
-        //   60° 对应计数差 2774（20 线四倍频 80 × 减速 48 = 3840/圈）
+        //   轮距 164 mm，里程仍沿用当前每圈计数和轮周长。
         .AVOID_OUT_MS     (2500),    // 外摆弧超时上限（正常约 300~500 ms 就够）
         .AVOID_ALIGN_MS   (2500),    // 摆正弧超时上限（同角度反向弧）
         // 标定：轮周长 / 轮距 / 每圈计数。换轮子或换编码器只改这三个。
         .ENC_CNT_PER_REV  (3840),
         .WHEEL_CIRC_MM    (232),
-        .WHEEL_BASE_MM    (160),
+        .WHEEL_BASE_MM    (164),
         .AVOID_ARC_DEG    (60),      // 单弧目标转角
         .AVOID_PASS_MM    (200),     // BY_PASS 直线超越距离
         .AVOID_OUT_DUTY   (860),

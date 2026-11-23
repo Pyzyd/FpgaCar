@@ -26,7 +26,9 @@ module track_pid #(
     parameter integer P_GAIN     = 72,        // 比例：pos=7 → 504 计数（42% duty）
     parameter integer D_GAIN     = 40,        // 微分：pos 突变 1 格 → 40 计数
     parameter integer I_SHIFT    = 5,         // 积分右移（相当于 Ki = 1/32）
-    parameter integer I_LIMIT    = 640         // 积分累加上限（抗饱和）
+    parameter integer I_LIMIT    = 640,        // 0: 关闭积分
+    parameter integer EDGE_POS   = 4,          // 误差绝对值达到此值时提前减速
+    parameter integer EDGE_SLOWDOWN = 0        // 边缘基础占空比减量
 ) (
     input  wire              clk,
     input  wire              rst_n,
@@ -71,9 +73,11 @@ module track_pid #(
 
     wire signed [15:0] sum_raw = p_term + i_term + d_term;
 
-    // 限幅到 ±BASE_DUTY：保证 duty_l/duty_r 落在 0..DUTY_MAX
-    wire signed [15:0] lim_pos = BASE_DUTY;
-    wire signed [15:0] lim_neg = -BASE_DUTY;
+    // 大偏差时只下调基础占空比，保留转向差速。
+    wire edge_near = (err >= EDGE_POS) || (err <= -EDGE_POS);
+    wire signed [15:0] base = edge_near ? (BASE_DUTY - EDGE_SLOWDOWN) : BASE_DUTY;
+    wire signed [15:0] lim_pos = base;
+    wire signed [15:0] lim_neg = -base;
     wire signed [15:0] sum_lim = (sum_raw > lim_pos) ? lim_pos :
                                  (sum_raw < lim_neg) ? lim_neg : sum_raw;
 
@@ -83,8 +87,8 @@ module track_pid #(
                                    (i_next < -I_LIMIT) ? -I_LIMIT : i_next;
 
     // 占空比合成（结果必在 0..DUTY_MAX，无需再钳位）
-    wire signed [15:0] d_l = BASE_DUTY + sum_lim;
-    wire signed [15:0] d_r = BASE_DUTY - sum_lim;
+    wire signed [15:0] d_l = base + sum_lim;
+    wire signed [15:0] d_r = base - sum_lim;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

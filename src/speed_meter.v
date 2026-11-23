@@ -29,6 +29,9 @@ module speed_meter #(
 
     wire signed [15:0] acc_inc = acc + 16'sd1;
     wire signed [15:0] acc_dec = acc - 16'sd1;
+    wire signed [15:0] acc_next = !step ? acc :
+        dir ? ((acc == 16'sh7FFF) ? acc : acc_inc) :
+              ((acc == 16'sh8000) ? acc : acc_dec);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -39,20 +42,15 @@ module speed_meter #(
         end else begin
             valid <= 1'b0;
 
-            // 累加：正向加、反向减（饱和，不翻转）
-            if (step) begin
-                if (dir) acc <= (acc == 16'sh7FFF) ? acc : acc_inc;
-                else     acc <= (acc == 16'sh8000) ? acc : acc_dec;
-            end
-
-            // 窗口结束：锁存并清零
+            // 窗口最后一拍的脉冲也属于本窗口。
             if (cnt >= WIN_CYC - 1) begin
                 cnt   <= 32'd0;
-                speed <= acc;
+                speed <= acc_next;
                 acc   <= 16'sd0;
                 valid <= 1'b1;
             end else begin
                 cnt <= cnt + 32'd1;
+                acc <= acc_next;
             end
         end
     end

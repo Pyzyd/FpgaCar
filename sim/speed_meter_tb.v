@@ -79,6 +79,18 @@ module speed_meter_tb;
         if (nvalid >= 3) $display("PASS: valid pulsed %0d times for 3+ windows", nvalid);
         else             $display("FAIL: valid pulsed only %0d times", nvalid);
 
+        @(negedge clk);
+        while (u_dut.cnt != 23999) @(negedge clk);
+        dir = 1'b0;
+        step = 1'b1;
+        @(negedge clk);
+        step = 1'b0;
+        if (!valid || speed !== -16'sd1)
+            $fatal(1, "FAIL: the last clock in the window lost a reversing step");
+        next_window;
+        if (speed !== 16'sd0) $fatal(1, "FAIL: boundary step counted twice");
+        $display("PASS: boundary step counted exactly once");
+
         $display("INFO: speed_meter_tb done");
         $finish;
     end

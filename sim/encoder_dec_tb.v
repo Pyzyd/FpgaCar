@@ -18,6 +18,17 @@ module encoder_dec_tb;
     wire [31:0] position;
     wire        step;
     wire        direction;
+    reg [1:0] motor_ab = 0;
+    wire [31:0] motor_position;
+    wire motor_step, motor_dir;
+    integer motor_net = 0;
+
+    encoder_dec #(.STABLE_TICKS(4)) u_motor (
+        .clk(clk), .rst_n(rst_n), .a(motor_ab[0]), .b(motor_ab[1]),
+        .step(motor_step), .direction(motor_dir), .position(motor_position)
+    );
+    always @(posedge clk)
+        if (rst_n && motor_step) motor_net = motor_net + (motor_dir ? 1 : -1);
 
     encoder_dec u_dut (
         .clk(clk), .rst_n(rst_n), .a(a), .b(b),
@@ -85,6 +96,26 @@ module encoder_dec_tb;
         #200;
         if (position !== 32'd0) $display("FAIL: reset position=%0d", position);
         else                    $display("PASS: reset clears position");
+
+        // MC130 右轮的原始 A 先翻。短暂翻转不应被当成一个计数。
+        @(negedge clk);
+        motor_ab = 2'b10;
+        repeat (3) @(negedge clk);
+        motor_ab = 2'b00;
+        repeat (8) @(negedge clk);
+        if (motor_position !== 0 || motor_net != 0)
+            $fatal(1, "FAIL: short glitch entered the right encoder");
+        $display("PASS: short glitch filtered");
+
+        motor_ab = 2'b10;
+        repeat (8) @(negedge clk);
+        if (motor_position !== 1 || motor_net != 1)
+            $fatal(1, "FAIL: right encoder must count forward as +1");
+        motor_ab = 2'b00;
+        repeat (8) @(negedge clk);
+        if (motor_position !== 0 || motor_net != 0)
+            $fatal(1, "FAIL: direction must match the first reversing step");
+        $display("PASS: right encoder normalization and first reversing step");
 
         $display("INFO: encoder_dec_tb done");
         $finish;
