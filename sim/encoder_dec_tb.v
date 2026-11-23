@@ -24,7 +24,7 @@ module encoder_dec_tb;
     integer motor_net = 0;
 
     encoder_dec #(.STABLE_TICKS(4)) u_motor (
-        .clk(clk), .rst_n(rst_n), .a(motor_ab[0]), .b(motor_ab[1]),
+        .clk(clk), .rst_n(rst_n), .a(motor_ab[1]), .b(motor_ab[0]),
         .step(motor_step), .direction(motor_dir), .position(motor_position)
     );
     always @(posedge clk)
@@ -97,9 +97,9 @@ module encoder_dec_tb;
         if (position !== 32'd0) $display("FAIL: reset position=%0d", position);
         else                    $display("PASS: reset clears position");
 
-        // MC130 右轮的原始 A 先翻。短暂翻转不应被当成一个计数。
+        // MC130 右轮重接线后 B 先翻。短暂翻转不应被当成一个计数。
         @(negedge clk);
-        motor_ab = 2'b10;
+        motor_ab = 2'b01;
         repeat (3) @(negedge clk);
         motor_ab = 2'b00;
         repeat (8) @(negedge clk);
@@ -107,7 +107,7 @@ module encoder_dec_tb;
             $fatal(1, "FAIL: short glitch entered the right encoder");
         $display("PASS: short glitch filtered");
 
-        motor_ab = 2'b10;
+        motor_ab = 2'b01;
         repeat (8) @(negedge clk);
         if (motor_position !== 1 || motor_net != 1)
             $fatal(1, "FAIL: right encoder must count forward as +1");

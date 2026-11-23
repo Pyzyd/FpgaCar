@@ -294,8 +294,8 @@ module FpgaCar (
     encoder_dec #(.STABLE_TICKS(ENC_STABLE_TICKS)) u_enc_r (
         .clk       (clk),
         .rst_n     (sys_rst_n),
-        .a         (enc_rb),  // MC130 台架验证：右轮 A/B 交换后前进计正
-        .b         (enc_ra),
+        .a         (enc_ra),  // 2026-11-23 重接线后右轮 B 相先翻，前进计正
+        .b         (enc_rb),
         .step      (enc_r_step),
         .direction (enc_r_dir),
         .position  (enc_r_pos)
