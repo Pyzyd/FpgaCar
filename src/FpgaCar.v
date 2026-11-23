@@ -449,9 +449,11 @@ module FpgaCar (
             hc_near_cnt <= 2'd0;
             hc_far_cnt  <= 2'd0;
             hc_near_lat <= 1'b0;
-        end else if (dist_valid) begin
-            // 无回波（FFFF）既不算近也不算远：保持现状，不计入任何一边。
-            // 否则空旷场地持续无回波会把 hc_far_cnt 一直加，掩盖真实的近距。
+        end else if (hc_frame_ok) begin
+            // 只有"有效回波"帧才动计数器：无回波（FFFF）整帧跳过，两个计数器
+            // 都保持原值，既不算近也不算远。若改成 dist_valid 就把非近帧计数清零，
+            // 空旷场地持续无回波会让 hc_far_cnt 一直加（掩盖真实近距）；反过来
+            // 真实障碍偶丢一帧又要从头数 3 帧，确认被无谓推迟。
             hc_near_cnt <= hc_frame_near ? ((hc_near_cnt >= OBSTACLE_CONFIRM_N - 1)
                                             ? OBSTACLE_CONFIRM_N - 1 : hc_near_cnt + 2'd1) : 2'd0;
             hc_far_cnt  <= hc_frame_far  ? ((hc_far_cnt  >= OBSTACLE_CONFIRM_N - 1)
