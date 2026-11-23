@@ -5,6 +5,7 @@ module parking_motion #(
     parameter integer COUNTS_PER_REV = 2532,
     parameter integer WHEEL_CIRC_MM = 212,
     parameter integer WHEEL_BASE_MM = 164,
+    parameter integer ENTRY_BRAKE_LEAD_DEG = 4,
     parameter integer REVERSE_MM = 300,
     parameter integer EXIT_LIMIT_MM = 450,
     parameter [10:0] PIVOT_DUTY = 11'd300,
@@ -47,6 +48,9 @@ module parking_motion #(
     localparam integer TURN_COUNTS =
         (64'd314159 * WHEEL_BASE_MM * COUNTS_PER_REV + 100000 * WHEEL_CIRC_MM)
         / (200000 * WHEEL_CIRC_MM);
+    // 入库转向短刹后仍有余转，按实车测到的角度提前发刹车命令。
+    localparam integer ENTRY_BRAKE_COUNTS =
+        TURN_COUNTS - (TURN_COUNTS * ENTRY_BRAKE_LEAD_DEG + 45) / 90;
     localparam integer REVERSE_COUNTS =
         (REVERSE_MM * COUNTS_PER_REV + WHEEL_CIRC_MM / 2) / WHEEL_CIRC_MM;
     localparam integer EXIT_COUNTS = EXIT_LIMIT_MM * COUNTS_PER_REV / WHEEL_CIRC_MM;
@@ -126,7 +130,7 @@ module parking_motion #(
                 DELAY: if (elapsed_ms >= START_MS) next_state = ENTRY_TURN;
                 ENTRY_TURN: begin
                     if (pivot_failed) next_state = FAULT;
-                    else if (pivot_yaw >= TURN_COUNTS) next_state = ENTRY_BRAKE;
+                    else if (pivot_yaw >= ENTRY_BRAKE_COUNTS) next_state = ENTRY_BRAKE;
                 end
                 ENTRY_BRAKE: if (elapsed_ms >= BRAKE_MS) next_state = REVERSE;
                 REVERSE: begin

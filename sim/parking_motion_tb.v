@@ -31,7 +31,7 @@ module parking_motion_tb;
     task begin_reverse;
         begin
             begin_turn();
-            pos_l = -3077;
+            pos_l = -2940;
             step_ms(152);
         end
     endtask
@@ -72,21 +72,21 @@ module parking_motion_tb;
         step_ms(2);
         check(status == 2 && !forward_l && duty_l == 300 && duty_r == 0,
               "entry pivots left wheel backward with right brake");
-        pos_l = -3076;
+        pos_l = -2939;
         step_ms(2);
-        check(duty_l == 300, "left turn waits for 3077 counts");
+        check(duty_l == 300 && duty_r == 0, "keep left pivot until entry brake threshold");
+        pos_l = -2940;
+        step_ms(2);
+        check(status == 2 && duty_l == 0 && duty_r == 0, "brake at 2940 counts for 4 degree lead");
         pos_l = -3077;
-        step_ms(2);
-        check(status == 2 && duty_l == 0 && duty_r == 0, "brake at 90 degree target");
-        pos_l = -3080;
         step_ms(150);
         check(status == 3 && !forward_l && !forward_r, "reverse starts after braking");
 
-        pos_l = -3180;
+        pos_l = -3177;
         pos_r = -84;
         step_ms(2);
         check(duty_l == 296 && duty_r == 304, "distance error slows the leading wheel");
-        pos_l = -3080 - 325;
+        pos_l = -3077 - 325;
         step_ms(2);
         check(status == 3 && duty_l == 0 && duty_r == 360,
               "startup mismatch beyond old cutoff uses catch-up instead of stopping");
@@ -96,7 +96,7 @@ module parking_motion_tb;
         pos_r = -255;
         step_ms(2);
         check(duty_l != 0 && duty_r != 0, "resume both wheels after catch-up");
-        pos_l = -3080 - 3584;
+        pos_l = -3077 - 3584;
         pos_r = -3582;
         step_ms(2);
         check(status == 3 && duty_l == 0 && duty_r != 0, "wait for each wheel to reach 300 mm");
@@ -154,7 +154,7 @@ module parking_motion_tb;
         check(fault && !active, "stop if left encoder never moves");
 
         begin_reverse();
-        pos_l = -3077 - 160;
+        pos_l = -2940 - 160;
         step_ms(802);
         check(fault && !active && reverse_fault == 2, "report reverse stall on commanded wheel");
 
