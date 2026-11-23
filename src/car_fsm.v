@@ -90,11 +90,16 @@ module car_fsm #(
     // 弧就画歪，轻则回不了线，重则直接蹭上方块。改成数编码器后，两轮计数
     // **差**只由航向变化决定，与车速无关，转角就稳定了。
     //   转角(度) = diff_cnt * 轮周长 / (每轮圈计数 * 轮距) * 180/pi
-    //   默认 20 线编码器四倍频 = 80 计数/电机圈，减速 1:48 -> 3840 计数/轮圈
-    //   轮周长 23.2 cm、轮距 16.0 cm 时：60 度 = 2774 个计数差
+    //   转角(度) = 计数差 × 轮周长 / (每圈计数 × 轮距) × 180/pi
+    // 【v1.18 实测重标定】下面两个数原来是从铭牌推算的（80×48=3840、周长232），
+    //   实测不符：手转左轮 5 圈得 12662 计数 → 2532 计数/圈（三段 2522/7506/
+    //   2634 独立吻合 ±2.7%，减速比其实是 31.7:1 而不是 48:1）；轮径用卡尺量
+    //   67~68 mm → 周长 212 mm。于是每毫米计数 实测 11.94 / 原假设 16.55，
+    //   原标定高 39%，60° 弧会转成 83°、BY_PASS 200mm 会走 277mm。
     // 真要改标定，只改 ENC_CNT_PER_REV / WHEEL_CIRC_MM / WHEEL_BASE_MM 三个数。
-    parameter integer ENC_CNT_PER_REV  = 3840, // 每轮圈计数（四倍频 × 减速比）
-    parameter integer WHEEL_CIRC_MM    = 232,  // 轮周长, mm
+    //   当前：60 度 = 2000 个计数差；200 mm = 2388 计数/轮。
+    parameter integer ENC_CNT_PER_REV  = 2532, // 每轮圈计数（实测，四倍频 × 减速比）
+    parameter integer WHEEL_CIRC_MM    = 212,  // 轮周长, mm（实测轮径 67.5）
     parameter integer WHEEL_BASE_MM    = 160,  // 轮距, mm
     parameter integer AVOID_ARC_DEG    = 60,   // 单弧目标转角（度）
     parameter integer AVOID_PASS_MM    = 200,  // BY_PASS 直线超越距离, mm
