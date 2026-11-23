@@ -3661,8 +3661,8 @@ S 决定预瞄：探头看到偏差点时，这个点已经离驱动轴 S 那么
 
 | 开关 | 位置 | 作用 |
 |---|---|---|
-| `WHEEL_SWAP` | `src/FpgaCar.v:257` | 左右两个电机通道对调（`ml_*` 驱动右轮） |
-| `MOTOR_INVERT` | `src/FpgaCar.v:258` | 前进/后退取反 |
+| `WHEEL_SWAP` | `src/FpgaCar.v:271` | 左右两个电机通道对调（`ml_*` 驱动右轮） |
+| `MOTOR_INVERT` | `src/FpgaCar.v:272` | 前进/后退取反 |
 
 **为什么不在逻辑层翻**：一旦把上层语义跟着翻，串口 `DL=`/`DR=`、OLED 四格、
 拐角方向判定、避障左右绕行会同时反过来，现场再出问题就没法区分是接线错了
@@ -3703,6 +3703,22 @@ S 决定预瞄：探头看到偏差点时，这个点已经离驱动轴 S 那么
 - 顶层冒烟 `FpgaCar_tb`：12/12 通过。换向与取反都在 `motor_en` 内层，
   `sim/FpgaCar_tb.v:222` 的「停车全 0」断言不受影响。
 - `sim/track_pid_tb.v` 独立例化 `P_GAIN(72) D_GAIN(40)`，不受顶层改动影响。
+### 综合、布局布线与烧录（2026-11-23）
+
+| 阶段 | 结果 |
+|---|---|
+| `--flow map` | PASS，EFX_FF 4951 / EFX_ADD 1007 / EFX_LUT4 17086 一档不变（只改了参数，不改结构） |
+| `--flow pnr` | PASS，整片 **18910(71) XLR = 31.1%**（上一版 19070），setup slack **28.727 ns**（上一版 29.748，仍在 27 ns 预算之上） |
+| `--flow pgm` | PASS，`FpgaCar.bit` 2010042 B、`FpgaCar.hex` 2010102 B |
+
+- `u_pid`（track_pid）从 105 XLR 涨到 **182 XLR**，DSP 从 1 个变 2 个 ——
+  D_GAIN=220 让 `err_d * D_GAIN` 必须走硬乘法器，综合器因此多铺了一个 DSP。
+  资源整体反而少了 160 XLR，是别处的优化抵消掉的。
+- 烧录 `bash tools/flash_hiftdi.sh`：擦除 656 KiB、写 654 KiB，第一遍
+  verify mismatch，自动重试第二遍通过 → `FLASH DONE`。
+- 综合日志复核（`outflow/FpgaCar.map.out:61`）：
+  `compiling module 'track_pid(BASE_DUTY=32'b0111100000,P_GAIN=120,D_GAIN=220)'`，
+  确认新增益确实进了网表，不是拿到旧的综合产物。
 ## 4. 下一步（2026-11-10 按实际到货情况重排）
 
 ### 第 1 步：现在就能做的上板验证（不需要任何待买硬件）
