@@ -644,7 +644,7 @@ module FpgaCar (
         .AVOID_BACK_MS    (400),
         .AVOID_BACK_DUTY  (500),
         .AVOID_TURN_MS    (1000),    // 右转出线和左转摆正各用这段时长（现场 800 转不够）
-        .AVOID_TURN_IN_MS (1600),    // 超越后朝原线转的上限；扫到线会提前结束（回线比出线转更多）
+        .AVOID_TURN_IN_MS (1600),    // 超越后朝原线转的上限；角度到位或扫到线都会提前结束
         .AVOID_TURN_DUTY  (620),     // PWM 周期 1200 计数，两轮各约 52%
         .AVOID_PROBE_MS   (2400),
         .AVOID_PROBE_DUTY (600),     // 外探和侧边直行均为 50%
@@ -698,13 +698,27 @@ module FpgaCar (
         .ENC_CNT_PER_REV  (2532),
         .WHEEL_CIRC_MM    (212),
         .WHEEL_BASE_MM    (160),
-        .AVOID_ARC_DEG    (60),      // 单弧目标转角
+        .AVOID_ARC_DEG    (60),      // 单弧目标转角（OUT / ALIGN 用）
+        // 【v1.20 TURN_IN 也改成角度闭环】OUT/ALIGN 一直有计数差闭环（实测
+        //   确实在 2000 计数差附近切换，−60°/+60° 达标），只有 TURN_IN 是
+        //   "纯时间 + 扫线"：扫线要连续 20 ms 压到线，而车正在大幅转向途中
+        //   几乎压不到，于是每次都跑满 1600 ms。run_avoid1 实测这 1600 ms
+        //   转了 141°，目标是 60° —— 车头直接甩过，REJOIN 再也找不回线。
+        //   90° = 3000 计数差（标定同上）。
+        .AVOID_TURN_IN_ARC_DEG (90),
         .AVOID_PASS_MM    (200),     // BY_PASS 直线超越距离
         .AVOID_OUT_DUTY   (860),
         .AVOID_OUT_IN_DUTY(380),
         .AVOID_ALIGN_DUTY (840),
         .AVOID_ALIGN_IN_DUTY (400),
+        // 【v1.20 PASS 段必须带偏置】两轮真同占空比只有在左右轮效率相同时
+        //   才走直线。实测右轮效率约左轮的 0.55（循迹靠 TRIM=-140 压住），
+        //   620/620 会让车一路向弱轮一侧偏。run_avoid1 的 PASS 段只有 2 帧
+        //   就偏了约 44°，把 TURN_IN 的起始航向整个带歪。
+        //   平均仍 620，按 TRIM 比例错开：左 480 / 右 760，
+        //   与循迹稳定工作点 340/620 的"两轮差"同比例。
         .AVOID_PASS_DUTY  (620),
+        .AVOID_PASS_TRIM  (140),
         .AVOID_TURN_IN_DUTY (860),
         .AVOID_TURN_IN_IN_DUTY (420),
         .AVOID_LINE_MS    (20),

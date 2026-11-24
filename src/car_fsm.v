@@ -81,7 +81,16 @@ module car_fsm #(
     parameter integer AVOID_OUT_IN_DUTY  = 380,  // BY_OUT 内侧轮
     parameter integer AVOID_ALIGN_DUTY   = 840,  // BY_ALIGN 外侧快轮（反向弧，摆正航向）
     parameter integer AVOID_ALIGN_IN_DUTY= 400,  // BY_ALIGN 内侧慢轮
-    parameter integer AVOID_PASS_DUTY    = 620,  // BY_PASS 直线超越，两轮同速
+    parameter integer AVOID_PASS_DUTY    = 620,  // BY_PASS 直线超越，两轮同速（两轮平均）
+    // 【v1.20 PASS 段必须带偏置，不能真同速】
+    //   "两轮同占空比"只有在左右轮效率完全相同时才走直线。实测右轮效率约为
+    //   左轮的 0.55（循迹时靠 track_pid 的 TRIM=-140 才压住），所以 PASS 段
+    //   如果真给 620/620，车会一边前进一边持续向弱轮一侧偏。run_avoid1 里
+    //   PASS 只有 2 帧就偏了约 44°，把 TURN_IN 的起始航向整个带歪。
+    //   这里把两轮平均仍保持在 AVOID_PASS_DUTY，但按 TRIM 的比例差开：
+    //     左轮 = 620-140 = 480，右轮 = 620+140 = 760
+    //   正好复现循迹段稳定工作点 340/620 的"两轮效率差"比例。
+    parameter integer AVOID_PASS_TRIM   = 140,  // PASS 段左右轮偏置（右轮加、左轮减）
     parameter integer AVOID_TURN_IN_DUTY = 860,  // BY_TURN_IN 外侧快轮（反向弧切回线）
     parameter integer AVOID_TURN_IN_IN_DUTY = 420, // BY_TURN_IN 内侧慢轮
     parameter integer AVOID_REJOIN_IN_DUTY  = 430, // BY_REJOIN 内侧慢轮
@@ -102,6 +111,16 @@ module car_fsm #(
     parameter integer WHEEL_CIRC_MM    = 212,  // 轮周长, mm（实测轮径 67.5）
     parameter integer WHEEL_BASE_MM    = 160,  // 轮距, mm
     parameter integer AVOID_ARC_DEG    = 60,   // 单弧目标转角（度）
+    // 【v1.20 TURN_IN 也需要角度闭环】OUT/ALIGN 一直有 arc_diff 闭环（实测
+    //   确实在 2000 计数差附近切换，转角 −60°/+60° 达标），但 TURN_IN 只有
+    //   "纯时间 + 扫线"两个出口：扫线要连续 AVOID_LINE_MS 拍压到线，而车
+    //   正在大幅转向途中几乎压不到，于是每次都跑满 AVOID_TURN_IN_MS=1600ms。
+    //   run_avoid1 实测这 1600 ms 转了 141°，目标是 60° —— 车头直接甩过去，
+    //   REJOIN 再也找不回线。这里给 TURN_IN 自己一条角度判据：
+    //     OUT 把车推到障碍侧边（−60°），ALIGN 反打摆正（+60°，净 0），
+    //     PASS 直行超越，TURN_IN 再把车头拧回朝线的方向（约 90° 斜切）。
+    //   角度由计数差决定，与车速/电池无关，与 OUT/ALIGN 同一套标定。
+    parameter integer AVOID_TURN_IN_ARC_DEG = 90, // TURN_IN 目标转角（度）
     parameter integer AVOID_PASS_MM    = 200,  // BY_PASS 直线超越距离, mm
     // 下面两条 *_MS 已降级为**超时上限**：编码器不出脉冲时（没装/线松）仍能
     // 走完动作，不会卡死在半路。正常有编码器时提前里程到了就切换。
@@ -249,7 +268,13 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     localparam integer ARC_MRAD         = (AVOID_ARC_DEG * 31416 + 900) / 1800;  // 毫弧度
     localparam integer ARC_DIFF_TARGET  = (ARC_MRAD * ARC_CNT_PER_RAD) / 1000;
     localparam integer PASS_SUM_TARGET  = (AVOID_PASS_MM * ENC_CNT_PER_REV) / WHEEL_CIRC_MM;
-
+    // TURN_IN 的角度判据独立于 ARC_DIFF_TARGET（那条固定 60°，给 OUT/ALIGN 用）。
+    // 60° = 1999 计数差 → 90° = 3000 计数差（1° ≈ 33.3 计数差）。
+    localparam integer TURN_IN_MRAD       = (AVOID_TURN_IN_ARC_DEG * 31416 + 900) / 1800;
+    localparam integer TURN_IN_ARC_TARGET = (TURN_IN_MRAD * ARC_CNT_PER_RAD) / 1000;
+    // PASS 段两轮占空比：平均仍是 AVOID_PASS_DUTY，按效率差把两轮错开。
+    localparam integer AVOID_PASS_L_DUTY = AVOID_PASS_DUTY - AVOID_PASS_TRIM;
+    localparam integer AVOID_PASS_R_DUTY = AVOID_PASS_DUTY + AVOID_PASS_TRIM;
     reg [31:0] arc_cnt_l, arc_cnt_r;   // 本段内两轮各自累计脉冲
     reg [2:0]  arc_step_d, arc_state_d;// 上一拍的段号/状态，用来切段清零
     wire       arc_seg_new  = (state != arc_state_d) || (bypass_step != arc_step_d);
@@ -258,12 +283,16 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     wire [31:0] arc_sum     = arc_cnt_l + arc_cnt_r;
     wire        arc_diff_done = (arc_diff >= ARC_DIFF_TARGET);
     wire        arc_sum_done  = (arc_sum  >= (PASS_SUM_TARGET * 2));
+    wire        turn_in_arc_done = (arc_diff >= TURN_IN_ARC_TARGET);
     // 本段内是否真的收到过脉冲：收到就说明编码器在线，超时值可以放宽成纯兜底；
     // 一个都没有就说明没装/线松，此时 *_MS 仍是真实弧长，不能放大。
     wire        arc_enc_alive = (arc_cnt_l != 32'd0) || (arc_cnt_r != 32'd0);
     wire [31:0] avoid_out_ceil   = arc_enc_alive ? (AVOID_OUT_MS   * AVOID_ENC_MULT) : AVOID_OUT_MS;
     wire [31:0] avoid_align_ceil = arc_enc_alive ? (AVOID_ALIGN_MS * AVOID_ENC_MULT) : AVOID_ALIGN_MS;
     wire [31:0] avoid_pass_ceil  = arc_enc_alive ? (AVOID_PASS_MS  * AVOID_ENC_MULT) : AVOID_PASS_MS;
+    // TURN_IN 也一样：90° 在满电时约 1.0 s，电池掉压、地面变滑就可能超过
+    // AVOID_TURN_IN_MS=1600，若还按 1600 卡，角度闭环根本没机会生效。
+    wire [31:0] avoid_turn_in_ceil = arc_enc_alive ? (AVOID_TURN_IN_MS * AVOID_ENC_MULT) : AVOID_TURN_IN_MS;
     // 【入口分流】AVOID_EN=0 → 停车等待；AVOID_ROUTE_EN=1 → 直接进弧线绕行；
     // 其余 → 老的三段（后退 → 原地转 → 试探）。
     // 必须让侧绕跳过 BACK/TURN：那两段正是细则 4.3.2 禁止的"倒车 + 大转弯"。
@@ -326,12 +355,12 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     wire [10:0] avoid_duty_l = avoid_backing ? AVOID_BACK_DUTY[10:0] :
                                avoid_pivot   ? AVOID_TURN_DUTY[10:0] :
                                !bypass_active ? AVOID_PROBE_DUTY[10:0] :
-                               bypass_straight ? AVOID_PASS_DUTY[10:0] :
+                               bypass_straight ? AVOID_PASS_L_DUTY[10:0] :
                                bypass_arc_left ? bypass_inner : bypass_outer;
     wire [10:0] avoid_duty_r = avoid_backing ? AVOID_BACK_DUTY[10:0] :
                                avoid_pivot   ? AVOID_TURN_DUTY[10:0] :
                                !bypass_active ? AVOID_PROBE_DUTY[10:0] :
-                               bypass_straight ? AVOID_PASS_DUTY[10:0] :
+                               bypass_straight ? AVOID_PASS_R_DUTY[10:0] :
                                bypass_arc_left ? bypass_outer : bypass_inner;
 
     // 弧线段两轮都正转；后退段两轮都反转；只有老的三段试探里的原地转才一正一反。
@@ -786,7 +815,14 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                                     if (bypass_turn_in_cnt >= AVOID_LINE_MS - 1) begin
                                         ms_cnt <= 16'd0;
                                         bypass_step <= BY_REJOIN;
-                                    end else if (ms_cnt >= AVOID_TURN_IN_MS - 1) begin
+                                    end else if (turn_in_arc_done) begin
+                                        // 【v1.20 角度闭环】转过 TURN_IN_ARC_TARGET
+                                        // （默认 90°）就收，不再等满 1600 ms。
+                                        // 实测原来 1600 ms 转 141°，车头直接
+                                        // 甩过头，REJOIN 再也看不到线。
+                                        ms_cnt <= 16'd0;
+                                        bypass_step <= BY_REJOIN;
+                                    end else if (ms_cnt >= avoid_turn_in_ceil - 1) begin
                                         ms_cnt <= 16'd0;
                                         bypass_step <= BY_REJOIN;
                                     end
@@ -796,8 +832,19 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                                         ms_cnt <= 16'd0;
                                         state <= S_RUN;
                                     end else if (ms_cnt >= AVOID_REJOIN_MS - 1) begin
-                                        final_stop <= 1'b1;
-                                        state <= S_STOP;
+                                        // 【v1.20 超时改走找线】原来这里直接
+                                        // final_stop + S_STOP：绕障绕到一半自己
+                                        // 退赛，比绕不开还糟。REJOIN 超时说明
+                                        // "斜切若干毫米还没压到线"，正确反应是
+                                        // 原地转着扫线（和 S_LOST → S_SEARCH 同款），
+                                        // 给 SEARCH_MS 一个机会，失败再按
+                                        // SEARCH_FAIL_TO_IDLE 的规则停车。
+                                        ms_cnt <= 16'd0;
+                                        dir_l_des <= ~last_pos_neg;
+                                        dir_r_des <=  last_pos_neg;
+                                        turn_dir  <= last_pos_neg ? 2'd1 : 2'd2;
+                                        turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
+                                        state <= S_SEARCH;
                                     end else begin
                                         bypass_line_cnt <= bypass_has_line ? (bypass_line_cnt + 16'd1) : 16'd0;
                                     end

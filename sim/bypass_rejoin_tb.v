@@ -1,7 +1,7 @@
 `timescale 1ns/1ns
 
 module bypass_rejoin_tb;
-    localparam [2:0] RUN = 1, LOST = 2, SEARCH = 3, STOP = 4, TURN = 6, BYPASS = 7;
+    localparam [2:0] IDLE = 0, RUN = 1, LOST = 2, SEARCH = 3, STOP = 4, TURN = 6, BYPASS = 7;
     localparam [2:0] OUT = 0, ALIGN = 1, PASS_SIDE = 2, TURN_IN = 3, REJOIN = 4;
     // 弧线绕障后不再有"原地转"段：OUT/ALIGN 各自是一段定长圆弧。
     localparam integer OUT_TICKS = 6, TURN_IN_TICKS = 40;
@@ -59,7 +59,11 @@ module bypass_rejoin_tb;
     // 只靠差速画弧，所以改为检查：
     //   · 绕行段永远不出现反转轮（dir_l/dir_r 必须都为 1）；
     //   · 非直线段两侧占空比必须不同（真在画弧，而不是直行冲过去）；
-    //   · 直线超越段两轮占空比相同。
+    //   · 直线超越段两侧占空比必须正好差 2*AVOID_PASS_TRIM（v1.20 起 PASS
+    //     段是刻意的效率补偿，左 480 / 右 760）：既证明没有退回"真同速"，
+    //     也证明偏置方向没接反（右轮必须是快的那一侧）。
+    localparam [10:0] PASS_L_DUTY = 11'd480;  // AVOID_PASS_DUTY - AVOID_PASS_TRIM
+    localparam [10:0] PASS_R_DUTY = 11'd760;  // AVOID_PASS_DUTY + AVOID_PASS_TRIM
     reg fixed_straight_error = 0;
     always @(negedge clk) begin
         if (!rst_n) begin
@@ -76,15 +80,21 @@ module bypass_rejoin_tb;
             // 那是"还没动"，不是"画弧却两轮等速"。
             if (!fixed_dir_l || !fixed_dir_r) fixed_arc_error <= 1;
             if ((fixed_duty_l != 0) && (fixed_duty_r != 0)) begin
-                if (fixed_pass && (fixed_duty_l !== fixed_duty_r)) fixed_straight_error <= 1;
+                if (fixed_pass && ((fixed_duty_l !== PASS_L_DUTY) ||
+                                   (fixed_duty_r !== PASS_R_DUTY))) fixed_straight_error <= 1;
                 if (!fixed_pass && (fixed_duty_l === fixed_duty_r)) fixed_arc_error <= 1;
             end
         end
     end
 
+    // v1.20：REJOIN 超时现在**故意**交给普通找线（原来直接 final_stop 退赛），
+    // 所以守卫要放行"从 REJOIN 进入 SEARCH"这一条。用上一拍的段号区分：
+    // OUT/ALIGN/PASS/TURN_IN 任何一段把控制权让出去仍然是 bug。
+    reg [2:0] prev_step = 3'd0;
+    always @(negedge clk) prev_step <= fixed_right.bypass_step;
     always @(negedge clk)
-        if (inside_bypass && (state == LOST || state == SEARCH)) begin
-            $display("FAIL: bypass handed control to ordinary line search");
+        if (inside_bypass && (state == LOST || state == SEARCH) && (prev_step != REJOIN)) begin
+            $display("FAIL: bypass handed control to line search from step %0d", prev_step);
             $finish;
         end
 
@@ -151,7 +161,7 @@ module bypass_rejoin_tb;
 
         wait_drive(REJOIN);
         check(!fixed_arc_error, "every bypass step drives both wheels forward with unequal duty");
-        check(!fixed_straight_error, "straight pass keeps both wheels at equal duty");
+        check(!fixed_straight_error, "straight pass keeps the +-PASS_TRIM wheel bias (480/760)");
         check(align_ticks == OUT_TICKS, "alignment arc lasts the full powered duration");
         check(return_ticks == TURN_IN_TICKS, "return arc uses its own powered duration");
         on_line = 1; lost = 0; wide = 1;
@@ -172,10 +182,19 @@ module bypass_rejoin_tb;
         // 绕行期间不再用超声切电：方块必然处在阈值内（否则不会触发绕行），
         // 若继续据此断电，车会被自己的绕行对象冻住。这里改为确认仍在推进。
         check(en, "obstacle inside threshold does not freeze the detour");
-        wait (state == STOP);
+        // v1.20：REJOIN 超时不再直接停车，而是交给 S_SEARCH 原地转着找线。
+        // 这条用例从 OUT 起就 lost=1，全程扫不到线，所以必然走到这条路径。
+        begin : block_wait
+            integer guard;
+            guard = 0;
+            while (state != SEARCH && state != IDLE && state != STOP && guard < 3000) begin
+                @(negedge clk);
+                guard = guard + 1;
+            end
+        end
+        check(state == SEARCH, "blocked bypass hands control to line search instead of quitting");
+        check(!fixed_right.final_stop, "blocked bypass does not latch a permanent stop");
         @(negedge clk); obstacle = 0;
-        repeat (5) @(negedge clk);
-        check(state == STOP && !en, "persistent blockage latches stop without repeated attempts");
 
         // ---- M2：绕障全程都骑在线上（lost 从未置位）不得直接判退赛 ----
         // 现场是「线一直在脚下、只是前面挡了个 10 cm 立方体」的情形：
@@ -234,9 +253,20 @@ module bypass_rejoin_tb;
         check(dir_l && dir_r, "right detour also keeps both wheels advancing");
         check(exit_ticks == OUT_TICKS && !fixed_arc_error, "fixed right ignores last line position");
         wait_drive(REJOIN);
-        wait (state == STOP);
-        @(negedge clk);
-        check(!en, "missing return line times out and stays stopped");
+        // v1.20：REJOIN 超时不再直接 final_stop（那是"绕到一半自己退赛"），
+        // 改为把控制权交给 S_SEARCH 原地转着找线，找不到再按
+        // SEARCH_FAIL_TO_IDLE 的规则收场。这里只断言"交出去了"。
+        begin : rejoin_timeout
+            integer guard;
+            guard = 0;
+            while (state != SEARCH && state != IDLE && state != STOP && guard < 3000) begin
+                @(negedge clk);
+                guard = guard + 1;
+            end
+        end
+        check(state == SEARCH, "missing return line hands control to line search, not a dead stop");
+        check(!fixed_right.final_stop, "rejoin timeout no longer latches a permanent stop");
+        check(en, "line search still drives the motors");
         finish_summary;
     end
 

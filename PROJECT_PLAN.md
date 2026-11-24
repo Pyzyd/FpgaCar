@@ -4122,6 +4122,129 @@ wire signed [15:0] sum_raw = f_term + p_term + i_term + d_term;
 2. 弯道超调 / 切内 → `D_GAIN` 30→50。
 3. 跟线迟钝 → `P_GAIN` 80→100。
 4. **别再把 D 拉回 200** —— 那是拿量化噪声当阻尼。
+
+## 3.51 避障三段改闭环：TURN_IN 角度闭环 + PASS 效率补偿 + REJOIN 超时走找线（2026-11-24）
+
+v1.19 让循迹可用了，避障仍然失败。第一次带编码器的避障实测（`bench/serial_tool.py log`
+采 `.scratch/run_avoid1.csv`，1233 行 → 275 个逻辑帧）暴露的是**三段语义各不相同**的问题：
+有里程闭环的两段是准的，没闭环的三段全部开环跑飞。
+
+### 3.51.1 先纠正一个测量错误（重要）
+
+航向角必须**先除每毫米计数**：`CPM = 2532/212 = 11.9434 cnt/mm`，于是
+
+```
+每 1 个计数差 = 1/CPM/160 × 57.2958 = 0.029983°
+转 60°       = 2001 个计数差   （固件 ARC_DIFF_TARGET = 1999，一致）
+```
+
+第一版分析漏了 `/CPM`，角度整体放大 11.94 倍，得出过「五段合计 215°、车掉头」的结论，
+**已作废**。正确全程是 `dL=−22023 / dR=−28962`，净 **−208.1°**（符号为负即向左偏）。
+
+### 3.51.2 分段真相：有闭环的两段准，开环的三段跑飞
+
+| 段 | 占空比 | 出口判据 | 实测 | 判定 |
+|---|---|---|---|---|
+| BY_OUT | 860/380 | `arc_diff_done`（2000 计数差）或超时 | 在 2000 计数差处切换，≈60° | **达标** |
+| BY_ALIGN | 840/400 | 同上 | 同上，反向摆回 | **达标** |
+| BY_PASS | 620/620 | `arc_sum_done`（只判里程不判角） | 2 帧内偏了约 44° | **开环，跑偏** |
+| BY_TURN_IN | 860/420 | 扫线 20 ms 或**纯时间 1600 ms** | 1600 ms 拧了 **141°**（目标 60°） | **失控** |
+| BY_REJOIN | 640/430 | 扫线 20 ms 或**纯时间 2500 ms** → `final_stop` | 超时直接退赛 | **收场方式错** |
+
+结论：**标定和里程闭环本身是对的**（OUT/ALIGN 实测就在 2000 计数差切换），
+问题是另外三段根本没接角度。这也解释了为什么「越改占空比越怪」—— 开环段的时长/占空比
+在不同电池电压下转过完全不同的角度。
+
+测量局限必须说明：串口报文周期 **300 ms**，而避障各段只有 0.3~1.6 s，单段只有 1~6 个采样点。
+PASS 段只有 2 帧，它的 44° **不能当定量依据**；TURN_IN 跑满 1600 ms 超时是硬事实。
+整段净转 −208° vs 设计 60° 由累计编码器差算出，不受分段影响，是硬结论。
+
+### 3.51.3 改法一：BY_TURN_IN 加角度闭环
+
+`src/car_fsm.v` 新增参数与判据：
+
+```verilog
+parameter integer AVOID_TURN_IN_ARC_DEG = 90,   // TURN_IN 目标转角（度）
+localparam integer TURN_IN_MRAD       = (AVOID_TURN_IN_ARC_DEG * 31416 + 900) / 1800;
+localparam integer TURN_IN_ARC_TARGET = (TURN_IN_MRAD * ARC_CNT_PER_RAD) / 1000;
+wire turn_in_arc_done = (arc_diff >= TURN_IN_ARC_TARGET);
+```
+
+TURN_IN 分支加中间出口（扫线 → 角度到位 → 超时，三级）：
+
+```verilog
+if (bypass_turn_in_cnt >= AVOID_LINE_MS - 1)      bypass_step <= BY_REJOIN;
+else if (turn_in_arc_done)                        bypass_step <= BY_REJOIN;
+else if (ms_cnt >= avoid_turn_in_ceil - 1)        bypass_step <= BY_REJOIN;
+```
+
+**为什么是 90° 而不是 60°**：OUT 把车推到障碍侧边（−60°），ALIGN 反打摆正（+60°，净 0），
+PASS 直行超越，此时车头与原线平行但横向错开；TURN_IN 要把车头拧向原线做 90° 斜切，
+再由 REJOIN 用较小的差速把残余偏角慢慢收回。同一套标定，60° = 1999 计数差 → 90° = 3000。
+
+超时上限也接进「编码器在线就放大」的通道：`avoid_turn_in_ceil = arc_enc_alive ? AVOID_TURN_IN_MS*4 : AVOID_TURN_IN_MS`。
+90° 在满电时约 1.0 s，但电池掉压、地面变滑可能超过 1600 ms，若还按 1600 卡，
+角度闭环根本没机会生效 —— 这跟 v1.17 给 OUT/ALIGN 放大超时是同一个道理。
+
+### 3.51.4 改法二：BY_PASS 不再「真同速」
+
+`bypass_straight` 原先两轮都给 `AVOID_PASS_DUTY=620`。但「两轮同占空比走直线」只在
+左右轮效率完全相同时成立。实测右轮效率约为左轮的 0.55（循迹段就是靠 `track_pid` 的
+`TRIM=-140` 才压住的），所以 620/620 会让车一边前进一边持续向弱轮一侧偏 —— 这正是
+PASS 段 2 帧就偏 44° 的原因（样本少，只能确认方向，不能定量）。
+
+```verilog
+parameter integer AVOID_PASS_TRIM = 140,   // 右轮加、左轮减
+localparam integer AVOID_PASS_L_DUTY = AVOID_PASS_DUTY - AVOID_PASS_TRIM;  // 480
+localparam integer AVOID_PASS_R_DUTY = AVOID_PASS_DUTY + AVOID_PASS_TRIM;  // 760
+```
+
+两轮平均仍是 620（速度不变），差值 280 与循迹段稳定工作点 `DL=340/DR=620`（差 280）同比例。
+**注意这不是把 PASS 变成转弯**：差速的意义是抵消效率差，让车真的走直线。
+
+### 3.51.5 改法三：BY_REJOIN 超时不要直接退赛
+
+原来 `ms_cnt >= AVOID_REJOIN_MS-1` 就是 `final_stop <= 1'b1; state <= S_STOP;` ——
+绕障绕到一半自己停住，比绕不开还糟。现在改为交给 `S_SEARCH` 原地转着扫线，
+由 `SEARCH_MS`（1.5 s）兜底，失败再按 `SEARCH_FAIL_TO_IDLE`（顶层=0 → 锁停）收场：
+
+```verilog
+end else if (ms_cnt >= AVOID_REJOIN_MS - 1) begin
+    ms_cnt <= 16'd0;
+    dir_l_des <= ~last_pos_neg;   // 和 S_LOST → S_SEARCH 同款：按最后线位反向找
+    dir_r_des <=  last_pos_neg;
+    turn_dir  <= last_pos_neg ? 2'd1 : 2'd2;
+    turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
+    state <= S_SEARCH;
+end
+```
+
+### 3.51.6 顶层参数与测试同步
+
+`src/FpgaCar.v` 例化新增 `.AVOID_PASS_TRIM(140)` 与 `.AVOID_TURN_IN_ARC_DEG(90)`；
+`.AVOID_TURN_IN_MS(1600)` 的注释改为「角度到位或扫到线都会提前结束」。
+
+`sim/bypass_rejoin_tb.v` 三处断言随语义更新：
+
+- PASS 段从「两轮等占空比」改为「必须正好 480/760」—— 既证明没退回真同速，也证明
+  偏置方向没接反（右轮必须是快的一侧）。
+- 「绕行中不得交给普通找线」守卫放行「从 REJOIN 进入 SEARCH」这一条（用上一拍段号判断），
+  OUT/ALIGN/PASS/TURN_IN 任何一段让出控制权仍是 bug。
+- 两处「超时后 `S_STOP`」改为「交给 `S_SEARCH` 且不置 `final_stop`」。
+  结果 `PASS=24`（原 13）。
+
+`sim/arc_mileage_tb.v` 不涉及这三段，保持原样通过。
+
+### 3.51.7 上板后怎么判断改对了
+
+看串口 `S=` 与 `L=`/`R=` 的差值，不用看视频：
+
+1. OUT、ALIGN 段的两轮计数差应各约 **2000**（= 60°），两段方向相反。
+2. TURN_IN 段的计数差应约 **3000**（= 90°），而不是一直涨到超时。
+3. PASS 段两轮计数应**大致相等**（偏置就是用来抵消效率差的），`DL/DR` 读数是 480/760。
+4. 绕完应回到 `S_RUN` 而不是 `S_STOP`；即使回不去，也应该是 `S_SEARCH` 在转，不是直接停。
+
+换算：计数差 ÷ 11.9434 = 毫米，÷ 11.9434 ÷ 160 × 57.3 = 度。
 ## 4. 下一步（2026-11-10 按实际到货情况重排）
 
 ### 第 1 步：现在就能做的上板验证（不需要任何待买硬件）
