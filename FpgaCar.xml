@@ -23,6 +23,7 @@
         <efx:design_file name="src/track_pid.v" version="default" library="default" />
         <efx:design_file name="src/car_fsm.v" version="default" library="default" />
         <efx:design_file name="src/course_bypass.v" version="default" library="default" />
+        <efx:design_file name="src/avoid_trace.v" version="default" library="default" />
         <efx:design_file name="src/obstacle_confirm.v" version="default" library="default" />
         <efx:design_file name="src/car_panel.v" version="default" library="default" />
         <efx:design_file name="src/speed_meter.v" version="default" library="default" />

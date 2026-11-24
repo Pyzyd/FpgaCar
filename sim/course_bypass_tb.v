@@ -9,6 +9,7 @@ module course_bypass_tb;
     reg signed [31:0] pos_l = 0, pos_r = 0;
     wire owns, drive, fault, stop_request, near;
     wire [3:0] phase;
+    wire [7:0] fault_info;
     wire [10:0] duty_l, duty_r;
     integer model_ms;
 
@@ -18,7 +19,7 @@ module course_bypass_tb;
         .dist_cm(dist_cm), .line_seen(line_seen), .line_valid(line_valid),
         .line_pos(line_pos), .pos_l(pos_l), .pos_r(pos_r), .owns_motors(owns),
         .drive(drive), .fault(fault), .stop_request(stop_request),
-        .phase(phase), .duty_l(duty_l), .duty_r(duty_r)
+        .phase(phase), .fault_info(fault_info), .duty_l(duty_l), .duty_r(duty_r)
     );
     obstacle_confirm range_filter (
         .clk(clk), .rst_n(rst_n), .sample(dist_valid), .cm(dist_cm), .near(near)
@@ -148,6 +149,7 @@ module course_bypass_tb;
         begin_out();
         pos_l = -37; cycles(2);
         check(phase == 15 && stop_request && !drive, "backwards encoder motion stops the bypass");
+        check(fault_info == 8'h31, "trace reports outbound wrong direction");
         run_enable = 0; cycles(2);
         check(fault && !stop_request && !owns, "fault remains visible after panel stops");
         run_enable = 1; cycles(2);
@@ -156,6 +158,7 @@ module course_bypass_tb;
         begin_out();
         pos_l = 3282; cycles(853);
         check(fault && !drive, "one working encoder cannot mask a stalled wheel");
+        check(fault_info == 8'h33, "trace reports outbound right wheel stall");
         begin_out();
         finish_arc_plan();
         pos_l = 10867; pos_r = 10867; cycles(2);

@@ -14,6 +14,7 @@ module course_bypass #(
     output wire owns_motors, drive,
     output wire fault, stop_request,
     output reg  [3:0] phase,
+    output reg  [7:0] fault_info,
     output reg  [10:0] duty_l, duty_r
 );
     localparam [3:0] IDLE = 0, APPROACH = 1, SETTLE = 2, OUT_RIGHT = 3,
@@ -111,6 +112,28 @@ module course_bypass #(
     wire reached_r = (traveled_r >= target_r);
     wire route_clear = (heading_counts >= -ALIGN_SLACK) && (heading_counts <= ALIGN_SLACK);
     wire line_qualified = centered && route_clear;
+    reg [3:0] fault_code;
+    always @(*) begin
+        if (moving_phase && wrong_way) fault_code = 4'd1;
+        else if (moving_phase && idle_l_ms >= STALL_MS) fault_code = 4'd2;
+        else if (moving_phase && idle_r_ms >= STALL_MS) fault_code = 4'd3;
+        else begin
+            case (phase)
+                IDLE: fault_code = 4'd4;
+                APPROACH, SETTLE: begin
+                    if (!fresh) fault_code = 4'd5;
+                    else if (!line_valid) fault_code = 4'd6;
+                    else if (range_counts < MIN_START_COUNTS ||
+                             (phase == SETTLE && range_counts > START_COUNTS + 59))
+                        fault_code = 4'd7;
+                    else fault_code = 4'd8;
+                end
+                PASS: fault_code = route_timeout ? 4'd8 : 4'd9;
+                FIND_LINE: fault_code = 4'd10;
+                default: fault_code = 4'd8;
+            endcase
+        end
+    end
 
     assign fault = (phase == FAILED);
     assign stop_request = fault && run_prev;
@@ -197,9 +220,12 @@ module course_bypass #(
             progress_l <= 0;
             progress_r <= 0;
             run_prev <= 0;
+            fault_info <= 0;
         end else begin
             phase <= next_phase;
             run_prev <= run_enable;
+            if (phase != FAILED && next_phase == FAILED) fault_info <= {phase, fault_code};
+            else if (!run_prev && run_enable) fault_info <= 0;
             divider <= tick_ms ? 0 : divider + 1'b1;
             if (dist_valid && dist_cm != 16'hffff) begin
                 sample_cm <= dist_cm;

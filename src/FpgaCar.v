@@ -180,6 +180,7 @@ module FpgaCar (
     wire              motion_rst_n = sys_rst_n && run_enable;
     wire bypass_owns, bypass_drive, bypass_fault, bypass_stop;
     wire [3:0] bypass_phase;
+    wire [7:0] bypass_fault_info;
     wire [10:0] bypass_duty_l, bypass_duty_r;
     wire nav_rst_n = motion_rst_n && !bypass_owns;
     wire [2:0] reported_state = (panel_status == 2'd2 || bypass_fault) ? 3'd4 :
@@ -615,7 +616,8 @@ module FpgaCar (
         .line_valid(line_on && !line_lost && !line_wide), .line_pos(line_pos),
         .pos_l(enc_l_pos), .pos_r(enc_r_pos), .owns_motors(bypass_owns),
         .drive(bypass_drive), .fault(bypass_fault), .stop_request(bypass_stop),
-        .phase(bypass_phase), .duty_l(bypass_duty_l), .duty_r(bypass_duty_r)
+        .phase(bypass_phase), .fault_info(bypass_fault_info),
+        .duty_l(bypass_duty_l), .duty_r(bypass_duty_r)
     );
 
     // 绕行全程只向前，PWM=0 且 STBY=1 时 TB6612 短刹。
@@ -642,6 +644,19 @@ module FpgaCar (
 
     wire rep_tx;
     wire snap_tx, snap_busy;        // 停用时由 else 分支打常量
+    wire regular_tx, trace_tx, trace_busy;
+    wire [7:0] trace_flags = {motor_en, run_enable, line_on, line_lost, line_wide,
+                             bypass_fault, obstacle, bypass_owns};
+    wire [143:0] trace_snapshot = {
+        bypass_fault_info, trace_flags, bypass_phase, 1'b0, reported_state,
+        line_raw, dist_cm, 5'd0, final_duty_r, 5'd0, final_duty_l, enc_r_pos, enc_l_pos
+    };
+
+    avoid_trace u_avoid_trace (
+        .clk(clk), .rst_n(sys_rst_n), .uart_rx(uart_rx), .run_enable(run_enable),
+        .phase(bypass_phase), .snapshot(trace_snapshot), .tx(trace_tx), .busy(trace_busy)
+    );
+    assign uart_tx = trace_busy ? trace_tx : regular_tx;
 
     generate
     if (USE_LCD_PREVIEW) begin : g_lcd
@@ -743,7 +758,7 @@ module FpgaCar (
         assign cam_color_evt = 1'b0;
         assign snap_tx       = 1'b1;
         assign snap_busy     = 1'b0;
-        assign uart_tx       = rep_tx;
+        assign regular_tx    = rep_tx;
     end else if (USE_CAMERA) begin : g_cam
         wire        cam_ready;
         wire [7:0]  cam_vs_cnt;
@@ -843,7 +858,7 @@ module FpgaCar (
         );
 
         // 抓帧时给缩略图，平时给常规统计行（两路不能同时占线）
-        assign uart_tx = snap_busy ? snap_tx : rep_tx;
+        assign regular_tx = snap_busy ? snap_tx : rep_tx;
     end else begin : g_no_cam
         // 摄像头不吃数据：颜色结果恒为"中性、无事件"
         assign cam_color     = 3'd0;
@@ -856,7 +871,7 @@ module FpgaCar (
         assign cmos_sdat_OUT = 1'b0;
         assign cmos_sdat_OE  = 1'b0;
 
-        assign uart_tx = rep_tx;
+        assign regular_tx = rep_tx;
     end
     endgenerate
 
@@ -1003,7 +1018,7 @@ module FpgaCar (
         .clk        (clk),
         .rst_n      (sys_rst_n),
         .dist_cm    (dist_cm),
-        .dist_valid (dist_valid),
+        .dist_valid (dist_valid && !trace_busy),
         .line       (line_bits),
         .raw        (line_raw),
         .pos        (line_pos),
