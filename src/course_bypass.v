@@ -5,7 +5,7 @@ module course_bypass #(
     parameter integer CLK_FREQ = 24_000_000
 ) (
     input  wire clk, rst_n, run_enable,
-    input  wire request, entry_aligned,
+    input  wire request, entry_forward,
     input  wire obstacle, dist_valid,
     input  wire [15:0] dist_cm,
     input  wire line_seen, line_valid,
@@ -38,6 +38,7 @@ module course_bypass #(
     localparam signed [31:0] MAX_WHEEL_LEAD = 300, WRONG_WAY = 36;
     localparam signed [31:0] ALIGN_SLACK = 110, FIND_COUNTS = 155;
     localparam integer LOST_CONFIRM_MS = 24, CENTER_CONFIRM_MS = 35;
+    localparam integer APPROACH_LOST_MS = 100;
 
     reg [MS_W-1:0] divider;
     wire tick_ms = divider == MS_DIV - 1;
@@ -53,6 +54,8 @@ module course_bypass #(
     reg signed [31:0] progress_l, progress_r;
     reg [3:0] next_phase;
     reg run_prev;
+    reg signed [4:0] last_line_pos;
+    reg [6:0] line_gap_ms;
 
     wire fresh = (range_age < RANGE_AGE_MS) && (sample_cm <= 16'd40);
     wire signed [31:0] since_sample_l = pos_l - sample_l;
@@ -73,10 +76,14 @@ module course_bypass #(
     wire wheel_stalled = (idle_l_ms >= STALL_MS) || (idle_r_ms >= STALL_MS);
     wire wrong_way = (pos_l - progress_l < -WRONG_WAY) ||
                      (pos_r - progress_r < -WRONG_WAY);
-    wire [10:0] approach_l = (line_pos > 5'sd2) ? 11'd280 :
-                             (line_pos < -5'sd2) ? 11'd232 : 11'd256;
-    wire [10:0] approach_r = (line_pos < -5'sd2) ? 11'd280 :
-                             (line_pos > 5'sd2) ? 11'd232 : 11'd256;
+    wire signed [4:0] approach_pos = line_valid ? line_pos : last_line_pos;
+    wire entry_aligned = entry_forward && (line_gap_ms < APPROACH_LOST_MS) &&
+                         (approach_pos >= -5'sd3) && (approach_pos <= 5'sd3);
+    wire approach_lost = !line_valid && line_gap_ms >= APPROACH_LOST_MS;
+    wire [10:0] approach_l = (approach_pos > 5'sd1) ? 11'd280 :
+                             (approach_pos < -5'sd1) ? 11'd232 : 11'd256;
+    wire [10:0] approach_r = (approach_pos < -5'sd1) ? 11'd280 :
+                             (approach_pos > 5'sd1) ? 11'd232 : 11'd256;
 
     reg signed [31:0] target_l, target_r;
     reg signed [31:0] begin_l, begin_r;
@@ -122,7 +129,8 @@ module course_bypass #(
                 IDLE: fault_code = 4'd4;
                 APPROACH, SETTLE: begin
                     if (!fresh) fault_code = 4'd5;
-                    else if (!line_valid) fault_code = 4'd6;
+                    else if ((phase == APPROACH && approach_lost) ||
+                             (phase == SETTLE && !line_valid)) fault_code = 4'd6;
                     else if (range_counts < MIN_START_COUNTS ||
                              (phase == SETTLE && range_counts > START_COUNTS + 59))
                         fault_code = 4'd7;
@@ -147,7 +155,8 @@ module course_bypass #(
         if (drive && route) begin
             if (!reached_l && (reached_r || error <= MAX_WHEEL_LEAD)) duty_l = demand_l[10:0];
             if (!reached_r && (reached_l || error >= -MAX_WHEEL_LEAD)) duty_r = demand_r[10:0];
-        end else if (drive && phase == APPROACH && fresh && range_counts > START_COUNTS && line_valid) begin
+        end else if (drive && phase == APPROACH && fresh &&
+                     range_counts > START_COUNTS && !approach_lost) begin
             duty_l = approach_l;
             duty_r = approach_r;
         end else if (drive && phase == FIND_LINE && !line_qualified) begin
@@ -163,7 +172,7 @@ module course_bypass #(
                 IDLE: if (request) next_phase = entry_aligned ? APPROACH : FAILED;
                 FAILED: if (!run_prev) next_phase = IDLE;
                 APPROACH: begin
-                    if (!fresh || !line_valid || elapsed >= APPROACH_MS ||
+                    if (!fresh || approach_lost || elapsed >= APPROACH_MS ||
                         range_counts < MIN_START_COUNTS) next_phase = FAILED;
                     else if (range_counts <= START_COUNTS) next_phase = SETTLE;
                 end
@@ -221,12 +230,20 @@ module course_bypass #(
             progress_r <= 0;
             run_prev <= 0;
             fault_info <= 0;
+            last_line_pos <= 0;
+            line_gap_ms <= 7'h7f;
         end else begin
             phase <= next_phase;
             run_prev <= run_enable;
             if (phase != FAILED && next_phase == FAILED) fault_info <= {phase, fault_code};
             else if (!run_prev && run_enable) fault_info <= 0;
             divider <= tick_ms ? 0 : divider + 1'b1;
+            if (line_valid) begin
+                last_line_pos <= line_pos;
+                line_gap_ms <= 0;
+            end else if (tick_ms && line_gap_ms != 7'h7f) begin
+                line_gap_ms <= line_gap_ms + 1'b1;
+            end
             if (dist_valid && dist_cm != 16'hffff) begin
                 sample_cm <= dist_cm;
                 sample_l <= pos_l;

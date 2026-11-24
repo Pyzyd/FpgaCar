@@ -215,6 +215,23 @@ module FpgaCar_tb;
             $display("PASS: K1 starts the on-line car");
         else $display("FAIL: K1 did not start the on-line car");
 
+        // 重放实车接管前 118/842 的 PWM 差值，先收到 35 cm 时就应压低。
+        @(negedge clk);
+        force u_dut.nav_duty_l = 11'd118;
+        force u_dut.nav_duty_r = 11'd842;
+        force u_dut.line_pos = -5'sd3;
+        force u_dut.dist_cm = 16'd35;
+        force u_dut.dist_valid = 1'b1;
+        @(negedge clk);
+        if (!u_dut.bypass_owns && u_dut.final_duty_l == 240 && u_dut.final_duty_r == 320)
+            $display("PASS: near obstacle caps real pre-handoff PWM before bypass confirmation");
+        else $display("FAIL: near obstacle did not limit pre-handoff PWM");
+        release u_dut.nav_duty_l;
+        release u_dut.nav_duty_r;
+        release u_dut.line_pos;
+        release u_dut.dist_cm;
+        release u_dut.dist_valid;
+
         // 给顶层送入三次近距结果，确认触发的是新绕行控制器和正确的前进极性。
         @(negedge clk);
         force u_dut.dist_cm = 16'd23;

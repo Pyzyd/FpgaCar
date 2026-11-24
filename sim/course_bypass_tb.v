@@ -7,7 +7,7 @@ module course_bypass_tb;
     reg [15:0] dist_cm = 16'hffff;
     reg signed [4:0] line_pos = 0;
     reg signed [31:0] pos_l = 0, pos_r = 0;
-    wire owns, drive, fault, stop_request, near;
+    wire owns, drive, fault, stop_request, near, approach_slow;
     wire [3:0] phase;
     wire [7:0] fault_info;
     wire [10:0] duty_l, duty_r;
@@ -15,14 +15,15 @@ module course_bypass_tb;
 
     course_bypass #(.CLK_FREQ(1000)) dut (
         .clk(clk), .rst_n(rst_n), .run_enable(run_enable), .request(request),
-        .entry_aligned(aligned), .obstacle(obstacle), .dist_valid(dist_valid),
+        .entry_forward(aligned), .obstacle(obstacle), .dist_valid(dist_valid),
         .dist_cm(dist_cm), .line_seen(line_seen), .line_valid(line_valid),
         .line_pos(line_pos), .pos_l(pos_l), .pos_r(pos_r), .owns_motors(owns),
         .drive(drive), .fault(fault), .stop_request(stop_request),
         .phase(phase), .fault_info(fault_info), .duty_l(duty_l), .duty_r(duty_r)
     );
     obstacle_confirm range_filter (
-        .clk(clk), .rst_n(rst_n), .sample(dist_valid), .cm(dist_cm), .near(near)
+        .clk(clk), .rst_n(rst_n), .sample(dist_valid), .cm(dist_cm),
+        .near(near), .approach_slow(approach_slow)
     );
 
     task cycles(input integer num);
@@ -82,6 +83,12 @@ module course_bypass_tb;
 
     initial begin
         reset_route();
+        sample(39);
+        check(approach_slow && !near, "slows before reaching the three-echo confirmation window");
+        sample(42);
+        check(approach_slow, "approach pre-slow threshold has hysteresis");
+        sample(46);
+        check(!approach_slow, "far echo releases approach pre-slow");
         sample(20); sample(20); sample(40);
         check(!near, "40 cm cannot complete a near-frame sequence");
         sample(24); sample(24); sample(24);
@@ -166,6 +173,39 @@ module course_bypass_tb;
 
         reset_route(); trigger_at(19); cycles(2);
         check(fault && !drive, "too close to start the validated arc stops");
+
+        // 实车 114853.csv：25 cm、线偏左，接管后 21 ms 两轮增加 31/52 计数并丢线。
+        reset_route();
+        line_pos = -3;
+        trigger_at(25);
+        pos_l = 31; pos_r = 52;
+        line_valid = 0; line_seen = 0; line_pos = 0;
+        cycles(21);
+        check(phase == 1 && drive && duty_l == 232 && duty_r == 280,
+              "21 ms road replay holds slow steering on the last side");
+        line_valid = 1; line_seen = 1;
+        sample(23);
+        cycles(123);
+        check(phase == 3 && !fault, "reacquired line proceeds to the outbound arc");
+        reset_route(); trigger_at(25);
+        line_valid = 0; line_seen = 0;
+        cycles(102);
+        check(fault && fault_info == 8'h16 && !drive, "persistent lost line still stops");
+
+        reset_route();
+        trigger_at(25);
+        line_valid = 0; line_seen = 0;
+        sample(23);
+        cycles(5);
+        check(phase == 2 && duty_l == 0 && duty_r == 0, "short dropout still brakes at start range");
+        cycles(122);
+        check(fault && fault_info == 8'h26 && !drive, "line must be valid before the right arc");
+
+        reset_route();
+        line_pos = -3; cycles(1);
+        line_seen = 0; line_valid = 0;
+        trigger_at(25);
+        check(phase == 1 && duty_l < duty_r, "recent valid line permits handoff during a short dropout");
 
         reset_route(); aligned = 0; trigger_at(23); cycles(1);
         check(fault && !drive, "off-line trigger stops rather than invoking legacy reverse");

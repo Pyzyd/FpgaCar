@@ -182,6 +182,8 @@ module FpgaCar (
     wire [3:0] bypass_phase;
     wire [7:0] bypass_fault_info;
     wire [10:0] bypass_duty_l, bypass_duty_r;
+    wire near_follow, near_brake;
+    wire [10:0] near_duty_l, near_duty_r;
     wire nav_rst_n = motion_rst_n && !bypass_owns;
     wire [2:0] reported_state = (panel_status == 2'd2 || bypass_fault) ? 3'd4 :
                                 bypass_owns ? 3'd7 : car_state;
@@ -207,7 +209,8 @@ module FpgaCar (
 
     // 整形器的 en 就是这个信号（停机/换相死区/非 RUN 时直通），
     // 所以必须在例化之前声明，否则 Verilog 会当成隐式 wire。
-    wire        motor_en = motion_rst_n && (PWM_BENCH_TEST || (bypass_owns ? bypass_drive : ctrl_en));
+    wire        motor_en = motion_rst_n && (PWM_BENCH_TEST ||
+                                (bypass_owns ? bypass_drive : ctrl_en && !near_brake));
 
     // ------------------------------------------------------------------
     // 差速幅度整形（duty_shaper）
@@ -256,10 +259,12 @@ module FpgaCar (
     );
 
     // 整形后的最终占空比：同时送给 PWM 与串口（DL=/DR= 必须报真正到电机的值）
-    wire [10:0] final_duty_l = bypass_owns ? bypass_duty_l :
-                              DUTY_SHAPE_EN ? shape_duty_l : loop_duty_l;
-    wire [10:0] final_duty_r = bypass_owns ? bypass_duty_r :
-                              DUTY_SHAPE_EN ? shape_duty_r : loop_duty_r;
+    wire [10:0] nav_duty_l = DUTY_SHAPE_EN ? shape_duty_l : loop_duty_l;
+    wire [10:0] nav_duty_r = DUTY_SHAPE_EN ? shape_duty_r : loop_duty_r;
+    wire [10:0] final_duty_l = bypass_owns ? bypass_duty_l : near_brake ? 11'd0 :
+                              near_follow ? near_duty_l : nav_duty_l;
+    wire [10:0] final_duty_r = bypass_owns ? bypass_duty_r : near_brake ? 11'd0 :
+                              near_follow ? near_duty_r : nav_duty_r;
 
     // ------------------------------------------------------------------
     // 【接线补偿】2026-11-23 驱动轮从距车头 30 mm 后移到 75 mm 之后，电机
@@ -473,9 +478,10 @@ module FpgaCar (
     //   1'b1 = 超声波连续确认后请求右侧赛道绕行。
     localparam USE_ULTRA = 1'b1;
 
-    wire hc_near;
+    wire hc_near, hc_approach_slow;
     obstacle_confirm u_obstacle (
-        .clk(clk), .rst_n(sys_rst_n), .sample(dist_valid), .cm(dist_cm), .near(hc_near)
+        .clk(clk), .rst_n(sys_rst_n), .sample(dist_valid), .cm(dist_cm),
+        .near(hc_near), .approach_slow(hc_approach_slow)
     );
     wire ir_l_det = ~ir_l;                      // NPN 低有效
     wire ir_r_det = ~ir_r;
@@ -606,12 +612,17 @@ module FpgaCar (
     );
 
     wire bypass_request = obstacle && (car_state == 3'd1 || car_state == 3'd2 || car_state == 3'd3);
-    wire bypass_entry_aligned = (car_state == 3'd1) && ctrl_dir_l && ctrl_dir_r &&
-                                line_on && !line_lost && !line_wide &&
-                                line_pos >= -5'sd3 && line_pos <= 5'sd3;
+    wire bypass_entry_forward = (car_state == 3'd1 || car_state == 3'd2) && ctrl_dir_l && ctrl_dir_r;
+    assign near_follow = USE_ULTRA && hc_approach_slow && bypass_entry_forward;
+    assign near_brake = USE_ULTRA && hc_approach_slow && car_state == 3'd3;
+    // 近物区直接按探头线位给出低速差速，避免循迹微分项把占空比拉得过大。
+    assign near_duty_l = (line_pos <= -5'sd3) ? 11'd240 : (line_pos == -5'sd2) ? 11'd260 :
+                         (line_pos >=  5'sd3) ? 11'd320 : (line_pos ==  5'sd2) ? 11'd300 : 11'd280;
+    assign near_duty_r = (line_pos >=  5'sd3) ? 11'd240 : (line_pos ==  5'sd2) ? 11'd260 :
+                         (line_pos <= -5'sd3) ? 11'd320 : (line_pos == -5'sd2) ? 11'd300 : 11'd280;
     course_bypass u_bypass (
         .clk(clk), .rst_n(sys_rst_n), .run_enable(run_enable),
-        .request(bypass_request), .entry_aligned(bypass_entry_aligned), .obstacle(obstacle),
+        .request(bypass_request), .entry_forward(bypass_entry_forward), .obstacle(obstacle),
         .dist_valid(dist_valid), .dist_cm(dist_cm), .line_seen(line_on),
         .line_valid(line_on && !line_lost && !line_wide), .line_pos(line_pos),
         .pos_l(enc_l_pos), .pos_r(enc_r_pos), .owns_motors(bypass_owns),
