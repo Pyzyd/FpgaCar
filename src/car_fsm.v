@@ -96,7 +96,11 @@ module car_fsm #(
     //   HDG_GAIN：每个计数误差（1 计数 ≈ 0.03°）折算多少占空比修正；
     //   HDG_DEAD：死区，吃掉量化抖动；HDG_STEER_*：修正量上下限。
     //   这些值只是让环「转得动、不抖」，最终精度由编码器差决定，不必精细标定。
-    parameter integer HDG_SHIFT      = 3,    // 误差右移位数：steer = err >>> SHIFT
+    // 【v1.25 3→2】右移 3 位时 REJOIN 要把 40° 航向扳回来，P 环只给得出 err/8（40°≈1333 → 164），
+    // 实测回正只有 12°/s：斜着跑完 210 mm 横向、到线航向 29°，交给 track_pid 后必然冲过黑线
+    // 再折回（现场"黄线"的过冲来源）。右移 2 位后同一误差给 333：过线航向 29°→16°、过冲 43.5→1.1 mm。
+    // 不会压停慢轮：参考角按 HDG_RAMP=2 爬坡，段内误差始终很小，仿真最小单轮占空比 320 ≫ AVOID_MIN_DUTY=120。
+    parameter integer HDG_SHIFT      = 2,    // 误差右移位数：steer = err >>> SHIFT
     // 【为什么是移位而不是乘法增益】每段起点的角度误差就是满量程（OUT/ALIGN 1999
     //   计数、TURN_IN 3000 计数），乘法增益 2 会立刻顶到 ±600，把慢轮压到占空比 0，
     //   等于原地打转 —— 那正是细则 4.3.2 禁止的动作。右移 3 位后起点修正量约
@@ -143,7 +147,7 @@ module car_fsm #(
     parameter integer ENC_CNT_PER_REV  = 2532, // 每轮圈计数（实测，四倍频 × 减速比）
     parameter integer WHEEL_CIRC_MM    = 212,  // 轮周长, mm（实测轮径 67.5）
     parameter integer WHEEL_BASE_MM    = 160,  // 轮距, mm
-    parameter integer AVOID_ARC_DEG    = 70,   // 单弧目标转角（度）
+    parameter integer AVOID_ARC_DEG    = 78,   // 单弧目标转角（度，v1.24c 由 70 提 78）
     // 【v1.20 TURN_IN 也需要角度闭环】OUT/ALIGN 一直有 arc_diff 闭环（实测
     //   确实在 2000 计数差附近切换，转角 −60°/+60° 达标），但 TURN_IN 只有
     //   "纯时间 + 扫线"两个出口：扫线要连续 AVOID_LINE_MS 拍压到线，而车
@@ -164,11 +168,19 @@ module car_fsm #(
     //   所以收小 TURN_IN 不会让车更容易蹭到方块，纯粹改善回线姿态。
     //   OUT 仍保持 70°：出线弧的横移量（172mm > NEED_LAT 142.5mm）全靠它。
     parameter integer AVOID_TURN_IN_ARC_DEG = 40, // TURN_IN 目标转角（度）
+    // 【v1.26 REJOIN 角度从 TURN_IN 里拆出来】原来 REJOIN 直接沿用 TURN_IN 的目标角，
+    //   于是车保持 40° 斜切姿态一路斜到压线，交给 track_pid 那一刻航向还挂着 40°，
+    //   循迹环只能硬掰回来，车必然先冲过黑线再折回 —— 现场「黄线跑出去太远、回线
+    //   时车头快垂直」的成因。把 REJOIN 单独设成一个浅角：车仍持续向线收敛（不会像
+    //   v1.22 摆平那样永远压不到线），但过线姿态接近平行，没有大的落差要交回。
+    //   仿真 bench/bypass_sim.py（350mm 触发，KL=KR）：40°→15° 交回航向 39.5°→14.6°，
+    //   越线过冲 57.6mm→0；下潜深度 199.0、最小间隙 53.6mm 完全不变。
+    parameter integer AVOID_REJOIN_ARC_DEG = 40, // REJOIN 目标转角（度），默认沿用 TURN_IN
     // 【v1.23 PASS 由 200mm 加长到 300mm】判据是 arc_sum >= 2×PASS_SUM_TARGET，
     //   即**两轮各自**都走满 AVOID_PASS_MM（不是两轮加起来）。200mm 时车身还没
     //   完全超越方块就开始回切，车尾扫到方块（几何仿真最小间隙 65.8mm，
     //   KR/KL=1.0 时只剩 65.8mm 且更小）；300mm 时升到 72.1mm，再往上收益饱和。
-    parameter integer AVOID_PASS_MM    = 150,  // BY_PASS 直线超越距离, mm（每轮，v1.24b 由 300 减半）
+    parameter integer AVOID_PASS_MM    = 100,  // BY_PASS 直线超越距离, mm（每轮，v1.24c 由 150 再减到 100）
     // 下面两条 *_MS 已降级为**超时上限**：编码器不出脉冲时（没装/线松）仍能
     // 走完动作，不会卡死在半路。正常有编码器时提前里程到了就切换。
     parameter integer AVOID_OUT_MS      = 2500, // 外摆弧超时上限
@@ -319,6 +331,9 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     // 60° = 1999 计数差 → 90° = 3000 计数差（1° ≈ 33.3 计数差）。
     localparam integer TURN_IN_MRAD       = (AVOID_TURN_IN_ARC_DEG * 31416 + 900) / 1800;
     localparam integer TURN_IN_ARC_TARGET = (TURN_IN_MRAD * ARC_CNT_PER_RAD) / 1000;
+    // REJOIN 的目标角单独算（v1.26）：浅角贴线，过线航向接近平行。
+    localparam integer REJOIN_MRAD       = (AVOID_REJOIN_ARC_DEG * 31416 + 900) / 1800;
+    localparam integer REJOIN_ARC_TARGET = (REJOIN_MRAD * ARC_CNT_PER_RAD) / 1000;
     // (v1.24 删除了无人引用的 AVOID_PASS_L_DUTY / AVOID_PASS_R_DUTY)
     reg [31:0] arc_cnt_l, arc_cnt_r;   // 本段内两轮各自累计脉冲
     reg [2:0]  arc_step_d, arc_state_d;// 上一拍的段号/状态，用来切段清零
@@ -368,11 +383,13 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     //   避免对 integer 型 localparam 做拼接（部分工具会按 32 位无符号解释）。
     wire signed [23:0] arc_tgt_s  = ARC_DIFF_TARGET;
     wire signed [23:0] turn_tgt_s = TURN_IN_ARC_TARGET;
+    wire signed [23:0] rejoin_tgt_s = REJOIN_ARC_TARGET;
     wire signed [23:0] hdg_target =
         (bypass_step == BY_OUT)     ? (hdg_out_left ?  arc_tgt_s  : -arc_tgt_s)  :
         (bypass_step == BY_ALIGN)   ?  24'sd0 :   // 反打摆正，回到平行
         (bypass_step == BY_PASS)    ?  24'sd0 :   // 保持平行，直行超越障碍
-        /* TURN_IN / REJOIN */        (hdg_out_left ? -turn_tgt_s :  turn_tgt_s);
+        (bypass_step == BY_REJOIN)  ? (hdg_out_left ? -rejoin_tgt_s : rejoin_tgt_s) :
+        /* TURN_IN */                 (hdg_out_left ? -turn_tgt_s :  turn_tgt_s);
     // 【v1.23 REJOIN 不能再摆平】v1.22 把 REJOIN 的目标设成 0，等于 TURN_IN 刚把车头
     //   从 −70° 斜切到 +70°（朝原线），一进 REJOIN 又被拧回平行 → 车平行前进、永远
     //   压不到原线，AVOID_REJOIN_MS 用尽后去 S_SEARCH 漫天找线（用户 m08026「直接飞
