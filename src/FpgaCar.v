@@ -182,7 +182,7 @@ module FpgaCar #(
     wire [1:0]        panel_status;
     wire              run_enable, clear_result;
     wire              parking_camera_ready, parking_frame_done, parking_corner, parking_pair;
-    wire              parking_slow, parking_brake, parking_stopped, parking_video_ready;
+    wire              parking_slow, parking_pair_seen, parking_brake, parking_stopped, parking_video_ready;
     wire              motion_rst_n = sys_rst_n && run_enable;
     wire [2:0]        reported_state = (panel_status == 2'd2) ? 3'd4 : car_state;
 
@@ -269,11 +269,7 @@ module FpgaCar #(
     // 整形后的最终占空比：同时送给 PWM 与串口（DL=/DR= 必须报真正到电机的值）
     wire [10:0] track_duty_l = DUTY_SHAPE_EN ? shape_duty_l : loop_duty_l;
     wire [10:0] track_duty_r = DUTY_SHAPE_EN ? shape_duty_r : loop_duty_r;
-    // 同比例降到原 PWM 的约 75%，保留同学那版 PID 和左右轮配比。
-    wire [10:0] final_duty_l = parking_brake ? 11'd0 :
-        parking_slow ? track_duty_l - (track_duty_l >> 2) : track_duty_l;
-    wire [10:0] final_duty_r = parking_brake ? 11'd0 :
-        parking_slow ? track_duty_r - (track_duty_r >> 2) : track_duty_r;
+    wire [10:0] final_duty_l, final_duty_r;
 
     // ------------------------------------------------------------------
     // 【接线补偿】2026-11-23 驱动轮从距车头 30 mm 后移到 75 mm 之后，电机
@@ -812,12 +808,16 @@ module FpgaCar #(
             .clk(clk), .rst_n(sys_rst_n), .run_enable(run_enable),
             .parking_request(1'b1), .frame_done(parking_frame_done),
             .corner_seen(parking_corner), .pair_valid(parking_pair),
-            .center_x_sum(center_x_sum), .slow(parking_slow),
+            .center_x_sum(center_x_sum), .track_duty_l(track_duty_l), .track_duty_r(track_duty_r),
+            .duty_l(final_duty_l), .duty_r(final_duty_r),
+            .slow(parking_slow), .pair_seen(parking_pair_seen),
             .brake(parking_brake), .stopped(parking_stopped)
         );
     end else begin : g_no_parking
         assign {parking_frame_done, parking_corner, parking_pair, parking_video_ready,
-                parking_slow, parking_brake, parking_stopped} = 7'd0;
+                parking_slow, parking_pair_seen, parking_brake, parking_stopped} = 8'd0;
+        assign final_duty_l = track_duty_l;
+        assign final_duty_r = track_duty_r;
     end endgenerate
 
     generate
@@ -846,6 +846,7 @@ module FpgaCar #(
         assign parking_camera_ready = lcd_capture_ready;
         wire park_guide = PARKING_DEBUG && (pv_x == 154 || pv_x == 166);
         wire [15:0] park_status_color = (reported_state == 3'd4 || parking_brake) ? 16'hF800 :
+                                        parking_pair_seen ? 16'h07FF :
                                         parking_slow ? 16'hFFE0 : 16'h0000;
         wire [15:0] pv_pixel = !pv_image_row ? park_status_color : park_guide ?
                                16'h07E0 : {pv_gray[7:3], pv_gray[7:2], pv_gray[7:3]};

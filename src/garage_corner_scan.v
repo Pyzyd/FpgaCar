@@ -71,15 +71,17 @@ module garage_corner_scan (
     reg [2:0] tap;
     reg [7:0] p0, p1, p2, p3;
     reg signed [10:0] tap_x, tap_y;
-    wire readable = test_x >= (vertical ? 9 : 0) && test_x < (vertical ? 311 : 320) &&
+    wire readable = test_x >= (vertical ? 2 : 0) && test_x < (vertical ? 318 : 320) &&
                     test_y >= (vertical ? 0 : 3) && test_y < (vertical ? 180 : 177);
     wire probing = (state >= CENTER && state <= LEG_FAR) || state == CHECK_TAPE;
     always @(*) begin
         tap_x = test_x;
         tap_y = test_y;
         case (tap)
-            1: if (vertical) tap_x = test_x - 9; else tap_y = test_y - 3;
-            2: if (vertical) tap_x = test_x + 9; else tap_y = test_y + 3;
+            1: if (vertical) tap_x = test_x >= 9 ? test_x - 9 : 0;
+               else tap_y = test_y - 3;
+            2: if (vertical) tap_x = test_x < 311 ? test_x + 9 : 319;
+               else tap_y = test_y + 3;
             3: tap_x = test_x - 1;
             4: tap_x = test_x + 1;
             default: begin end
@@ -92,7 +94,9 @@ module garage_corner_scan (
     wire [8:0] v_bg = {1'b0,p1} + {1'b0,p2};
     wire [8:0] inner_pair = {1'b0,p3} + {1'b0,read_y};
     wire [7:0] v_inside = p0 > inner_pair[8:1] ? p0 : inner_pair[8:1];
-    wire [7:0] bg = vertical ? v_bg[8:1] : h_bg[8:1];
+    // 边缘处用仍在图内的一侧地板估计背景。角点本身仍需留出边缘余量。
+    wire [7:0] v_background = test_x < 9 ? p2 : test_x >= 311 ? p1 : v_bg[8:1];
+    wire [7:0] bg = vertical ? v_background : h_bg[8:1];
     wire [7:0] foreground = vertical ? v_inside : p0;
     wire [7:0] contrast = readable && bg > foreground ? bg - foreground : 8'd0;
     wire [7:0] peak = contrast > contrast_max ? contrast : contrast_max;
