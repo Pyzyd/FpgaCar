@@ -90,7 +90,11 @@ module parking_handoff_tb;
 
         clocks(30);
         check(!stand_by && !hc_trig, "power-on waits for K1 and leaves sonar off");
+        force dut.raw_track_duty_l = 11'd340;
+        force dut.raw_track_duty_r = 11'd620;
         press_start();
+        check(dut.final_duty_l == 190 && dut.final_duty_r == 347,
+              "P applies 80 percent to each 70-percent tracking command");
         start_parking();
 
         // 物理左轮后转时原始计数上升，动作模块入口使用前进为正。
@@ -125,8 +129,10 @@ module parking_handoff_tb;
         raw_l = raw_l - 3000;
         clocks(35);
         check(dut.parking_done && !dut.parking_owner && dut.car_state == 1 &&
-              dut.final_duty_l == dut.track_duty_l && dut.final_duty_r == dut.track_duty_r,
-              "centered exit hands the PWM back to the original tracking logic");
+              dut.final_duty_l == 238 && dut.final_duty_r == 434,
+              "centered exit restores the 70-percent tracking commands");
+        release dut.raw_track_duty_l;
+        release dut.raw_track_duty_r;
         centered_frame();
         centered_frame();
         check(!dut.parking_owner && !dut.parking_brake, "same run cannot trigger parking a second time");

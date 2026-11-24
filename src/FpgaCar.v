@@ -168,10 +168,14 @@ module FpgaCar #(
     localparam        PWM_BENCH_TEST = 1'b0;
     localparam [10:0] BENCH_DUTY     = 11'd300;     // 300/1200 = 25%
 
-    // 【循迹基础占空比】现场反馈"修正不及时直接甩出去"：降到 40% 留出修正余量。
-    //   只改顶层覆盖，track_pid 模块默认值仍是 600，单测 track_pid_tb 不受影响。
-    //   嫌慢就往上调（600 = 50%，原值），嫌甩就往下调（420 = 35% 起会明显发飘）。
-    localparam [10:0] TRACK_BASE_DUTY = 11'd480;
+    // 【手动调参区】在 Efinity 打开本文件，搜索「手动调参区」。
+    localparam integer TRACK_P_GAIN              = 80;  // 循迹 P：按当前探头位置误差修正
+    localparam integer TRACK_D_GAIN              = 30;  // 循迹 D：按位置误差变化修正
+    localparam [6:0]   TRACK_SPEED_PERCENT        = 70;  // 普通循迹、出库恢复：原循迹输出 × 70%
+    localparam [6:0]   PARK_AFTER_P_PERCENT       = 80;  // 收到 P：调速后的循迹输出 × 80%
+    localparam [6:0]   PARK_AFTER_CORNER_PERCENT  = 60;  // 检出第一个库角：调速后的循迹输出 × 60%
+
+    localparam [10:0] TRACK_BASE_DUTY = 11'd480;     // 比例缩放前的 PID 基准 PWM
 
     wire              ctrl_en;
     wire              ctrl_dir_l, ctrl_dir_r;
@@ -274,9 +278,13 @@ module FpgaCar #(
         .duty_r_out (shape_duty_r)
     );
 
-    // 整形后的最终占空比：同时送给 PWM 与串口（DL=/DR= 必须报真正到电机的值）
-    wire [10:0] track_duty_l = DUTY_SHAPE_EN ? shape_duty_l : loop_duty_l;
-    wire [10:0] track_duty_r = DUTY_SHAPE_EN ? shape_duty_r : loop_duty_r;
+    // 左右轮同比缩放，保留原 PID 输出的差速比例。避障状态 5～7 沿用独立占空比。
+    wire [10:0] raw_track_duty_l = DUTY_SHAPE_EN ? shape_duty_l : loop_duty_l;
+    wire [10:0] raw_track_duty_r = DUTY_SHAPE_EN ? shape_duty_r : loop_duty_r;
+    wire [17:0] track_product_l = raw_track_duty_l * TRACK_SPEED_PERCENT;
+    wire [17:0] track_product_r = raw_track_duty_r * TRACK_SPEED_PERCENT;
+    wire [10:0] track_duty_l = car_state >= 3'd5 ? raw_track_duty_l : track_product_l / 18'd100;
+    wire [10:0] track_duty_r = car_state >= 3'd5 ? raw_track_duty_r : track_product_r / 18'd100;
     wire [10:0] approach_duty_l, approach_duty_r, parking_duty_l, parking_duty_r;
     wire [10:0] final_duty_l = parking_owner ? parking_duty_l :
                               parking_done ? track_duty_l : approach_duty_l;
@@ -587,8 +595,8 @@ module FpgaCar #(
         .TICK_MS   (10),
         .DUTY_MAX  (1200),
         .BASE_DUTY (TRACK_BASE_DUTY),
-        .P_GAIN    (80),
-        .D_GAIN    (30),
+        .P_GAIN    (TRACK_P_GAIN),
+        .D_GAIN    (TRACK_D_GAIN),
         .I_SHIFT   (5),
         .I_LIMIT   (640),
         .TRIM      (-140)
@@ -825,7 +833,10 @@ module FpgaCar #(
             if (!parking_camera_ready) valid_frame_seen <= 0;
             else if (parking_frame_done) valid_frame_seen <= 1;
 
-        parking_approach approach (
+        parking_approach #(
+            .AFTER_P_PERCENT(PARK_AFTER_P_PERCENT),
+            .AFTER_CORNER_PERCENT(PARK_AFTER_CORNER_PERCENT)
+        ) approach (
             .clk(clk), .rst_n(sys_rst_n), .run_enable(run_enable && !rejoined),
             .parking_request(1'b1), .frame_done(parking_frame_done),
             .corner_seen(parking_corner), .pair_valid(parking_pair),
