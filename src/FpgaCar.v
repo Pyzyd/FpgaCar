@@ -722,7 +722,7 @@ module FpgaCar (
         .AVOID_TURN_IN_ARC_DEG (40),  // 40° = 1333 计数差（浅角回线）
         //   【v1.23 由 200mm 改 500mm】200mm 时车身还没完全超越方块就开始回切，
         //   车尾扫到方块；500mm 让整车越过障碍后再回切，仿真最小间隙 72mm。
-        .AVOID_PASS_MM    (300),     // BY_PASS 直线超越距离（每轮，v1.23）
+        .AVOID_PASS_MM    (150),     // BY_PASS 直线超越距离（每轮，v1.24b 由 300 减半）
         .AVOID_OUT_DUTY   (860),
         .AVOID_OUT_IN_DUTY(380),
         .AVOID_ALIGN_DUTY (840),

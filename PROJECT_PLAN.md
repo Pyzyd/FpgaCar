@@ -4571,7 +4571,7 @@ corr = TRIM + pos*P_GAIN + (i_acc>>I_SHIFT) + (pos-pos_d)*D_GAIN
 | `HDG_I_SHIFT` | — | **5** | 新增积分项，Ki≈1/32 |
 | `HDG_I_LIMIT` | — | **400** | 抗饱和上限 |
 | `AVOID_ARC_DEG` | 70 | 70 | 不变，出线弧横移靠它 |
-| `AVOID_PASS_MM` | 300 | 300 | 不变 |
+| `AVOID_PASS_MM` | 300 | **150** | 实车反馈 PASS 段太长，减半；仿真代价：KR/KL=1.00 最小间隙 72.1→44.1mm |
 
 ### 3.54.6 最终几何扫描结果（确认 TURN_IN=40° 不会增加擦块风险）
 

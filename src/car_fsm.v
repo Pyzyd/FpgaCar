@@ -168,7 +168,7 @@ module car_fsm #(
     //   即**两轮各自**都走满 AVOID_PASS_MM（不是两轮加起来）。200mm 时车身还没
     //   完全超越方块就开始回切，车尾扫到方块（几何仿真最小间隙 65.8mm，
     //   KR/KL=1.0 时只剩 65.8mm 且更小）；300mm 时升到 72.1mm，再往上收益饱和。
-    parameter integer AVOID_PASS_MM    = 300,  // BY_PASS 直线超越距离, mm（每轮）
+    parameter integer AVOID_PASS_MM    = 150,  // BY_PASS 直线超越距离, mm（每轮，v1.24b 由 300 减半）
     // 下面两条 *_MS 已降级为**超时上限**：编码器不出脉冲时（没装/线松）仍能
     // 走完动作，不会卡死在半路。正常有编码器时提前里程到了就切换。
     parameter integer AVOID_OUT_MS      = 2500, // 外摆弧超时上限
