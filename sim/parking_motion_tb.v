@@ -150,8 +150,34 @@ module parking_motion_tb;
         check(fault && !active, "stop if left encoder reports the wrong direction");
 
         begin_turn();
-        step_ms(902);
-        check(fault && !active, "stop if left encoder never moves");
+        step_ms(179);
+        check(status == 2 && duty_l == 300 && duty_r == 0,
+              "start the entry pivot at the original duty");
+        step_ms(1);
+        check(status == 2 && duty_l == 360 && duty_r == 0 && !forward_l,
+              "boost only the left wheel after 180 ms without progress");
+        pos_l = -23;
+        step_ms(2);
+        check(duty_l == 360, "keep boost through small encoder changes");
+        pos_l = -24;
+        step_ms(2);
+        check(duty_l == 300 && duty_r == 0, "restore original duty after 24 net counts");
+        pos_l = -500;
+        step_ms(1);
+        step_ms(179);
+        check(duty_l == 300, "watch renewed left wheel progress after it starts");
+        step_ms(1);
+        check(duty_l == 360 && duty_r == 0, "boost again if the wheel stalls partway through entry");
+        pos_l = -2940;
+        step_ms(2);
+        check(status == 2 && duty_l == 0 && duty_r == 0, "target angle overrides an active boost");
+
+        begin_turn();
+        step_ms(799);
+        check(!fault && duty_l == 360, "allow torque recovery before the entry stall timeout");
+        step_ms(2);
+        check(fault && !active && duty_l == 0 && duty_r == 0,
+              "stop if the wheel never moves even with boost");
 
         begin_reverse();
         pos_l = -2940 - 160;

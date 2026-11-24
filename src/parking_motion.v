@@ -58,6 +58,11 @@ module parking_motion #(
     localparam integer RETURN_MAX = TURN_COUNTS * 7 / 6;
     localparam integer WRONG_WAY_COUNTS = 36, START_COUNTS = 24;
     localparam integer PIVOT_DRIFT = 180, STRAIGHT_DRIFT = 300;
+    localparam integer ENTRY_BOOST_MS = 180, ENTRY_STALL_MS = 800;
+    localparam integer ENTRY_BOOST_RELEASE_COUNTS = 24;
+    localparam [11:0] ENTRY_BOOSTED_DUTY = {1'b0, PIVOT_DUTY} + 12'd60;
+    localparam [10:0] ENTRY_BOOST_DUTY = ENTRY_BOOSTED_DUTY > 1200 ?
+                                        11'd1200 : ENTRY_BOOSTED_DUTY[10:0];
     localparam signed [31:0] TRIM_LIMIT = 36;
     localparam signed [31:0] REVERSE_TRIM_LIMIT = 60, CATCH_GAP = 144, RESUME_GAP = 72;
     localparam [10:0] CATCH_DUTY = STRAIGHT_DUTY + REVERSE_TRIM_LIMIT;
@@ -94,6 +99,9 @@ module parking_motion #(
 
     wire signed [31:0] pivot_left = (state == ENTRY_TURN) ? -delta_l : delta_l;
     wire signed [31:0] pivot_yaw = (state == ENTRY_TURN) ? delta_r - delta_l : delta_l - delta_r;
+    wire entry_driving = state == ENTRY_TURN && PIVOT_DUTY != 0;
+    wire entry_boost = entry_driving && idle_l_ms >= ENTRY_BOOST_MS;
+    wire entry_stalled = entry_driving && idle_l_ms >= ENTRY_STALL_MS;
     wire pivot_failed = (elapsed_ms >= PIVOT_LIMIT_MS) ||
                         (pivot_left < -WRONG_WAY_COUNTS) ||
                         (delta_r > PIVOT_DRIFT) || (delta_r < -PIVOT_DRIFT) ||
@@ -107,6 +115,11 @@ module parking_motion #(
     wire reverse_done_r = (along_r >= REVERSE_COUNTS);
     wire brake_l = reverse_done_l || pause_l;
     wire brake_r = reverse_done_r || pause_r;
+    wire watch_reverse = state == REVERSE && next_state == REVERSE;
+    wire watch_entry = entry_driving && next_state == ENTRY_TURN;
+    wire signed [31:0] left_mileage = watch_entry ? pivot_left : along_l;
+    wire signed [31:0] left_progress_required =
+        entry_boost ? ENTRY_BOOST_RELEASE_COUNTS : PROGRESS_COUNTS;
     wire reverse_wrong_way = (along_l < -WRONG_WAY_COUNTS) || (along_r < -WRONG_WAY_COUNTS);
     wire reverse_stalled = (idle_l_ms >= REVERSE_STALL_MS) || (idle_r_ms >= REVERSE_STALL_MS);
     wire reverse_over_limit = (straight_error > REVERSE_DRIFT_LIMIT) ||
@@ -131,6 +144,7 @@ module parking_motion #(
                 ENTRY_TURN: begin
                     if (pivot_failed) next_state = FAULT;
                     else if (pivot_yaw >= ENTRY_BRAKE_COUNTS) next_state = ENTRY_BRAKE;
+                    else if (entry_stalled) next_state = FAULT;
                 end
                 ENTRY_BRAKE: if (elapsed_ms >= BRAKE_MS) next_state = REVERSE;
                 REVERSE: begin
@@ -205,32 +219,41 @@ module parking_motion #(
         end
     end
 
-    // 倒车起步时先约束领先轮。只有被要求转动却一直没有净进度的轮才判堵转。
+    // 入库转向与直倒共用左轮的净进度计时。转向补力后等到 24 个净计数再降回基础 PWM。
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            idle_l_ms <= 0;
+            last_progress_l <= 0;
+        end else if (!watch_entry && !watch_reverse) begin
+            idle_l_ms <= 0;
+            last_progress_l <= 0;
+        end else if (ms_tick) begin
+            if ((watch_reverse && brake_l) ||
+                left_mileage - last_progress_l >= left_progress_required) begin
+                idle_l_ms <= 0;
+                last_progress_l <= left_mileage;
+            end else if (idle_l_ms < (watch_entry ? ENTRY_STALL_MS : REVERSE_STALL_MS)) begin
+                idle_l_ms <= idle_l_ms + 1'b1;
+            end
+        end
+    end
+
+    // 直倒时约束领先轮，只监测仍有驱动指令的右轮。
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             pause_l <= 1'b0;
             pause_r <= 1'b0;
-            idle_l_ms <= 0;
             idle_r_ms <= 0;
-            last_progress_l <= 0;
             last_progress_r <= 0;
-        end else if (state != REVERSE || next_state != REVERSE) begin
+        end else if (!watch_reverse) begin
             pause_l <= 1'b0;
             pause_r <= 1'b0;
-            idle_l_ms <= 0;
             idle_r_ms <= 0;
-            last_progress_l <= 0;
             last_progress_r <= 0;
         end else if (ms_tick) begin
             pause_l <= (straight_error >= (pause_l ? RESUME_GAP : CATCH_GAP));
             pause_r <= (straight_error <= -(pause_r ? RESUME_GAP : CATCH_GAP));
 
-            if (brake_l || along_l - last_progress_l >= PROGRESS_COUNTS) begin
-                idle_l_ms <= 0;
-                last_progress_l <= along_l;
-            end else if (idle_l_ms < REVERSE_STALL_MS) begin
-                idle_l_ms <= idle_l_ms + 1'b1;
-            end
             if (brake_r || along_r - last_progress_r >= PROGRESS_COUNTS) begin
                 idle_r_ms <= 0;
                 last_progress_r <= along_r;
@@ -253,7 +276,7 @@ module parking_motion #(
                 ENTRY_TURN: begin
                     status = 3'd2;
                     forward_l = 1'b0;
-                    duty_l = PIVOT_DUTY;
+                    duty_l = entry_boost ? ENTRY_BOOST_DUTY : PIVOT_DUTY;
                 end
                 ENTRY_BRAKE: status = 3'd2;
                 REVERSE: begin

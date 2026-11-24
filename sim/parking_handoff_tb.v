@@ -137,10 +137,13 @@ module parking_handoff_tb;
         clocks(30);
         press_start();
         start_parking();
+        clocks(180);
+        check(dut.mr_duty == 360 && dut.ml_duty == 0 && in_a == 2'b11,
+              "entry stall boosts only physical left wheel and holds the right brake");
         k2 = 0;
         clocks(4);
         check({stand_by, pwm_a, pwm_b, in_a, in_b} == 0 && dut.panel_status == 2,
-              "K2 cuts both physical motor outputs during autonomous pivot");
+              "K2 cuts both physical motor outputs during boosted autonomous pivot");
         k2 = 1;
         clocks(30);
         check(!stand_by, "releasing K2 cannot continue the previous parking run");
