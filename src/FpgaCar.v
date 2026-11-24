@@ -37,7 +37,7 @@
 // =============================================================================
 `timescale 1ns/1ns
 
-// K1 开始这一轮时模拟已收到 P。找中点后只停车，用于低速标定。
+// K1 开始这一轮时模拟已收到 P，按视觉停车点触发一次自动入库。
 module FpgaCar #(
     parameter PARKING_DEBUG = 1'b1
 ) (
@@ -183,8 +183,15 @@ module FpgaCar #(
     wire              run_enable, clear_result;
     wire              parking_camera_ready, parking_frame_done, parking_corner, parking_pair;
     wire              parking_slow, parking_pair_seen, parking_brake, parking_stopped, parking_video_ready;
+    wire              parking_owner, parking_done, parking_fault;
+    wire              parking_motion_stopped, parking_forward_l, parking_forward_r;
+    wire [1:0]        parking_reverse_fault;
+    wire [2:0]        parking_status;
     wire              motion_rst_n = sys_rst_n && run_enable;
-    wire [2:0]        reported_state = (panel_status == 2'd2) ? 3'd4 : car_state;
+    wire              tracking_rst_n = motion_rst_n && !parking_owner;
+    wire              approach_brake = parking_brake && !parking_done;
+    wire [2:0]        reported_state = (panel_status == 2'd2 || parking_fault) ? 3'd4 :
+                                      parking_owner ? parking_status : car_state;
 
     // ------------------------------------------------------------------
     // 速度环（编码器闭环）
@@ -218,7 +225,8 @@ module FpgaCar #(
 
     // 整形器的 en 就是这个信号（停机/换相死区/非 RUN 时直通），
     // 所以必须在例化之前声明，否则 Verilog 会当成隐式 wire。
-    wire        motor_en = motion_rst_n && (PWM_BENCH_TEST || ctrl_en || parking_brake);
+    wire        motor_en = motion_rst_n && (parking_owner ? !parking_motion_stopped :
+                                            PWM_BENCH_TEST || ctrl_en || approach_brake);
 
     // ------------------------------------------------------------------
     // 差速幅度整形（duty_shaper）
@@ -269,7 +277,11 @@ module FpgaCar #(
     // 整形后的最终占空比：同时送给 PWM 与串口（DL=/DR= 必须报真正到电机的值）
     wire [10:0] track_duty_l = DUTY_SHAPE_EN ? shape_duty_l : loop_duty_l;
     wire [10:0] track_duty_r = DUTY_SHAPE_EN ? shape_duty_r : loop_duty_r;
-    wire [10:0] final_duty_l, final_duty_r;
+    wire [10:0] approach_duty_l, approach_duty_r, parking_duty_l, parking_duty_r;
+    wire [10:0] final_duty_l = parking_owner ? parking_duty_l :
+                              parking_done ? track_duty_l : approach_duty_l;
+    wire [10:0] final_duty_r = parking_owner ? parking_duty_r :
+                              parking_done ? track_duty_r : approach_duty_r;
 
     // ------------------------------------------------------------------
     // 【接线补偿】2026-11-23 驱动轮从距车头 30 mm 后移到 75 mm 之后，电机
@@ -346,7 +358,8 @@ module FpgaCar #(
     wire enc_ra_i = WHEEL_SWAP ? enc_la : enc_ra;
     wire enc_rb_i = WHEEL_SWAP ? enc_lb : enc_rb;
 
-    encoder_dec u_enc_l (
+    // 自动倒车复用独立动作版验证过的 10 us 编码器消抖，累计值的原始极性用于常规串口。
+    encoder_dec #(.STABLE_TICKS(PARKING_DEBUG ? 240 : 1)) u_enc_l (
         .clk       (clk),
         .rst_n     (sys_rst_n),
         .a         (enc_la_i),
@@ -356,7 +369,7 @@ module FpgaCar #(
         .position  (enc_l_pos)
     );
 
-    encoder_dec u_enc_r (
+    encoder_dec #(.STABLE_TICKS(PARKING_DEBUG ? 240 : 1)) u_enc_r (
         .clk       (clk),
         .rst_n     (sys_rst_n),
         .a         (enc_ra_i),
@@ -615,7 +628,8 @@ module FpgaCar #(
         .key_start_n    (key_start_n),
         .key_stop_n     (key_stop_n),
         .line_ready     (line_on && !line_lost && (!PARKING_DEBUG || parking_video_ready)),
-        .motion_stopped (parking_stopped || car_state == 3'd4 || (car_state == 3'd0 && line_lost)),
+        .motion_stopped (parking_owner ? parking_motion_stopped :
+                         !approach_brake && (car_state == 3'd4 || (car_state == 3'd0 && line_lost))),
         .run_enable     (run_enable),
         .clear_result   (clear_result),
         .status         (panel_status)
@@ -733,7 +747,7 @@ module FpgaCar #(
         .TURN_DIR_HOLD_MS (1500)
     ) u_car (
         .clk      (clk),
-        .rst_n    (motion_rst_n),
+        .rst_n    (tracking_rst_n),
         .on_line  (line_on),
         .lost     (line_lost),
         .obstacle (obstacle),
@@ -753,18 +767,22 @@ module FpgaCar #(
         .state    (car_state)
     );
 
-    // TB6612 方向脚：使能时才驱动，且 IN1/IN2 永不同时为 1（否则短路刹车）
+    // 停车控制器使能时，零占空比的车轮按独立动作版使用短路刹车。
     // 先按 WHEEL_SWAP 把逻辑轮的指令分配到物理通道（见 ml_duty 附近的接线补偿说明）
-    wire ch_l_dir = WHEEL_SWAP ? ctrl_dir_r : ctrl_dir_l;
-    wire ch_r_dir = WHEEL_SWAP ? ctrl_dir_l : ctrl_dir_r;
+    wire logical_l_dir = parking_owner ? parking_forward_l : ctrl_dir_l;
+    wire logical_r_dir = parking_owner ? parking_forward_r : ctrl_dir_r;
+    wire ch_l_dir = WHEEL_SWAP ? logical_r_dir : logical_l_dir;
+    wire ch_r_dir = WHEEL_SWAP ? logical_l_dir : logical_r_dir;
     // 再按 MOTOR_INVERT 取反极性。自测模式一律当「前进」，同样要跟着反。
     wire ch_l_fwd = (PWM_BENCH_TEST ? 1'b1 : ch_l_dir) ^ MOTOR_INVERT;
     wire ch_r_fwd = (PWM_BENCH_TEST ? 1'b1 : ch_r_dir) ^ MOTOR_INVERT;
 
-    assign ml_in1     = motor_en &  ch_l_fwd;
-    assign ml_in2     = motor_en & ~ch_l_fwd;
-    assign mr_in1     = motor_en &  ch_r_fwd;
-    assign mr_in2     = motor_en & ~ch_r_fwd;
+    wire ch_l_brake = (approach_brake || parking_owner) && (ml_duty == 0);
+    wire ch_r_brake = (approach_brake || parking_owner) && (mr_duty == 0);
+    assign ml_in1     = motor_en & ( ch_l_fwd || ch_l_brake);
+    assign ml_in2     = motor_en & (~ch_l_fwd || ch_l_brake);
+    assign mr_in1     = motor_en & ( ch_r_fwd || ch_r_brake);
+    assign mr_in2     = motor_en & (~ch_r_fwd || ch_r_brake);
     assign motor_stby = motor_en;
 
     // ------------------------------------------------------------------
@@ -784,8 +802,11 @@ module FpgaCar #(
         wire [15:0] scan_addr;
         wire [7:0] scan_gray;
         wire [9:0] center_x_sum;
-        reg valid_frame_seen;
+        wire action_following;
+        reg valid_frame_seen, rejoined;
         assign parking_video_ready = valid_frame_seen;
+        assign parking_owner = parking_stopped && !rejoined;
+        assign parking_done = rejoined;
 
         // 检测用独立缓冲，帧率不受 SPI 取景屏限制。
         ov5640_preview_frame #(.SAMPLE_LOG2(2), .ADDRESS_WIDTH(16)) garage_frame (
@@ -805,19 +826,47 @@ module FpgaCar #(
             else if (parking_frame_done) valid_frame_seen <= 1;
 
         parking_approach approach (
-            .clk(clk), .rst_n(sys_rst_n), .run_enable(run_enable),
+            .clk(clk), .rst_n(sys_rst_n), .run_enable(run_enable && !rejoined),
             .parking_request(1'b1), .frame_done(parking_frame_done),
             .corner_seen(parking_corner), .pair_valid(parking_pair),
             .center_x_sum(center_x_sum), .track_duty_l(track_duty_l), .track_duty_r(track_duty_r),
-            .duty_l(final_duty_l), .duty_r(final_duty_r),
+            .duty_l(approach_duty_l), .duty_r(approach_duty_r),
             .slow(parking_slow), .pair_seen(parking_pair_seen),
             .brake(parking_brake), .stopped(parking_stopped)
+        );
+
+        // 归线后恢复原循迹，直到下一次 K1 才重新启用视觉停车。
+        always @(posedge clk or negedge sys_rst_n)
+            if (!sys_rst_n) rejoined <= 0;
+            else if (!run_enable) rejoined <= 0;
+            else if (action_following) rejoined <= 1;
+
+        wire line_valid_for_parking = line_on && !line_lost && !line_wide;
+        wire line_centered_for_parking =
+            line_valid_for_parking && line_pos >= -5'sd1 && line_pos <= 5'sd1;
+        // 原始编码器前进为负。只在动作控制器入口转成前进为正。
+        wire signed [31:0] park_pos_l = -$signed(enc_l_pos);
+        wire signed [31:0] park_pos_r = -$signed(enc_r_pos);
+        parking_motion action (
+            .clk(clk), .rst_n(sys_rst_n && (!run_enable || parking_stopped)),
+            .run_enable(run_enable && parking_owner),
+            .position_l(park_pos_l), .position_r(park_pos_r), .line_seen(line_on),
+            .line_valid(line_valid_for_parking), .line_centered(line_centered_for_parking),
+            .follow_duty_l(11'd0), .follow_duty_r(11'd0),
+            .active(), .following(action_following), .stopped(parking_motion_stopped),
+            .fault(parking_fault), .reverse_fault(parking_reverse_fault), .status(parking_status),
+            .forward_l(parking_forward_l), .forward_r(parking_forward_r),
+            .duty_l(parking_duty_l), .duty_r(parking_duty_r)
         );
     end else begin : g_no_parking
         assign {parking_frame_done, parking_corner, parking_pair, parking_video_ready,
                 parking_slow, parking_pair_seen, parking_brake, parking_stopped} = 8'd0;
-        assign final_duty_l = track_duty_l;
-        assign final_duty_r = track_duty_r;
+        assign {parking_owner, parking_done, parking_fault, parking_motion_stopped} = 4'd0;
+        assign {parking_forward_l, parking_forward_r} = 2'b11;
+        assign {parking_reverse_fault, parking_status} = 5'd0;
+        assign {parking_duty_l, parking_duty_r} = 22'd0;
+        assign approach_duty_l = track_duty_l;
+        assign approach_duty_r = track_duty_r;
     end endgenerate
 
     generate
@@ -845,7 +894,10 @@ module FpgaCar #(
         wire        lcd_capture_ready = sys_rst_n && lcd_cfg_done;
         assign parking_camera_ready = lcd_capture_ready;
         wire park_guide = PARKING_DEBUG && (pv_x == 154 || pv_x == 166);
-        wire [15:0] park_status_color = (reported_state == 3'd4 || parking_brake) ? 16'hF800 :
+        wire [15:0] park_status_color = (reported_state == 3'd4 ||
+                                           (parking_owner && parking_status == 3'd1)) ? 16'hF800 :
+                                        parking_owner ? 16'h001F : approach_brake ? 16'hF800 :
+                                        parking_done ? 16'h07E0 :
                                         parking_pair_seen ? 16'h07FF :
                                         parking_slow ? 16'hFFE0 : 16'h0000;
         wire [15:0] pv_pixel = !pv_image_row ? park_status_color : park_guide ?
@@ -1200,8 +1252,8 @@ module FpgaCar #(
         .duty_l     (final_duty_l),
         .duty_r     (final_duty_r),
         .wide       (line_wide),
-        .turn_dir   (turn_dir),
-        .obstacle   (obstacle),
+        .turn_dir   (parking_fault ? parking_reverse_fault : turn_dir),
+        .obstacle   (PARKING_DEBUG ? parking_fault : obstacle),
         .state      (reported_state),
         .enc_l      (enc_l_pos),
         .enc_r      (enc_r_pos),
