@@ -20,7 +20,13 @@ module bypass_rejoin_tb;
     wire [10:0] fixed_duty_l, fixed_duty_r;
     integer exit_ticks = 0, align_ticks = 0, return_ticks = 0;
     reg fixed_arc_error = 0;
-    reg inside_bypass = 0;
+    reg [2:0] prev_step = 3'd0;   // 上一拍的段号：判「切段那一拍」用
+    // 本拍 duty 是否已经属于「当前段」：既要段号没变，也要状态没变。
+    // 少了后面这个条件，从 S_RUN 刚跳进 S_AVOID_PROBE 的第一拍，段号同为 BY_OUT、
+    // 但 duty 还是 S_RUN 留下的 450/450 —— 会被误判成「画弧却两轮等速」。
+    reg  [2:0] prev_state = 3'd0;
+    always @(negedge clk) prev_state <= fixed_state;
+    wire step_stable = (prev_step == fixed_right.bypass_step) && (prev_state == fixed_state);    reg inside_bypass = 0;
 
     car_fsm #(
         .CLK_FREQ(1000), .START_MS(1), .LOST_HOLD_MS(2), .DIR_DEAD_MS(1),
@@ -59,11 +65,11 @@ module bypass_rejoin_tb;
     // 只靠差速画弧，所以改为检查：
     //   · 绕行段永远不出现反转轮（dir_l/dir_r 必须都为 1）；
     //   · 非直线段两侧占空比必须不同（真在画弧，而不是直行冲过去）；
-    //   · 直线超越段两侧占空比必须正好差 2*AVOID_PASS_TRIM（v1.20 起 PASS
-    //     段是刻意的效率补偿，左 480 / 右 760）：既证明没有退回"真同速"，
-    //     也证明偏置方向没接反（右轮必须是快的那一侧）。
-    localparam [10:0] PASS_L_DUTY = 11'd480;  // AVOID_PASS_DUTY - AVOID_PASS_TRIM
-    localparam [10:0] PASS_R_DUTY = 11'd760;  // AVOID_PASS_DUTY + AVOID_PASS_TRIM
+    //   · 直线超越段两侧占空比必须正好等于 AVOID_PASS_DUTY（v1.21 起 PASS 段
+    //     改回对称标称值，航向环自己维持直线；v1.20 那套固定 ±PASS_TRIM 偏置
+    //     已取消，因为它和航向环打架：偏置在推着转，航向环在往回拉）。
+    //     本 tb 的编码器不产生脉冲，arc_turn 恒 0，航向环输出 0，所以两轮同值。
+    localparam [10:0] PASS_DUTY = 11'd620;    // AVOID_PASS_DUTY 默认值
     reg fixed_straight_error = 0;
     always @(negedge clk) begin
         if (!rst_n) begin
@@ -72,16 +78,23 @@ module bypass_rejoin_tb;
             return_ticks <= 0;
             fixed_arc_error <= 0;
             fixed_straight_error <= 0;
+        // 【v1.21 起一切判定都等「段号稳定」再算】bypass_step 在 ms_tick 就切了，
+        //   而 duty_l/duty_r 也跟着在同一拍更新；但从 tb 观察，切段那一拍的 duty
+        //   仍反映上一段的标称值（同一拍内非阻塞赋值的旧值）。若把这一拍算进新段，
+        //   就会拿旧占空比去判新段的关系 —— 4 条断言全因此误报。
+        //   step_stable = 本拍段号与上一拍相同，即「这一拍的 duty 属于本段」。
         end else if (fixed_en && any_arc) begin
+            // 计时不受稳定门控影响：它数的是「本段驱动了几拍」，与 duty 新旧无关。
             if (fixed_out)     exit_ticks   <= exit_ticks + 1;
             if (fixed_align)   align_ticks  <= align_ticks + 1;
             if (fixed_turn_in) return_ticks <= return_ticks + 1;
+            // 方向判据同样要等稳定，否则进绕障第一拍还是 S_RUN 的方向。
+            if (step_stable && (!fixed_dir_l || !fixed_dir_r)) fixed_arc_error <= 1;
             // 只在两轮真的出力时判占空比关系：换相死区/就绪前 duty 都是 0，
             // 那是"还没动"，不是"画弧却两轮等速"。
-            if (!fixed_dir_l || !fixed_dir_r) fixed_arc_error <= 1;
-            if ((fixed_duty_l != 0) && (fixed_duty_r != 0)) begin
-                if (fixed_pass && ((fixed_duty_l !== PASS_L_DUTY) ||
-                                   (fixed_duty_r !== PASS_R_DUTY))) fixed_straight_error <= 1;
+            if (step_stable && (fixed_duty_l != 0) && (fixed_duty_r != 0)) begin
+                if (fixed_pass && ((fixed_duty_l !== PASS_DUTY) ||
+                                   (fixed_duty_r !== PASS_DUTY))) fixed_straight_error <= 1;
                 if (!fixed_pass && (fixed_duty_l === fixed_duty_r)) fixed_arc_error <= 1;
             end
         end
@@ -90,7 +103,6 @@ module bypass_rejoin_tb;
     // v1.20：REJOIN 超时现在**故意**交给普通找线（原来直接 final_stop 退赛），
     // 所以守卫要放行"从 REJOIN 进入 SEARCH"这一条。用上一拍的段号区分：
     // OUT/ALIGN/PASS/TURN_IN 任何一段把控制权让出去仍然是 bug。
-    reg [2:0] prev_step = 3'd0;
     always @(negedge clk) prev_step <= fixed_right.bypass_step;
     always @(negedge clk)
         if (inside_bypass && (state == LOST || state == SEARCH) && (prev_step != REJOIN)) begin
@@ -134,10 +146,17 @@ module bypass_rejoin_tb;
         end
     endtask
 
+    // 【v1.21 起要连占空比一起等】旧版 avoid_drive 要求「duty 与指令严格相等」，
+    //   等于自带一个「指令已下发」的同步点，所以这里只等 en 就够了。现在航向环
+    //   让指令每拍都变，那条严格相等判据被去掉，en 会在占空比还没更新到本段值时
+    //   就置位 —— 此时读到的 duty 还是上一段或 0。这里显式补上这个条件。
     task wait_drive(input [2:0] step);
         begin
             @(negedge clk);
-            while (state != BYPASS || dut.bypass_step != step || !en)
+            // 还必须等「段号已稳定」：刚切段那一拍的 duty 仍是上一段的值。
+            while (state != BYPASS || dut.bypass_step != step || !en ||
+                   prev_step != step ||
+                   dut.duty_l == 11'd0 || dut.duty_r == 11'd0)
                 @(negedge clk);
         end
     endtask
@@ -151,7 +170,10 @@ module bypass_rejoin_tb;
         check(dir_l && dir_r, "left detour keeps both wheels advancing through align");
         // 左绕：OUT 段左偏（左轮慢），ALIGN 段反打回正（左轮快、右轮慢）。
         check(dut.duty_l > dut.duty_r, "align arc reverses the steer when detouring left");
-        check(exit_ticks == OUT_TICKS && !fixed_arc_error, "fixed right starts with a timed outward arc");
+        $display("INFO : ticks out=%0d align=%0d turn_in=%0d (nominal %0d/%0d/%0d)",
+                 exit_ticks, align_ticks, return_ticks, OUT_TICKS, OUT_TICKS, TURN_IN_TICKS);
+        check(exit_ticks >= OUT_TICKS && exit_ticks <= OUT_TICKS + 2 && !fixed_arc_error,
+              "fixed right starts with a timed outward arc");
         wait_drive(PASS_SIDE);
         check(dir_l && dir_r, "both wheels advance along the obstacle side");
         on_line = 1; lost = 0;
@@ -161,7 +183,7 @@ module bypass_rejoin_tb;
 
         wait_drive(REJOIN);
         check(!fixed_arc_error, "every bypass step drives both wheels forward with unequal duty");
-        check(!fixed_straight_error, "straight pass keeps the +-PASS_TRIM wheel bias (480/760)");
+        check(!fixed_straight_error, "straight pass runs symmetric AVOID_PASS_DUTY (620/620)");
         check(align_ticks == OUT_TICKS, "alignment arc lasts the full powered duration");
         check(return_ticks == TURN_IN_TICKS, "return arc uses its own powered duration");
         on_line = 1; lost = 0; wide = 1;

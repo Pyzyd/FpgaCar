@@ -94,6 +94,22 @@ module car_fsm #(
     parameter integer AVOID_TURN_IN_DUTY = 860,  // BY_TURN_IN 外侧快轮（反向弧切回线）
     parameter integer AVOID_TURN_IN_IN_DUTY = 420, // BY_TURN_IN 内侧慢轮
     parameter integer AVOID_REJOIN_IN_DUTY  = 430, // BY_REJOIN 内侧慢轮
+    // 【v1.21 航向闭环参数】只数里程差只能保证「转够了停」，画出来的弧半径仍由
+    //   两轮实际速度比决定；实车 duty→轮速 强非线性（同一 400/840 连发 12 帧，
+    //   实测轮速比 0.66~1.85 乱跳），所以必须把「转角」当被控量实时修正。
+    //   HDG_GAIN：每个计数误差（1 计数 ≈ 0.03°）折算多少占空比修正；
+    //   HDG_DEAD：死区，吃掉量化抖动；HDG_STEER_*：修正量上下限。
+    //   这些值只是让环「转得动、不抖」，最终精度由编码器差决定，不必精细标定。
+    parameter integer HDG_SHIFT      = 3,    // 误差右移位数：steer = err >>> SHIFT
+    // 【为什么是移位而不是乘法增益】每段起点的角度误差就是满量程（OUT/ALIGN 1999
+    //   计数、TURN_IN 3000 计数），乘法增益 2 会立刻顶到 ±600，把慢轮压到占空比 0，
+    //   等于原地打转 —— 那正是细则 4.3.2 禁止的动作。右移 3 位后起点修正量约
+    //   250（OUT）/ 375（TURN_IN），落在「明显加大差速但不压停」的区间。
+    parameter integer HDG_DEAD       = 10,   // 角度误差死区, 计数（≈0.30°）
+    parameter integer HDG_STEER_MAX  = 600,  // 差速修正上限
+    parameter integer HDG_STEER_MIN  = 60,   // 误差非零时的最小修正量
+    // 修正后单轮占空比的下限：低到 0 就成了枢轴原地转，必须留一点让它继续走。
+    parameter integer AVOID_MIN_DUTY = 120,  // 航向修正后单轮占空比下限
     // 【弧线段改为里程闭环】原来 OUT/ALIGN/PASS 都是按毫秒截断的，而同样的
     // 毫秒数在不同车速下转过的角度完全不同 —— 电池电压、地面摩擦、载重一变，
     // 弧就画歪，轻则回不了线，重则直接蹭上方块。改成数编码器后，两轮计数
@@ -281,9 +297,45 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     wire [31:0] arc_diff    = (arc_cnt_l > arc_cnt_r) ? (arc_cnt_l - arc_cnt_r)
                                                       : (arc_cnt_r - arc_cnt_l);
     wire [31:0] arc_sum     = arc_cnt_l + arc_cnt_r;
-    wire        arc_diff_done = (arc_diff >= ARC_DIFF_TARGET);
     wire        arc_sum_done  = (arc_sum  >= (PASS_SUM_TARGET * 2));
-    wire        turn_in_arc_done = (arc_diff >= TURN_IN_ARC_TARGET);
+
+    // ---------------- 航向闭环（v1.21）----------------
+    // 【为什么光有里程还不够】里程差只能保证「转够了就停」，但弧的半径完全由
+    //   两轮实际速度比决定，而实车 duty→轮速 强烈非线性（同一对 400/840 连发
+    //   12 帧，实测轮速比在 0.66~1.85 之间乱跳；duty=760 甚至比 840 更快）。
+    //   于是固定占空比画不出固定半径：run_avoid2 四次绕障净转角
+    //   +38°/+103°/−37°，终点跑到黑线半米外。
+    //   这里把「转角」当被控量：每毫秒用编码器差算出真实转角，与目标角比较，
+    //   误差实时换成两轮差速修正量叠在标称占空比上。转够即切段，转不动就自动
+    //   加大差速 —— 半径仍不确定，但每个拐点的绝对航向被钉住，误差不再跨段累积。
+    // 符号约定：右轮走得多 = 左转 = arc_turn 为正。两轮都正转时左轮慢就是左转。
+    wire signed [23:0] arc_turn = $signed({1'b0, arc_cnt_r[22:0]})
+                                - $signed({1'b0, arc_cnt_l[22:0]});
+    // 本段该往哪边转：OUT 朝绕行侧，ALIGN / TURN_IN 反打回来（与占空比选择同源）。
+    wire        hdg_left_go   = (bypass_step == BY_OUT) ? avoid_left : !avoid_left;
+    // 本段目标转角：TURN_IN 用自己那条；PASS 是「保持航向」；其余 ARC_DIFF_TARGET。
+    wire [23:0] hdg_mag       = (bypass_step == BY_TURN_IN) ? TURN_IN_ARC_TARGET :
+                                (bypass_step == BY_PASS)    ? 24'd0 :
+                                                              ARC_DIFF_TARGET;
+    wire signed [23:0] hdg_target = hdg_left_go ?  $signed({1'b0, hdg_mag})
+                                                : -$signed({1'b0, hdg_mag});
+    wire signed [23:0] hdg_err    = hdg_target - arc_turn;
+    // 【到位判据必须带符号】原来 arc_diff 取了绝对值，往反方向转同样多计数也会
+    //   被判成「到位」——run_avoid2 的 ALIGN 反打 36° 就是这样被接受的。
+    wire        arc_diff_done    = hdg_left_go ? (arc_turn >=  ARC_DIFF_TARGET)
+                                               : (arc_turn <= -ARC_DIFF_TARGET);
+    wire        turn_in_arc_done = hdg_left_go ? (arc_turn >=  TURN_IN_ARC_TARGET)
+                                               : (arc_turn <= -TURN_IN_ARC_TARGET);
+    // 角度误差 → 差速修正量。死区吃掉量化抖动；饱和与最小修正量保证末段不掉速。
+    wire signed [23:0] hdg_err_dz = (hdg_err >  HDG_DEAD) ? (hdg_err - HDG_DEAD) :
+                                    (hdg_err < -HDG_DEAD) ? (hdg_err + HDG_DEAD) : 24'sd0;
+    // 算术右移：hdg_err_dz 是 signed，>>> 保留符号，等价于整除 2^HDG_SHIFT。
+    wire signed [23:0] hdg_p      = hdg_err_dz >>> HDG_SHIFT;
+    wire signed [23:0] hdg_steer  = (hdg_p >  HDG_STEER_MAX) ?  HDG_STEER_MAX :
+                                    (hdg_p < -HDG_STEER_MAX) ? -HDG_STEER_MAX :
+                                    (hdg_err_dz > 0 && hdg_p <  HDG_STEER_MIN) ?  HDG_STEER_MIN :
+                                    (hdg_err_dz < 0 && hdg_p > -HDG_STEER_MIN) ? -HDG_STEER_MIN :
+                                                                                  hdg_p;
     // 本段内是否真的收到过脉冲：收到就说明编码器在线，超时值可以放宽成纯兜底；
     // 一个都没有就说明没装/线松，此时 *_MS 仍是真实弧长，不能放大。
     wire        arc_enc_alive = (arc_cnt_l != 32'd0) || (arc_cnt_r != 32'd0);
@@ -352,25 +404,51 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     // 【必须区分侧绕与老三段】bypass_step 只在 bypass_active 时有效；AVOID_ROUTE_EN=0
     // 时它恒为 BY_OUT，若直接拿它选弧线占空比，老三段的"试探前进"会跑成 860/380，
     // 与 AVOID_PROBE_DUTY 不等 → avoid_drive 永不成立 → en 不置位 → 状态机卡死。
-    wire [10:0] avoid_duty_l = avoid_backing ? AVOID_BACK_DUTY[10:0] :
+    // (1) 标称占空比：只决定「大概多快、往哪边」，不再承担确定几何的责任。
+    wire [10:0] avoid_duty_l_nom = avoid_backing ? AVOID_BACK_DUTY[10:0] :
                                avoid_pivot   ? AVOID_TURN_DUTY[10:0] :
                                !bypass_active ? AVOID_PROBE_DUTY[10:0] :
-                               bypass_straight ? AVOID_PASS_L_DUTY[10:0] :
+                               bypass_straight ? AVOID_PASS_DUTY[10:0] :
                                bypass_arc_left ? bypass_inner : bypass_outer;
-    wire [10:0] avoid_duty_r = avoid_backing ? AVOID_BACK_DUTY[10:0] :
+    wire [10:0] avoid_duty_r_nom = avoid_backing ? AVOID_BACK_DUTY[10:0] :
                                avoid_pivot   ? AVOID_TURN_DUTY[10:0] :
                                !bypass_active ? AVOID_PROBE_DUTY[10:0] :
-                               bypass_straight ? AVOID_PASS_R_DUTY[10:0] :
+                               bypass_straight ? AVOID_PASS_DUTY[10:0] :
                                bypass_arc_left ? bypass_outer : bypass_inner;
+
+    // (2) 航向修正量叠在标称值上：hdg_steer>0 = 还差左转 → 左轮减、右轮加。
+    //   从此「画弧半径」由闭环自己收敛，不再依赖 duty→轮速 这个坏掉的静态映射。
+    //   BY_REJOIN 不参与：它是短距离摆正 + 扫线，目标角没有明确值，保持原样即可。
+    wire        hdg_apply = bypass_active && !avoid_pivot && (bypass_step != BY_REJOIN);
+    wire signed [23:0] avoid_l_s = $signed({13'd0, avoid_duty_l_nom})
+                                 - (hdg_apply ? hdg_steer : 24'sd0);
+    wire signed [23:0] avoid_r_s = $signed({13'd0, avoid_duty_r_nom})
+                                 + (hdg_apply ? hdg_steer : 24'sd0);
+    // 钳到合法区间：上限 DUTY_MAX=1200；下限不是 0 而是 AVOID_MIN_DUTY=120。
+    // 【下限为什么不能是 0】TURN_IN 起点误差就是满量程 3000 计数，右移 3 位 = 375，
+    //   叠在标称内轮 420 上算出来只剩 45 —— 内侧轮几乎不动，等于原地打转，正是
+    //   细则 4.3.2 禁止的动作。留 120 的下限保证该轮仍在转、车走的是弧而不是枢轴。
+    //   代价是极限情况下修正量被截断，但它只在段首 1~2 ms 出现，编码器一累计就回落。
+    wire [10:0] avoid_duty_l = (avoid_l_s <= AVOID_MIN_DUTY) ? AVOID_MIN_DUTY[10:0] :
+                               (avoid_l_s >= 24'sd1200)      ? 11'd1200 : avoid_l_s[10:0];
+    wire [10:0] avoid_duty_r = (avoid_r_s <= AVOID_MIN_DUTY) ? AVOID_MIN_DUTY[10:0] :
+                               (avoid_r_s >= 24'sd1200)      ? 11'd1200 : avoid_r_s[10:0];
 
     // 弧线段两轮都正转；后退段两轮都反转；只有老的三段试探里的原地转才一正一反。
     wire avoid_dir_l = avoid_backing ? 1'b0 : avoid_pivot ? !avoid_turn_left : 1'b1;
     wire avoid_dir_r = avoid_backing ? 1'b0 : avoid_pivot ?  avoid_turn_left : 1'b1;
 
-    // 每段只在死区结束、两轮方向和占空比就绪后计时。
+    // 每段只在死区结束、两轮方向就绪后计时。
     wire avoid_dirs_ready = !dead && !bypass_blocked &&
                             (dir_l == avoid_dir_l) && (dir_r == avoid_dir_r);
-    wire avoid_drive = avoid_dirs_ready && (duty_l == avoid_duty_l) && (duty_r == avoid_duty_r);
+    // 【v1.21 改掉「占空比严格相等」这个就绪判据】
+    //   原判据是 duty_l == avoid_duty_l && duty_r == avoid_duty_r，本意是「指令已真正
+    //   下发到电机，再开始数编码器」。一旦占空比带航向修正，它每拍都在变，而
+    //   duty_l/duty_r 只在 ms_tick 才更新 → 比较几乎每个周期都不成立 → avoid_drive
+    //   抖成 0 → en 抖成 0 → 弧线计数与 ms_cnt 全部停走（状态机就此卡死）。
+    //   现在「就绪」只表示方向对、不在换相死区。指令与应用的 1 拍滞后（约 42 ns）
+    //   对编码器计数的影响远小于 1 个脉冲，可以忽略。
+    wire avoid_drive = avoid_dirs_ready;
 
     wire en_run = (state == S_RUN)   || (state == S_LOST)     || (state == S_SEARCH)
                || avoid_active;
