@@ -34,6 +34,8 @@
         <efx:design_file name="src/oled_driver.v" version="default" library="default" />
         <efx:design_file name="src/st7789_panel.v" version="default" library="default" />
         <efx:design_file name="src/ov5640_preview_frame.v" version="default" library="default" />
+        <efx:design_file name="src/garage_corner_scan.v" version="default" library="default" />
+        <efx:design_file name="src/parking_approach.v" version="default" library="default" />
         <efx:design_file name="src/duty_shaper.v" version="default" library="default" />
         <efx:top_vhdl_arch name="" />
         <efx:msg_config name="" />

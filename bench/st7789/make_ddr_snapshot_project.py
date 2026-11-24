@@ -7,7 +7,7 @@ import re
 import shutil
 import xml.etree.ElementTree as ET
 
-from make_project import BASE_PINS, CAMERA_PINS, HERE, INTERFACE, PROJECT, ROOT, write_xml
+from make_project import BASE_PINS, CAMERA_PINS, HERE, INTERFACE, LCD_PINS, PROJECT, ROOT, write_xml
 
 
 NAME = "Ov5640DdrSnapshot"
@@ -19,7 +19,8 @@ DDR_CLOCKS = {"tdqss_clk", "core_clk", "tac_clk", "twd_clk", "clk_sys"}
 SOURCES = [
     HERE / source for source in
     (NAME + ".v", "ov5640_photo_capture.v", "ov5640_photo_fifo.v",
-     "ov5640_photo_store.v", "ov5640_uart_snapshot.v")
+     "ov5640_photo_store.v", "ov5640_uart_snapshot.v",
+     "ov5640_album_preview.v", "ov5640_preview_frame.v", "St7789Bench.v")
 ] + [
     ROOT / "src" / source for source in
     ("cam_probe.v", "cam_sccb_cfg.v", "i2c_timing_ctrl_16bit.v",
@@ -70,8 +71,21 @@ def generate(destination, vendor):
             if name == "cmos_xclk":
                 pin.find(q + "output_config").set("clock_name", "clk_24m")
             gpio.insert(list(gpio).index(unused_gpio), pin)
+            used_balls.add(ball)
     if missing := APP_PINS - new_pins:
         raise ValueError(f"Bench pin definitions missing: {sorted(missing)}")
+
+    # Use the same carrier-level P4 outputs as the standalone LCD bench.
+    pwm_pin = gpio.find(f"{q}comp_gpio[@name='ml_pwm']")
+    for signal, ball in LCD_PINS.items():
+        if ball in used_balls:
+            raise ValueError(f"LCD pin collision at {signal} ({ball})")
+        pin = deepcopy(pwm_pin)
+        pin.set("name", signal)
+        pin.set("gpio_def", ball)
+        pin.find(q + "output_config").set("name", signal)
+        gpio.insert(list(gpio).index(unused_gpio), pin)
+        used_balls.add(ball)
 
     pll = peri.find(q + "pll_info")
     for entry in list(pll):

@@ -124,9 +124,12 @@ python tools/ov5640_capture.py COM12 data/ov5640_capture/turn_point.png
 按旧模板直接生成会报 `Missing Ti60 board pins: ['rst_n']`。现在自适应，两种底板都能生成。
 按 K1 即复位 bench（bench 不跑车，只是重新初始化屏幕和摄像头）。
 
-## K1 拍照与电脑相册（720p）
+## 2.4 寸取景、K1 拍照与电脑相册
 
 独立工程 `Ov5640DdrSnapshot` 将 OV5640 配置为 1280×720，每张保存 900 KiB 原始灰度像素。
+ST7789 沿用上文 P4 接线。屏幕横置，用同一帧流每 8×8 像素取一个样本，再放大成 320×180，
+上下各留 30 像素黑边。SPI 为 3 MHz，约每半秒刷新。屏幕先显示彩条，收到有效后摄帧后切换到灰度取景。
+取景使用独立的小帧缓存。短按 K1 仍保存完整 1280×720 照片，串口导出期间也可以继续看取景。
 板载 DDR3 可保存 **64 张**，编号按拍摄顺序从 01 到 64。拍满后保留这 64 张，K1 暂停接收。
 坏帧不会入册或占用编号。拍摄时可以拔掉电脑串口，保持 Ti60 供电。重新下载位流或断电会清空相册。
 
@@ -171,6 +174,8 @@ iverilog -g2012 -s St7789Bench_tb -o .scratch/st7789.vvp bench/st7789/St7789Benc
 vvp .scratch/st7789.vvp
 iverilog -g2012 -s ov5640_preview_frame_tb -o .scratch/preview.vvp bench/st7789/ov5640_preview_frame.v bench/st7789/ov5640_preview_frame_tb.v
 vvp .scratch/preview.vvp
+iverilog -g2012 -s ov5640_album_preview_tb -o .scratch/album_preview.vvp bench/st7789/ov5640_album_preview_tb.v bench/st7789/ov5640_album_preview.v bench/st7789/ov5640_preview_frame.v bench/st7789/St7789Bench.v
+vvp .scratch/album_preview.vvp
 iverilog -g2012 -s ov5640_uart_snapshot_tb -o .scratch/snapshot.vvp bench/st7789/ov5640_uart_snapshot_tb.v bench/st7789/ov5640_uart_snapshot.v bench/st7789/ov5640_preview_frame.v src/uart_tx.v
 vvp .scratch/snapshot.vvp
 iverilog -g2012 -s ov5640_ddr_snapshot_tb -o .scratch/snapshot720.vvp bench/st7789/ov5640_ddr_snapshot_tb.v bench/st7789/ov5640_photo_capture.v bench/st7789/ov5640_photo_fifo.v bench/st7789/ov5640_photo_store.v bench/st7789/ov5640_uart_snapshot.v src/uart_tx.v
