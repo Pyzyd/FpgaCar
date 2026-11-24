@@ -12,24 +12,24 @@
   analyze --csv F [--turns N]    切出运动段，报 dL/dR，反推每圈计数与减速比
   speed   --sec N                统计 (DL,DR) → (VL,VR)，算 duty→车速常数 K
   dist    --sec N                打印 D= / O= 的变化沿（测超声滞回）
-  avoid   --sec N                打印 M= 状态迁移（测状态机时序）
+  avoid   --sec N                打印 M=、B= 状态迁移（测状态机时序）
 
 标定常数（换轮/换编码器改这里，与 src/FpgaCar.v 保持一致）
-  ENC_CNT_PER_REV = 3840   20 线四倍频 80 × 减速 48
-  WHEEL_CIRC_MM   = 232
-  WHEEL_BASE_MM   = 160
+  ENC_CNT_PER_REV = 2532
+  WHEEL_CIRC_MM   = 212
+  WHEEL_BASE_MM   = 164
 """
 import sys, time, re, os, argparse
 import serial
 from serial.tools import list_ports
 
-ENC_CNT_PER_REV = 3840
-WHEEL_CIRC_MM = 232.0
-WHEEL_BASE_MM = 160.0
+ENC_CNT_PER_REV = 2532
+WHEEL_CIRC_MM = 212.0
+WHEEL_BASE_MM = 164.0
 WIN_S = 0.050
 DUTY_MAX = 1200
 COLS = ["t", "L", "R", "VL", "VR", "DL", "DR", "M", "D", "O",
-        "X", "T", "P", "C", "W", "S"]
+        "X", "T", "P", "C", "W", "S", "B"]
 
 
 def ports():
@@ -237,6 +237,9 @@ def cmd_dist(a):
 
 STATE = {"00": "IDLE", "01": "RUN", "02": "LOST", "03": "SEARCH", "04": "STOP",
          "05": "AVOID_BACK", "06": "AVOID_TURN", "07": "AVOID_PROBE"}
+BYPASS = {"1": "APPROACH", "2": "SETTLE", "3": "OUT_RIGHT", "4": "ALIGN_LEFT",
+          "5": "PASS", "6": "MERGE_LEFT", "7": "ALIGN_RIGHT", "8": "FIND_LINE",
+          "9": "COMPLETE", "F": "FAILED"}
 
 
 def cmd_avoid(a):
@@ -247,6 +250,7 @@ def cmd_avoid(a):
         m = f.get("M")
         if m is None:
             continue
+        phase = f.get("B")
         if t0 is None:
             t0 = t
         try:
@@ -254,11 +258,12 @@ def cmd_avoid(a):
             dr = int(f.get("DR", "0") or "0", 16)
         except Exception:
             dl = dr = -1
-        if prev != m:
-            print("t=%6.3f  M=%s %-11s D=%s O=%s DL=%4d DR=%4d VL=%s VR=%s"
-                  % (t - t0, m, STATE.get(m, "?"), f.get("D"), f.get("O"),
+        if prev != (m, phase):
+            name = BYPASS.get(phase, STATE.get(m, "?"))
+            print("t=%6.3f  M=%s B=%s %-11s D=%s O=%s DL=%4d DR=%4d VL=%s VR=%s"
+                  % (t - t0, m, phase or "-", name, f.get("D"), f.get("O"),
                      dl, dr, f.get("VL"), f.get("VR")))
-            prev = m
+            prev = (m, phase)
     ser.close()
 
 

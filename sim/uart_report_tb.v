@@ -55,6 +55,7 @@ module uart_report_tb;
         .corr(corr), .duty_l(duty_l), .duty_r(duty_r),
         .wide(wide),
         .turn_dir(turn_dir),
+        .bypass_phase(4'd0),
         .obstacle(obstacle),
         .state(state), .enc_l(enc_l), .enc_r(enc_r),
         .spd_l(spd_l), .spd_r(spd_r),

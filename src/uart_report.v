@@ -50,7 +50,8 @@
 module uart_report #(
     parameter integer CLK_FREQ  = 24_000_000,
     parameter integer BAUD      = 115_200,
-    parameter integer REPORT_EN = 1          // 0 = 不输出
+    parameter integer REPORT_EN = 1,         // 0 = 不输出
+    parameter integer BYPASS_TELEMETRY = 0
 ) (
     input  wire        clk,
     input  wire        rst_n,      // 低有效（已同步化）
@@ -64,6 +65,7 @@ module uart_report #(
     input  wire [10:0] duty_r,          // 实际下发占空比右（DR=）
     input  wire        wide,       // 宽黑标志（影子防护，W=）
     input  wire [1:0]  turn_dir,   // 最近一次转向方向（0 无 / 1 左 / 2 右，S=）
+    input  wire [3:0]  bypass_phase, // B= 绕行步骤（可选）
     input  wire        obstacle,   // 障碍标志
     input  wire [2:0]  state,      // 状态机状态（M=）
     input  wire [31:0] enc_l,      // 左编码器累计（二补码）
@@ -74,7 +76,7 @@ module uart_report #(
 );
 
     localparam integer MSG_LEN  = 35;   // 第一行：D=/T=/P=/O=/M=
-    localparam integer MSG2_LEN = 79;   // 第二行：L=/R=/VL=/VR=/X=/C=/DL=/DR=/W=/S=
+    localparam integer MSG2_LEN = BYPASS_TELEMETRY ? 83 : 79;
 
     // ------------------------------------------------------------------
     // 无符号除以 10（移位-减法，10 次迭代，纯组合）
@@ -128,7 +130,7 @@ module uart_report #(
     // 报文组装
     // ------------------------------------------------------------------
     reg  [7:0]  msg  [0:MSG_LEN-1];
-    reg  [7:0]  msg2 [0:MSG2_LEN-1];
+    reg  [7:0]  msg2 [0:82];
     reg  [6:0]  idx;        // 7 位：MSG_LEN=35，6 位够用，但保持 7 位与历史一致
     reg  [6:0]  idx2;       // 第二行游标（0..MSG2_LEN-1，当前 0..78）
 
@@ -141,6 +143,7 @@ module uart_report #(
     reg  signed [4:0] pz;    // 锁存的位置
     reg         wid;         // 锁存的宽黑标志
     reg  [1:0]  td;          // 锁存的转向方向（S=）
+    reg  [3:0]  bp;
     reg         obst;        // 锁存的障碍标志
     reg  [2:0]  st;          // 锁存的状态
     reg  [31:0] el, er;      // 锁存的编码器里程
@@ -197,6 +200,7 @@ module uart_report #(
             pz       <= 5'sd0;
             wid      <= 1'b0;
             td       <= 2'd0;
+            bp       <= 4'd0;
             obst     <= 1'b0;
             st       <= 3'd0;
             el       <= 32'd0;
@@ -225,6 +229,7 @@ module uart_report #(
                 pz   <= pos;
                 wid  <= wide;
                 td   <= turn_dir;
+                bp   <= bypass_phase;
                 obst <= obstacle;
                 st   <= state;
                 el   <= enc_l;
@@ -401,8 +406,12 @@ module uart_report #(
         msg2[74] = 8'h53;                                  // 'S'
         msg2[75] = 8'h3D;
         msg2[76] = (td == 2'd0) ? 8'h30 : ((td == 2'd1) ? 8'h31 : 8'h32);
-        msg2[77] = 8'h0D;
-        msg2[78] = 8'h0A;
+        msg2[77] = BYPASS_TELEMETRY ? 8'h20 : 8'h0D;
+        msg2[78] = BYPASS_TELEMETRY ? 8'h42 : 8'h0A;
+        msg2[79] = 8'h3D;
+        msg2[80] = hexd(bp);
+        msg2[81] = 8'h0D;
+        msg2[82] = 8'h0A;
     end
 
 endmodule

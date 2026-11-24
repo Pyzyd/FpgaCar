@@ -215,6 +215,22 @@ module FpgaCar_tb;
             $display("PASS: K1 starts the on-line car");
         else $display("FAIL: K1 did not start the on-line car");
 
+        // 给顶层送入三次近距结果，确认触发的是新绕行控制器和正确的前进极性。
+        @(negedge clk);
+        force u_dut.dist_cm = 16'd23;
+        force u_dut.dist_valid = 1'b1;
+        repeat (3) @(negedge clk);
+        release u_dut.dist_cm;
+        release u_dut.dist_valid;
+        force u_dut.u_bypass.tick_ms = 1'b1;
+        repeat (130) @(negedge clk);
+        if (u_dut.reported_state == 3'd7 && u_dut.bypass_phase == 4'd3 && motor_stby &&
+            {ml_in1, ml_in2, mr_in1, mr_in2} == 4'b0101 &&
+            u_dut.final_duty_l > u_dut.final_duty_r && u_dut.car_state == 0)
+            $display("PASS: obstacle selects new route, physical B wheel faster, both forward");
+        else $display("FAIL: obstacle did not send the new right arc to motor outputs");
+        release u_dut.u_bypass.tick_ms;
+
         @(negedge clk); force u_dut.k_color = 4'd2;
         @(negedge clk); release u_dut.k_color;
         key_stop_n = 1'b0;
