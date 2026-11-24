@@ -5,7 +5,7 @@
 // 【输出】左右轮占空比差动：pos>0（线在右）→ 右转 → 左轮快、右轮慢。
 //
 // 【为什么要定点而不是浮点】FPGA 上没有浮点；这里全部用整数 + 移位：
-//   corr = pos*P_GAIN + (i_acc >> I_SHIFT) + (pos-pos_d)*D_GAIN
+//   corr = TRIM + pos*P_GAIN + (i_acc >> I_SHIFT) + (pos-pos_d)*D_GAIN
 //   duty_l = BASE + corr,  duty_r = BASE - corr,  corr 限制在 ±BASE
 // 这样 duty 永远落在 0..2*BASE，两轮都不会出现负占空比（反向由 car_fsm 负责）。
 //
@@ -14,6 +14,17 @@
 //
 // 【为什么丢线时保持而不是清零】丢线瞬间清 corr 会让车立刻回正直行，通常直接
 // 冲出赛道；保持最后一刻的转向更接近人工操作，car_fsm 会在保持超时后进入找线。
+//
+// 【TRIM 前馈：为什么必须有】本车的两个电机/轮系效率不相等（实测右轮约只有
+// 左轮的 0.55，见 PROJECT_PLAN §3.50）。差速车要跑直线，并不是"两轮占空比相等"，
+// 而是"两轮线速度相等"，对 K_R≈0.55·K_L 就必须让右轮占空比高约 1.82 倍：
+//   K_L·(BASE+c) = K_R·(BASE-c)  →  c = -BASE·(1-0.55)/(1+0.55) ≈ -140
+// 这 140 的偏置原来想让积分自己去凑，但 I_LIMIT>>I_SHIFT 只有 20 的权限，
+// 而且积分每拍只加 pos（±1 量级），要从 0 爬到 140 需要几千拍 —— 实际上永远
+// 爬不上去。结果是控制器只能靠"故意把 pos 停在 -1"这种偏置去凑出 -120，
+// C= 就僵在 -140 附近，pos 一跳到 -3 就变成 -380，工作点卡在悬崖边上。
+// 把这段静态偏置做成前馈 TRIM，积分就只剩"补残差"的活，可以被清干净。
+// 实车上板后如果发现直道仍朝一侧偏，就先调 TRIM（±40 以内），再动 P/D。
 // =============================================================================
 `timescale 1ns/1ns
 
@@ -26,7 +37,8 @@ module track_pid #(
     parameter integer P_GAIN     = 72,        // 比例：pos=7 → 504 计数（42% duty）
     parameter integer D_GAIN     = 40,        // 微分：pos 突变 1 格 → 40 计数
     parameter integer I_SHIFT    = 5,         // 积分右移（相当于 Ki = 1/32）
-    parameter integer I_LIMIT    = 640         // 积分累加上限（抗饱和）
+    parameter integer I_LIMIT    = 640,        // 积分累加上限（抗饱和）
+    parameter integer TRIM       = 0           // 前馈偏置（抵消两轮效率差，见文件头）
 ) (
     input  wire              clk,
     input  wire              rst_n,
@@ -65,11 +77,16 @@ module track_pid #(
                                (err - {{11{pos_d[4]}}, pos_d});
 
     // 各项（全部 16 位有符号）
+    //  f_term 是前馈偏置：整数赋给 16 位 signed wire 会自动符号扩展，
+    //  TRIM=-140 得到 16'shFF74，与 p/i/d 直接相加即可。
+    wire signed [15:0] f_term = TRIM;
     wire signed [15:0] p_term = err   * P_GAIN;
     wire signed [15:0] d_term = err_d * D_GAIN;
     wire signed [15:0] i_term = i_acc >>> I_SHIFT;
 
-    wire signed [15:0] sum_raw = p_term + i_term + d_term;
+    // 前馈放在钳位之前：这样 TRIM 占掉的那部分量程不会再被 ±BASE 削掉，
+    // 单侧最大修正仍是 BASE（dl 最极端为 0，dr 最极端为 2*BASE）。
+    wire signed [15:0] sum_raw = f_term + p_term + i_term + d_term;
 
     // 限幅到 ±BASE_DUTY：保证 duty_l/duty_r 落在 0..DUTY_MAX
     wire signed [15:0] lim_pos = BASE_DUTY;

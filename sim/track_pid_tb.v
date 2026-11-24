@@ -38,6 +38,31 @@ module track_pid_tb;
         .duty_l (duty_l), .duty_r (duty_r), .corr (corr)
     );
 
+    // ---- 第二个实例：专门验证新增的前馈 TRIM（TRIM 只影响本实例，不影响上面 6 条）----
+    // 期望：pos=0 且积分收敛后 corr = TRIM = -140，即 duty_l = 600-140 = 460、
+    // duty_r = 600+140 = 740 —— 右轮更快，正好抵消「右轮约只有左轮 0.55」的不对称。
+    reg               en2 = 1'b0;
+    reg signed [4:0]  pos2 = 5'sd0;
+    reg               lost2 = 1'b0;
+    wire [10:0]        duty_l2, duty_r2;
+    wire signed [10:0] corr2;
+
+    track_pid #(
+        .CLK_FREQ  (24_000_000),
+        .TICK_MS   (1),
+        .DUTY_MAX  (1200),
+        .BASE_DUTY (600),
+        .P_GAIN    (80),
+        .D_GAIN    (30),
+        .I_SHIFT   (5),
+        .I_LIMIT   (640),
+        .TRIM      (-140)
+    ) u_trim (
+        .clk (clk), .rst_n (rst_n), .en (en2),
+        .pos (pos2), .on_line (1'b1), .lost (lost2),
+        .duty_l (duty_l2), .duty_r (duty_r2), .corr (corr2)
+    );
+
     task wait_ticks (input integer n);
         begin
             repeat (n * 24000) @(posedge clk);
@@ -128,12 +153,38 @@ module track_pid_tb;
         else
             $display("FAIL: en=0 -> duty %0d/%0d corr=%0d", duty_l, duty_r, corr);
 
+        // ---- 7) TRIM 前馈 ----
+        // pos 恒 0、积分稳态收敛后，corr 必须等于 TRIM 而不是 0。
+        en2 = 1'b1; pos2 = 5'sd0; lost2 = 1'b0;
+        wait_ticks(5);
+        if (duty_l2 == 11'd460 && duty_r2 == 11'd740 && corr2 == -11'sd140)
+            $display("PASS: TRIM=-140 -> duty %0d/%0d corr=%0d", duty_l2, duty_r2, corr2);
+        else
+            $display("FAIL: TRIM=-140 -> duty %0d/%0d corr=%0d (expect 460/740,-140)",
+                     duty_l2, duty_r2, corr2);
+
+        // ---- 7b) TRIM 与 P 项叠加且仍被 ±BASE 钳位 ----
+        // TRIM(-140) + P(7*80=560) + 少量积分(几拍里积了 42 计数 -> i_term 1~2)
+        // 落在 419~422 之间，用区间断言避免把拍数算死。
+        pos2 = 5'sd7;
+        wait_ticks(6);
+        if (corr2 > 11'sd400 && corr2 < 11'sd460)
+            $display("PASS: TRIM+P -> corr=%0d (expect ~420)", corr2);
+        else
+            $display("FAIL: TRIM+P -> corr=%0d (expect 400<corr<460)", corr2);
+
+        pos2 = 5'sd7; wait_ticks(150);   // 积分 92 拍就到 I_LIMIT，150 拍足够
+        if (corr2 <= 11'sd600)
+            $display("PASS: TRIM windup clamped (corr=%0d <= 600)", corr2);
+        else
+            $display("FAIL: TRIM windup over clamp corr=%0d", corr2);
+
         $display("INFO: track_pid_tb done");
         $finish;
     end
 
     initial begin
-        #600_000_000;
+        #1_200_000_000;   // 加了 TRIM 用例后总时长 620 ms 左右，watchdog 留一倍余量
         $display("TIMEOUT: track_pid_tb hung");
         $finish;
     end
