@@ -148,6 +148,11 @@ module k230_link_tb;
         else $display("FAIL: 命令 新一圈 -> %0d 次 cmd=%0b", n_cmd, last_cmd);
         n_cmd = 0; last_cmd = 8'd0;
 
+        send_msg(3'b011, 3'd3);
+        if (n_cmd == 1 && last_cmd === 8'b0000_0100) $display("PASS: parking P command");
+        else $fatal(1, "Parking P command -> %0d cmd=%0b", n_cmd, last_cmd);
+        n_cmd = 0; last_cmd = 8'd0;
+
         // ---- 5) 心跳：续 link_alive 但不产生事件 ----
         send_msg(3'b111, 3'd1);
         if (n_color == 0 && n_dir == 0 && n_cmd == 0 && link_alive === 1'b1)

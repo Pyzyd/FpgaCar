@@ -3,7 +3,9 @@
 // 收到 P 先降速，单角出现后继续降速，两角中点连续确认后短刹。
 module parking_approach #(
     parameter integer CLK_FREQ = 24_000_000,
-    parameter integer BRAKE_MS = 150
+    parameter integer BRAKE_MS = 150,
+    parameter [6:0] AFTER_P_PERCENT = 75,
+    parameter [6:0] AFTER_CORNER_PERCENT = 40
 ) (
     input  wire clk, rst_n, run_enable, parking_request,
     input  wire frame_done, corner_seen, pair_valid,
@@ -24,12 +26,13 @@ module parking_approach #(
     function [10:0] adjusted_duty;
         input [10:0] duty;
         input p_active, corner_active, brake_active;
-        reg [12:0] tripled;
+        reg [17:0] p_product, corner_product;
         begin
-            tripled = {2'b0,duty} + {1'b0,duty,1'b0};
+            p_product = duty * AFTER_P_PERCENT;
+            corner_product = duty * AFTER_CORNER_PERCENT;
             if (brake_active) adjusted_duty = 0;
-            else if (corner_active) adjusted_duty = {1'b0,duty,1'b0} / 13'd5;
-            else if (p_active) adjusted_duty = tripled[12:2];
+            else if (corner_active) adjusted_duty = corner_product / 18'd100;
+            else if (p_active) adjusted_duty = p_product / 18'd100;
             else adjusted_duty = duty;
         end
     endfunction

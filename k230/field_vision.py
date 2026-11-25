@@ -9,8 +9,8 @@ from turn_detector import blue_regions, select as select_turn
 from turn_shape import StableEvent
 
 
-VERSION = 'FpgaCar-parking-p-v1'
-EVENT_CODES = {'left':1, 'right':2, 'red':3, 'green':4, 'blue':5, 'yellow':6}
+VERSION = 'FpgaCar-field-integration-v1'
+EVENT_CODES = {'left':1, 'right':2, 'red':3, 'green':4, 'blue':5, 'yellow':6, 'P':7}
 LABELS = {'left':'左转', 'right':'右转', 'red':'红', 'green':'绿', 'blue':'蓝', 'yellow':'黄'}
 BOX_COLORS = {'red':(255,76,76), 'yellow':(255,217,60),
               'green':(60,235,126), 'blue':(74,169,255)}
@@ -179,11 +179,8 @@ def main(send_gpio=False):
                 result = vision.update(frame,now)
                 events = result['events']
                 for event in events:
-                    if event['kind']=='parking':
-                        event['gpio'] = 'local_only'
-                    else:
-                        ok = link.send(EVENT_CODES[event['label']]) if link else False
-                        event['gpio'] = 'sent_no_ack' if ok else 'fault' if send_gpio else 'preview_only'
+                    ok = link.send(EVENT_CODES[event['label']]) if link else False
+                    event['gpio'] = 'sent_no_ack' if ok else 'fault' if send_gpio else 'preview_only'
                     print('[FIELD EVENT]',event)
                 if recorder:
                     saved = recorder.image(frame,frame_id,bool(events))

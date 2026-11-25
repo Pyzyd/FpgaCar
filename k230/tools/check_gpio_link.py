@@ -70,9 +70,9 @@ class Checks(unittest.TestCase):
     def setUp(self): self.fx=Fixture()
     def tearDown(self): self.fx.close()
 
-    def test_six_event_codes_and_pulse_widths(self):
+    def test_event_codes_and_pulse_widths(self):
         sender=self.fx.sender()
-        for code,pair in ((1,(2,1)),(2,(2,2)),(3,(1,1)),(4,(1,3)),(5,(1,4)),(6,(1,2))):
+        for code,pair in ((1,(2,1)),(2,(2,2)),(3,(1,1)),(4,(1,3)),(5,(1,4)),(6,(1,2)),(7,(3,3))):
             self.fx.trace=[]
             self.assertTrue(sender.send(code))
             self.assertEqual(self.fx.symbols(),[0,pair[0],0,pair[1],0]*2)
@@ -81,8 +81,8 @@ class Checks(unittest.TestCase):
                 self.assertEqual((rise[1],fall[1]),(1,0))
                 self.assertGreaterEqual(fall[0]-rise[0],1)
             self.assertEqual(sender.state,'idle')
-        self.assertEqual(sender.sent_frames,6)
-        self.assertEqual(self.fx.clock,180)
+        self.assertEqual(sender.sent_frames,7)
+        self.assertEqual(self.fx.clock,210)
 
     def test_heartbeat_and_close(self):
         sender=self.fx.sender()
@@ -157,7 +157,7 @@ def rtl_replay(compiler_dir):
     fx=Fixture()
     try:
         sender=fx.sender()
-        for code in range(1,7): sender.send(code)
+        for code in range(1,8): sender.send(code)
         fx.clock=700
         sender.poll()
         trace=list(fx.trace)
@@ -166,18 +166,19 @@ def rtl_replay(compiler_dir):
             'reg rst_n=0; reg [2:0] data=0; reg stb=0;',
             'wire [3:0] c; wire [2:0] d; wire [7:0] cmd,err; wire alive;',
             'k230_link #(.CLK_FREQ(1000000)) dut(clk,rst_n,data,stb,c,d,cmd,alive,err);',
-            'integer nc=0,nd=0;',
+            'integer nc=0,nd=0,np=0;',
             'always @(posedge clk) if(rst_n) begin',
             'if(c!=0) begin nc=nc+1; if(c!=nc) $fatal(1,"Color order/value mismatch"); end',
-            'if(d!=0) begin nd=nd+1; if(d!=nd) $fatal(1,"Direction mismatch"); end end',
+            'if(d!=0) begin nd=nd+1; if(d!=nd) $fatal(1,"Direction mismatch"); end',
+            'if(cmd!=0) begin np=np+1; if(cmd!=4) $fatal(1,"Parking P mismatch"); end end',
             'initial begin #10000; rst_n=1; #10000;']
     previous=0
     for t,n,v in trace:
         script.append('#%d; %s=%d;' % ((t-previous)*1000000,
                       'stb' if n==35 else 'data[%d]'%(42,43,34).index(n),v))
         previous=t
-    script.extend(['#2000000; if(nc!=4 || nd!=2 || err!=0 || !alive) $fatal(1,"Replay failed");',
-                   '$display("PASS: actual K230 Python sender -> Ti60 RTL, four colors/two directions/heartbeat");',
+    script.extend(['#2000000; if(nc!=4 || nd!=2 || np!=1 || err!=0 || !alive) $fatal(1,"Replay failed");',
+                   '$display("PASS: K230 Python sender to Ti60 RTL: four colors, two directions, P and heartbeat");',
                    '$finish; end endmodule'])
     scratch=ROOT/'.scratch'
     scratch.mkdir(exist_ok=True)

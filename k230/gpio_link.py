@@ -8,7 +8,7 @@ from machine import FPIOA, Pin
 import config as C
 
 # Keep the existing application event codes; translate only on the wire.
-EVENTS = {1:(2,1), 2:(2,2), 3:(1,1), 4:(1,3), 5:(1,4), 6:(1,2)}
+EVENTS = {1:(2,1), 2:(2,2), 3:(1,1), 4:(1,3), 5:(1,4), 6:(1,2), 7:(3,3)}
 
 
 def audit_pins(mux):

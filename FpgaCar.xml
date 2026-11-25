@@ -37,6 +37,7 @@
         <efx:design_file name="src/garage_corner_scan.v" version="default" library="default" />
         <efx:design_file name="src/parking_approach.v" version="default" library="default" />
         <efx:design_file name="src/parking_motion.v" version="default" library="default" />
+        <efx:design_file name="src/course_finish.v" version="default" library="default" />
         <efx:design_file name="src/duty_shaper.v" version="default" library="default" />
         <efx:top_vhdl_arch name="" />
         <efx:msg_config name="" />
