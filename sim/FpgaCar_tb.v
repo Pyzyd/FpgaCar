@@ -77,7 +77,7 @@ module FpgaCar_tb;
     assign i2c_sda    = i2c_sda_OE ? i2c_sda_OUT : 1'bz;
     assign i2c_sda_IN = i2c_sda;
 
-    FpgaCar u_dut (
+    FpgaCar #(.PARKING_DEBUG(1'b0)) u_dut (
         .clk          (clk),
         .key_start_n  (key_start_n),
         .key_stop_n   (key_stop_n),

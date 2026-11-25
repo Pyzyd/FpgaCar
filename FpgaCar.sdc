@@ -15,3 +15,5 @@
 # =============================================================================
 
 create_clock -period 41.667 [get_ports clk]
+create_clock -period 10.000 [get_ports cmos_pclk]
+set_clock_groups -asynchronous -group {clk} -group {cmos_pclk}

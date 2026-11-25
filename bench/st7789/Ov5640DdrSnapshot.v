@@ -1,6 +1,6 @@
 `timescale 1ns/1ns
 
-// Standalone bench: K1 takes one photo; the CH340N UART reads the saved photo.
+// Standalone bench: live LCD preview, K1 capture, CH340N album export.
 module Ov5640DdrSnapshot (
     input wire clk_sys, sys_pll_lock, ddr_pll_lock,
     input wire tdqss_clk, core_clk, tac_clk, twd_clk,
@@ -24,6 +24,7 @@ module Ov5640DdrSnapshot (
     output wire cmos_ctl1, cmos_rst_n, cmos_pwdn,
     input wire key_start_n, uart_rx,
     output wire uart_tx,
+    output wire lcd_rst_n, lcd_cs_n, lcd_sclk, lcd_mosi, lcd_dc,
     output wire [5:0] led,
     output wire motor_stby, ml_pwm, mr_pwm, ml_in1, ml_in2, mr_in1, mr_in2
 );
@@ -58,6 +59,13 @@ module Ov5640DdrSnapshot (
         .clk(clk_sys), .rst_n(rst_n), .start(sccb_start), .done(sccb_done),
         .sclk(cmos_sclk), .sdat_in(cmos_sdat_IN), .sdat_out(cmos_sdat_OUT),
         .sdat_oe(cmos_sdat_OE)
+    );
+
+    ov5640_album_preview #(.CLK_HZ(CLOCK_HZ)) lcd_preview (
+        .clk(clk_sys), .rst_n(rst_n), .camera_ready(sccb_done),
+        .pclk(cmos_pclk), .href(cmos_href), .vsync(cmos_vsync), .data(cmos_data),
+        .lcd_rst_n(lcd_rst_n), .lcd_cs_n(lcd_cs_n), .lcd_sclk(lcd_sclk),
+        .lcd_mosi(lcd_mosi), .lcd_dc(lcd_dc)
     );
 
     (* async_reg = "true" *) reg [1:0] key_sync;
