@@ -67,9 +67,10 @@ for tb in "${tbs[@]}"; do
     grep -E 'warning:' "$clog" 2>/dev/null | sed "s|^|${tb}: |" >> "$wlog"
 
     s=$(date +%s)
-    # 单个 tb 上限：car_fsm_tb 有 7 个实例、含 200 ms 级的长时延用例，
-    # 实测约 236 s。早期上限 180 s 会把它的正常完成误判成"静默失败"。
-    timeout 420 vvp "$vvp" >"$olog" 2>&1
+    # 单个 tb 上限：car_fsm_tb 有 9 个实例、含 200 ms 级的长时延用例，
+    # 实测 400~410 s（v1.24 起稳定在 401~410 s）。上限 180 s 和 420 s 都曾把它
+    # 的正常完成误判成"静默失败"（420 s 只是擦边，一次推送就被拦住），放到 600 s。
+    timeout 600 vvp "$vvp" >"$olog" 2>&1
     rc=$?
     e=$(date +%s)
     # 注意：grep -c 在文件缺失时不打印数字，$() 得到空串，后面的 -eq 会报

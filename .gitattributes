@@ -10,3 +10,6 @@
 *.png   binary
 *.bmp   binary
 *.vvp   binary
+
+# 上板抓包数据按原始字节入库：任何行尾转换都会让采集记录失真。
+data/runs/**/*.csv binary

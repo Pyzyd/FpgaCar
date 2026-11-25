@@ -10,6 +10,9 @@
 .scratch/
 _sim/
 *.vvp
+# bench/ 下 __ 前缀的是临时探针脚本（一次性扫参/画图），不属于交付物。
+bench/__*.py
+bench/__*.png
 
 # --- 2. Efinity 工程产物 -----------------------------------------------------
 # 由 src/ + FpgaCar.xml + FpgaCar.peri.xml + FpgaCar.sdc 重新生成。

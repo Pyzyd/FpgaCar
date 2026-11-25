@@ -23,8 +23,11 @@ import sys, time, re, os, argparse
 import serial
 from serial.tools import list_ports
 
-ENC_CNT_PER_REV = 3840
-WHEEL_CIRC_MM = 232.0
+# 2026-11-23 实测重标定：5 圈共 12662 计数（三段 2522/7506/2634 互相吻合），
+# 轮径 67~68 mm 取 67.5 -> 周长 212 mm。旧值 3840/232 是 20 线x4x48 减速比的纸面值，
+# 实测减速比只有 31.7:1，用旧值算出来的每毫米计数会高估 39%。
+ENC_CNT_PER_REV = 2532
+WHEEL_CIRC_MM = 212.0
 WHEEL_BASE_MM = 160.0
 WIN_S = 0.050
 DUTY_MAX = 1200
@@ -56,8 +59,26 @@ def hex2s(v, bits=32):
     return n
 
 
+def find_ch340():
+    """按 VID:PID 找 CH340，返回设备名或 None。"""
+    for p in list_ports.comports():
+        hw = (p.hwid or "").upper()
+        if "1A86:7523" in hw:
+            return p.device
+    return None
+
+
 def open_port(port, baud, tries=15):
-    # 上一个采集进程可能还没释放端口，重试等它退出
+    """打开串口。port=auto 时自动找 CH340（板上是 1A86:7523）。
+
+    上一个采集进程可能还没释放端口，所以这里要重试：Windows 上 CloseHandle
+    到真正释放有几十毫秒延迟，直接 open 会 PermissionError(13)。
+    """
+    if port in (None, "", "auto"):
+        port = find_ch340()
+        if port is None:
+            raise SystemExit("没找到 CH340 串口。先用 ports 子命令看有哪些口。")
+        print("# 自动选中 %s" % port)
     last = None
     for i in range(tries):
         try:
@@ -95,6 +116,63 @@ def merged(ser, sec):
             yield t, g
 
 
+def merged_robust(port, baud, sec, reconnect_gap=0.5):
+    """和 merged 一样，但串口掉线能自己接回来。
+
+    车一跑电机，USB 供电抖一下 CH340 就可能短暂掉线（PermissionError(13)
+    或 SerialException）。原来的 cmd_log 遇到这个直接抛异常退出，
+    一次 100 s 的采集就废了。这里改成：掉线后等一会重开，继续写同一份 CSV，
+    时间戳沿用同一个 t0，断档只体现为时间跳变。
+    """
+    t0 = time.time()
+    last1 = {}
+    ser = None
+    drops = 0
+    while True:
+        elapsed = time.time() - t0
+        if elapsed >= sec:
+            break
+        if ser is None:
+            try:
+                ser = open_port(port, baud, tries=3)
+            except (SystemExit, serial.SerialException):
+                drops += 1
+                time.sleep(reconnect_gap)
+                continue
+            if drops:
+                print("# 第 %d 次重连成功" % drops)
+        try:
+            buf = b""
+            while time.time() - t0 < sec:
+                buf += ser.read(512)
+                while b"\n" in buf:
+                    ln, buf = buf.split(b"\n", 1)
+                    s = ln.decode("ascii", "replace").strip()
+                    f = parse(s)
+                    if not f:
+                        continue
+                    if "D" in f or "O" in f:
+                        last1 = f
+                    if "L" in f:
+                        g = dict(last1)
+                        g.update(f)
+                        yield time.time() - t0, g
+        except (serial.SerialException, OSError) as ex:
+            drops += 1
+            print("# 串口掉线(%s)，重连中…" % ex)
+            try:
+                ser.close()
+            except Exception:
+                pass
+            ser = None
+            time.sleep(reconnect_gap)
+    if ser is not None:
+        try:
+            ser.close()
+        except Exception:
+            pass
+
+
 def cmd_watch(a):
     ser = open_port(a.port, a.baud)
     n = 0
@@ -106,17 +184,23 @@ def cmd_watch(a):
 
 
 def cmd_log(a):
-    ser = open_port(a.port, a.baud)
+    # 每行立刻 flush：上次采集中途崩掉，最后几百行留在 Python 缓冲区里全丢了。
     n = 0
+    drops = 0
     with open(a.csv, "w", encoding="utf-8") as fh:
         fh.write(",".join(COLS) + "\n")
-        for t, f in merged(ser, a.sec):
-            row = [("%.4f" % t)]
-            for c in COLS[1:]:
-                row.append(f.get(c, ""))
-            fh.write(",".join(row) + "\n")
-            n += 1
-    ser.close()
+        fh.flush()
+        try:
+            for t, f in merged_robust(a.port, a.baud, a.sec):
+                row = [("%.4f" % t)]
+                for c in COLS[1:]:
+                    row.append(f.get(c, ""))
+                fh.write(",".join(row) + "\n")
+                if (n & 15) == 0:
+                    fh.flush()
+                n += 1
+        finally:
+            fh.flush()
     print("# 写入 %d 帧 -> %s (%.1fs)" % (n, a.csv, a.sec))
 
 
@@ -189,8 +273,8 @@ def cmd_analyze(a):
               % (abs(tot("R")), n, abs(tot("R")) / n, ENC_CNT_PER_REV))
         cpr = abs(tot("L")) / n
         if cpr > 0:
-            print("# 反推减速比 = %.1f/80 = %.1f（标定 48）" % (cpr, cpr / 80.0))
-            print("# 反推轮周长  = %.1f mm（标定 %.1f）" % (WHEEL_CIRC_MM, WHEEL_CIRC_MM))
+            print("# 反推减速比 = %.1f/80 = %.2f（实测标定 31.65，纸面值 48）" % (cpr, cpr / 80.0))
+            print("# 每圈计数 %.1f（固件 ENC_CNT_PER_REV=%d）" % (cpr, ENC_CNT_PER_REV))
 
 
 def cmd_speed(a):
@@ -268,7 +352,7 @@ def main():
     sub.add_parser("ports")
     for name in ("watch", "log", "speed", "dist", "avoid"):
         p = sub.add_parser(name)
-        p.add_argument("--port", default="COM12")
+        p.add_argument("--port", default="auto")
         p.add_argument("--baud", type=int, default=115200)
         p.add_argument("--sec", type=float, default=10.0)
         if name == "log":
