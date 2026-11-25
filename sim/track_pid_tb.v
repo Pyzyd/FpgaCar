@@ -7,6 +7,8 @@
 //   4) 长时间同侧误差 → 积分使 corr 继续增大（抗饱和：不超过 ±BASE）
 //   5) lost=1 → 占空比保持（不清零）
 //   6) en=0 → 输出归零、corr 归零
+//   7) TRIM 前馈 → pos=0 稳态 corr = TRIM(-140)
+//   8) SLEW_STEP=64 → pos 阶跃时 corr 每拍最多 +64（约 6 拍到满量程轴 504）
 // =============================================================================
 `timescale 1ns/1ps
 
@@ -31,7 +33,8 @@ module track_pid_tb;
         .P_GAIN    (72),
         .D_GAIN    (40),
         .I_SHIFT   (5),
-        .I_LIMIT   (640)
+        .I_LIMIT   (640),
+        .SLEW_STEP (0)          // 本实例专测 P/I/D 语义，关掉变化率限制，别让它掩盖 D 尖峰
     ) u_dut (
         .clk (clk), .rst_n (rst_n), .en (en),
         .pos (pos), .on_line (on_line), .lost (lost),
@@ -56,11 +59,35 @@ module track_pid_tb;
         .D_GAIN    (30),
         .I_SHIFT   (5),
         .I_LIMIT   (640),
+        .SLEW_STEP (0),         // 同上：TRIM 稳态断言要求对阶跃立即响应
         .TRIM      (-140)
     ) u_trim (
         .clk (clk), .rst_n (rst_n), .en (en2),
         .pos (pos2), .on_line (1'b1), .lost (lost2),
         .duty_l (duty_l2), .duty_r (duty_r2), .corr (corr2)
+    );
+
+    // ---- 第三个实例：corr 变化率限制（SLEW_STEP=64）----
+    // D_GAIN=0 让波形只由 P 决定：pos=+7 时目标 corr=504，若没有 slew 一拍就到顶。
+    reg               en3 = 1'b0;
+    reg signed [4:0]  pos3 = 5'sd0;
+    wire [10:0]        duty_l3, duty_r3;
+    wire signed [10:0] corr3;
+
+    track_pid #(
+        .CLK_FREQ  (24_000_000),
+        .TICK_MS   (1),
+        .DUTY_MAX  (1200),
+        .BASE_DUTY (600),
+        .P_GAIN    (72),
+        .D_GAIN    (0),
+        .I_SHIFT   (5),
+        .I_LIMIT   (192),
+        .SLEW_STEP (64)
+    ) u_slew (
+        .clk (clk), .rst_n (rst_n), .en (en3),
+        .pos (pos3), .on_line (1'b1), .lost (1'b0),
+        .duty_l (duty_l3), .duty_r (duty_r3), .corr (corr3)
     );
 
     task wait_ticks (input integer n);
@@ -85,10 +112,12 @@ module track_pid_tb;
             $display("FAIL: centered -> duty %0d/%0d corr=%0d", duty_l, duty_r, corr);
 
         // ---- 2) 线在右 ----
-        // 注意：pos 突变的头一两个周期 D 项会打一个尖峰，等它衰减后再取样，
+        // 注意：pos 突变的头几个周期 D 项会打一个尖峰，等它衰减后再取样，
         // 否则测到的 corr 是 P+D 的峰值，拿它跟后面比会因为尖峰消失而"变小"。
+        // 2026-11-25 起 D 项经过一阶低通（α=1/4），本 tb 的 TICK_MS=1 时时间常数
+        // 约 4 个 tick，所以这里从 5 拍到 20 拍：0.75^20≈0.3%，D 已衰减干净。
         pos = 5'sd7;
-        wait_ticks(5);
+        wait_ticks(20);
         c1 = corr;
         if (duty_l > duty_r && corr > 0)
             $display("PASS: pos=+7 -> duty %0d/%0d corr=%0d (left faster)", duty_l, duty_r, corr);
@@ -164,12 +193,13 @@ module track_pid_tb;
                      duty_l2, duty_r2, corr2);
 
         // ---- 7b) TRIM 与 P 项叠加且仍被 ±BASE 钳位 ----
-        // TRIM(-140) + P(7*80=560) + 少量积分(几拍里积了 42 计数 -> i_term 1~2)
-        // 落在 419~422 之间，用区间断言避免把拍数算死。
+        // TRIM(-140) + P(7*80=560) + 少量积分，落在 410~440 之间，用区间断言避免把拍数算死。
+        // 2026-11-25 起 D 项有低通，等 D 衰减干净再取样（25 拍，τ≈4 拍），
+        // 否则量到的是 TRIM+P+D(Q2 低通尾巴) 的混合值。
         pos2 = 5'sd7;
-        wait_ticks(6);
+        wait_ticks(25);
         if (corr2 > 11'sd400 && corr2 < 11'sd460)
-            $display("PASS: TRIM+P -> corr=%0d (expect ~420)", corr2);
+            $display("PASS: TRIM+P -> corr=%0d (expect ~425)", corr2);
         else
             $display("FAIL: TRIM+P -> corr=%0d (expect 400<corr<460)", corr2);
 
@@ -178,6 +208,22 @@ module track_pid_tb;
             $display("PASS: TRIM windup clamped (corr=%0d <= 600)", corr2);
         else
             $display("FAIL: TRIM windup over clamp corr=%0d", corr2);
+
+        // ---- 8) corr 变化率限制（SLEW_STEP=64 / 拍）----
+        // 目标 corr = 7*72 = 504 + 少量积分；没有 slew 时一拍就到位。
+        en3 = 1'b1; pos3 = 5'sd0;
+        wait_ticks(3);
+        pos3 = 5'sd7;
+        wait_ticks(1);
+        if (corr3 >= 11'sd64 && corr3 <= 11'sd128)
+            $display("PASS: slew limits first tick to ~64 (corr=%0d, target 504)", corr3);
+        else
+            $display("FAIL: slew let corr jump to %0d (expect 64..128, target 504)", corr3);
+        wait_ticks(11);
+        if (corr3 >= 11'sd480 && corr3 <= 11'sd560)
+            $display("PASS: slew reaches target after 12 ticks (corr=%0d)", corr3);
+        else
+            $display("FAIL: slew stalls at corr=%0d (expect 480..560)", corr3);
 
         $display("INFO: track_pid_tb done");
         $finish;

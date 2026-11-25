@@ -37,59 +37,85 @@
 
 module car_fsm #(
     parameter integer CLK_FREQ      = 24_000_000,
+    // =====================================================================
+    // 【2026-11-25 全域降速到 0.8×】现场要求车速降到原来的 0.8 倍。
+    //   缩放规则（本文件与 src/FpgaCar.v 的顶层覆盖必须同步）：
+    //     · 所有"速度量"（占空比、差速修正量 HDG_STEER_*、积分限幅）→ ×0.8
+    //     · 所有"按时间标定的动作时长" *_MS → ÷0.8 = ×1.25
+    //       （每段走过的距离、转过的角度才和降速前一致）
+    //     · 转角/里程判据（ARC_*_TARGET、PASS_SUM_TARGET、ARC_DEG、PASS_MM）
+    //       → **不变**，它们是几何量，与车速无关
+    //     · 例外（不缩放）：AVOID_MIN_DUTY 是电机起转的物理门槛；
+    //       DIR_DEAD_MS / TURN_LINE_MS / AVOID_LINE_MS / AVOID_BLOCK_MS /
+    //       CORNER_WIDE_MS / TURN_DIR_HOLD_MS 是消抖、等超声和 UI 保持时间
+    //   注意：下面注释里保留的历史实测数值（v1.2x 各轮）是当时的标定，
+    //   不要再按新值去核对；需要复现时按同一规则反推即可。
+    // =====================================================================
     parameter integer START_MS      = 2000,   // 连续压线多久后起跑（留时间松手）
     parameter integer START_REQUIRE_LINE = 1, // 1 = 必须压线才起跑（安全锁）
-    parameter integer LOST_HOLD_MS  = 300,    // 丢线先保持多久
-    parameter integer SEARCH_MS     = 1500,   // 原地找线最长多久
-    parameter integer SEARCH_DUTY   = 500,    // 找线时的占空比
+    parameter integer LOST_HOLD_MS  = 375,    // 丢线先保持多久（300 → ×1.25）
+    parameter integer SEARCH_MS     = 1875,   // 原地找线最长多久（1500 → ×1.25）
+    parameter integer SEARCH_DUTY   = 400,    // 找线时的占空比（500 → ×0.8）
     parameter integer SEARCH_FAIL_TO_IDLE = 1, // 找线超时后：1=回 IDLE 等重新压线，0=永久停车
-    parameter integer DIR_DEAD_MS   = 10,     // 方向切换死区
-    parameter integer TURN_MS       = 700,    // 交通牌强制转向的最长时长（不是固定时长）
-    parameter integer TURN_DUTY     = 700,    // 强制转向时的占空比
+    parameter integer DIR_DEAD_MS   = 10,     // 方向切换死区（与车速无关，不缩放）
+    parameter integer TURN_MS       = 875,    // 交通牌强制转向的最长时长（700 → ×1.25）
+    parameter integer TURN_DUTY     = 560,    // 强制转向时的占空比（700 → ×0.8）
     // 闭环转向：菱形锐角需要的转角比直角大，而定长转向时间一到就把车交回
     // PID，此时车头还差一截，直接丢线滑走。改成边转边看线：连续压回线就
     // 提前收工，TURN_MS 只当上限。
-    parameter integer TURN_MIN_MS   = 250,    // 至少先转这么久，防止刚起步还压着线就立刻结束
-    parameter integer TURN_LINE_MS  = 20,     // 连续压线多少 ms 才算"线已经找回来"
+    parameter integer TURN_MIN_MS   = 313,    // 至少先转这么久，防止刚起步还压着线就立刻结束（250→×1.25）
+    parameter integer TURN_LINE_MS  = 20,     // 连续压线多少 ms 才算"线已经找回来"（消抖，不缩放）
     parameter integer TURN_WAIT_FOR_CORNER = 0, // 1: 先存方向，宽黑后丢线才执行
-    parameter integer TURN_REQUEST_MS = 12000,  // 转向牌等待岔口的上限
+    parameter integer TURN_REQUEST_MS = 15000,  // 转向牌等待岔口的上限（12000→×1.25）
     // ---- 避障（BACK → TURN → PROBE 三段）----
     parameter integer AVOID_EN    = 1,      // 1 = 遇障碍执行避障；0 = 旧行为（原地停，障碍消失即走）
-    parameter integer AVOID_BACK_MS = 400,  // 后退时长
-    parameter integer AVOID_BACK_DUTY = 500,// 后退占空比
-    parameter integer AVOID_TURN_MS = 600,  // 出线转向和摆正的原地转时长
-    parameter integer AVOID_TURN_DUTY = 600,// 原地转占空比
-    parameter integer AVOID_PROBE_MS = 400, // 试探前进时长
-    parameter integer AVOID_PROBE_DUTY = 450,// 试探前进占空比
+    parameter integer AVOID_BACK_MS = 500,  // 后退时长（400→×1.25）
+    parameter integer AVOID_BACK_DUTY = 400,// 后退占空比（500→×0.8）
+    parameter integer AVOID_TURN_MS = 750,  // 出线转向和摆正的原地转时长（600→×1.25）
+    parameter integer AVOID_TURN_DUTY = 480,// 原地转占空比（600→×0.8）
+    parameter integer AVOID_PROBE_MS = 500, // 试探前进时长（400→×1.25）
+    parameter integer AVOID_PROBE_DUTY = 360,// 试探前进占空比（450→×0.8）
     // 进 PROBE 后的静默观察窗：这段时间内不判 obstacle。
     // 为什么必须有：从 TURN 转进 PROBE 时障碍通常还在正前方（车还没动），
     // 若第一拍就判 obstacle，"试探前进"这一步只跑 1 ms 就被打回 BACK，
     // 3 轮配额瞬间耗尽 —— 避障退化成"原地左右各抖 600 ms 再停车"。
-    parameter integer AVOID_PROBE_SETTLE_MS = 100,
+    parameter integer AVOID_PROBE_SETTLE_MS = 125,  // 100→×1.25（要探出同样的距离）
     parameter integer AVOID_TRIES = 3,      // 最多连续尝试次数，用尽则停车等待
+    // 【2026-11-25 实测后新增】每次上电 / 按 K1 只允许触发一次避障。
+    //   现场现象：第一次绕障虽然回线过程抖（REJOIN 段 steer ±240 反向摆），
+    //   但最终确实把线找回来了并稳定跑了 2.3 s；随后车跑到弯道附近，墙进入
+    //   31 cm 触发范围，超声再报 obstacle → 第二次绕障 → 回线失败 → STOP。
+    //   比赛只有一个方块，第二次触发在本项目里没有正面价值，只会把
+    //   "已经成功绕过去的车"再送进一次不可控动作。
+    //   =0 时退回旧行为（可反复触发，供 tb / 多障碍场景用）。
+    //   标志在 rst_n（= motion_rst_n，含 K1 run_enable）时清零，无需额外接线。
+    parameter integer AVOID_ONCE = 1,       // 1 = 每次上电/K1 只允许避障一次
     parameter integer AVOID_ROUTE_EN = 0,  // 启用侧绕并定向回线；0 保留三段试探
     parameter integer AVOID_FIXED_RIGHT = 0, // 侧绕时 1=固定右侧，0=按最后线位选侧
-    parameter integer AVOID_PASS_MS = 900, // 车头摆正后沿障碍侧边直行
-    parameter integer AVOID_REJOIN_MS = 1200,
-    parameter integer AVOID_REJOIN_DUTY = 640,   // BY_REJOIN 外侧快轮
+    parameter integer AVOID_PASS_MS = 1125, // 车头摆正后沿障碍侧边直行（900→×1.25）
+    parameter integer AVOID_REJOIN_MS = 1500,   // 1200→×1.25
+    parameter integer AVOID_REJOIN_DUTY = 512,   // BY_REJOIN 外侧快轮（640→×0.8）
     // ---- 弧线绕障（AVOID_ROUTE_EN=1 时使用）----
     // 每一段都是"两轮都正转、外侧快内侧慢"的圆弧，靠差速而非原地转向改变航向，
     // 因此车头/车尾的横向摆幅远小于原地转，符合细则"不能大转弯"的要求。
     // 占空比成对给出：OUT 段把车从线中心推到障碍侧边，ALIGN 段把航向摆正，
     // TURN_IN 段斜切回线，REJOIN 段用较小的差速把残余偏角慢慢找回来。
-    parameter integer AVOID_OUT_DUTY     = 860,  // BY_OUT 外侧轮
-    parameter integer AVOID_OUT_IN_DUTY  = 380,  // BY_OUT 内侧轮
-    parameter integer AVOID_ALIGN_DUTY   = 840,  // BY_ALIGN 外侧快轮（反向弧，摆正航向）
-    parameter integer AVOID_ALIGN_IN_DUTY= 400,  // BY_ALIGN 内侧慢轮
-    parameter integer AVOID_PASS_DUTY    = 620,  // BY_PASS 直线超越，两轮同速（两轮平均）
+    // 【2026-11-25 降速】下面五对的占空比全部 ×0.8；**两轮的比值保持不变**，
+    //   所以每段画出的弧半径与设计几何一致，只有走完同样弧角所需的时间变长
+    //   （由下面各段 *_MS 上限 ×1.25 覆盖，编码器在线时由角度闭环提前结束）。
+    parameter integer AVOID_OUT_DUTY     = 688,  // BY_OUT 外侧轮（860→×0.8）
+    parameter integer AVOID_OUT_IN_DUTY  = 304,  // BY_OUT 内侧轮（380→×0.8）
+    parameter integer AVOID_ALIGN_DUTY   = 672,  // BY_ALIGN 外侧快轮（840→×0.8）
+    parameter integer AVOID_ALIGN_IN_DUTY= 320,  // BY_ALIGN 内侧慢轮（400→×0.8）
+    parameter integer AVOID_PASS_DUTY    = 496,  // BY_PASS 直线超越（620→×0.8）
     // 【v1.24 删除 AVOID_PASS_TRIM】v1.20 用 TRIM 把 PASS 段两轮差开成 480/760
     //   来抵消左右轮效率差。v1.21 接上航向闭环后，PASS 段两轮都取
     //   AVOID_PASS_DUTY，偏置改由 hdg_steer 实时给，这两个 localparam
     //   (AVOID_PASS_L_DUTY/AVOID_PASS_R_DUTY) 再无人引用 → 连同参数一起删除，
     //   否则调 AVOID_PASS_TRIM 是个"改了没反应"的死开关。
-    parameter integer AVOID_TURN_IN_DUTY = 860,  // BY_TURN_IN 外侧快轮（反向弧切回线）
-    parameter integer AVOID_TURN_IN_IN_DUTY = 420, // BY_TURN_IN 内侧慢轮
-    parameter integer AVOID_REJOIN_IN_DUTY  = 430, // BY_REJOIN 内侧慢轮
+    parameter integer AVOID_TURN_IN_DUTY = 688,  // BY_TURN_IN 外侧快轮（860→×0.8）
+    parameter integer AVOID_TURN_IN_IN_DUTY = 336, // BY_TURN_IN 内侧慢轮（420→×0.8）
+    parameter integer AVOID_REJOIN_IN_DUTY  = 344, // BY_REJOIN 内侧慢轮（430→×0.8）
     // 【v1.21 航向闭环参数】只数里程差只能保证「转够了停」，画出来的弧半径仍由
     //   两轮实际速度比决定；实车 duty→轮速 强非线性（同一 400/840 连发 12 帧，
     //   实测轮速比 0.66~1.85 乱跳），所以必须把「转角」当被控量实时修正。
@@ -105,9 +131,17 @@ module car_fsm #(
     //   计数、TURN_IN 3000 计数），乘法增益 2 会立刻顶到 ±600，把慢轮压到占空比 0，
     //   等于原地打转 —— 那正是细则 4.3.2 禁止的动作。右移 3 位后起点修正量约
     //   250（OUT）/ 375（TURN_IN），落在「明显加大差速但不压停」的区间。
-    parameter integer HDG_DEAD       = 10,   // 角度误差死区, 计数（≈0.30°）
-    parameter integer HDG_STEER_MAX  = 600,  // 差速修正上限
-    parameter integer HDG_STEER_MIN  = 60,   // 误差非零时的最小修正量
+    // 【2026-11-25 现场实测：回线段自激振荡】抓包显示 BY_REJOIN 段 hdg_steer 在
+    //   −213 ~ +261 之间来回（振幅 ±240 计数、周期约 0.6 s），换算成航向误差
+    //   ±29°，纸面轨迹就是"斜上→平台→斜上"的台阶 + 末端越线小钩。
+    //   原因三件事叠加：① 死区只有 10 计数（0.3°）几乎不设防；
+    //   ② HDG_STEER_MIN=48 让任何微小误差都至少推 48 计数差速；
+    //   ③ 降速把 BASE 480→384，同样的 steer 计数对应角速度变大 25%
+    //      （角速度 ∝ 差速/车速），等于环增益被动抬高。
+    //   对策：死区放到 2.4°，上限/最小修正量同比缩小，先只治振荡。
+    parameter integer HDG_DEAD       = 80,   // 角度误差死区, 计数（≈2.4°；10→80）
+    parameter integer HDG_STEER_MAX  = 384,  // 差速修正上限（480→384，抵消降速的增益抬升）
+    parameter integer HDG_STEER_MIN  = 40,   // 误差非零时的最小修正量（48→40）
     // 【v1.23 参考角必须爬坡，不能阶跃】hdg_target 是**段终点的绝对目标角**，
     //   直接拿它算误差会出事：段起点的误差就是满量程（OUT/ALIGN 2334 计数、
     //   TURN_IN 2334 计数），>>>3 后立刻给出 ±290 的修正，把差速推到钳位，
@@ -128,9 +162,12 @@ module car_fsm #(
     //   而标称几何横移只有 140.9mm < 需要的 142.5mm。弧线段靠纯 P 留一点偏差、
     //   把弧拉长一点，反而是它现在能躲开方块的原因。
     parameter integer HDG_I_SHIFT    = 5,    // 积分右移（Ki ≈ 1/32）
-    parameter integer HDG_I_LIMIT    = 400,  // 积分累加上限（抗饱和）
+    parameter integer HDG_I_LIMIT    = 320,  // 积分累加上限（400→×0.8，单位是占空比）
     // 修正后单轮占空比的下限：低到 0 就成了枢轴原地转，必须留一点让它继续走。
-    parameter integer AVOID_MIN_DUTY = 120,  // 航向修正后单轮占空比下限
+    // 【降速时保持 120 不动】这不是"速度量"，是电机能不能被推着转起来的物理
+    //   门槛（起转死区）。按 0.8 缩到 96 反而有磨在死区边上的风险 —— 内侧轮
+    //   时转不转会让弧线变成枢轴转，正是细则 4.3.2 禁止的动作。
+    parameter integer AVOID_MIN_DUTY = 120,  // 航向修正后单轮占空比下限（物理门槛，不缩放）
     // 【弧线段改为里程闭环】原来 OUT/ALIGN/PASS 都是按毫秒截断的，而同样的
     // 毫秒数在不同车速下转过的角度完全不同 —— 电池电压、地面摩擦、载重一变，
     // 弧就画歪，轻则回不了线，重则直接蹭上方块。改成数编码器后，两轮计数
@@ -183,8 +220,8 @@ module car_fsm #(
     parameter integer AVOID_PASS_MM    = 100,  // BY_PASS 直线超越距离, mm（每轮，v1.24c 由 150 再减到 100）
     // 下面两条 *_MS 已降级为**超时上限**：编码器不出脉冲时（没装/线松）仍能
     // 走完动作，不会卡死在半路。正常有编码器时提前里程到了就切换。
-    parameter integer AVOID_OUT_MS      = 2500, // 外摆弧超时上限
-    parameter integer AVOID_ALIGN_MS    = 2500, // 摆正弧超时上限
+    parameter integer AVOID_OUT_MS      = 3125, // 外摆弧超时上限（2500→×1.25）
+    parameter integer AVOID_ALIGN_MS    = 3125, // 摆正弧超时上限（2500→×1.25）
     // 【v1.17：编码器在线后，超时值必须放大】
     //   没装编码器时 arc_diff 恒 0，上面两个 *_MS 就是**真实弧长**（v1.16 按
     //   27~46 cm/s 标成 780/850/720）。一旦编码器真的出脉冲，弧线改由里程
@@ -195,6 +232,25 @@ module car_fsm #(
     //     enc_alive=0 → 原值（等于真实时长），与 v1.16 完全一致。
     parameter integer AVOID_ENC_MULT    = 4,
     parameter integer AVOID_LINE_MS = 20,  // 回线时黑线需稳定出现
+    // 【2026-11-25 现场实测：回线交回时机】原来 BY_REJOIN 的出口是
+    //   「bypass_has_line 连续 20 ms」就交回 S_RUN，而 bypass_has_line 只要求
+    //   「有任意一路探头看到线」—— 线刚进阵列最外侧就算数。实测因此出现：
+    //     交回瞬间 P=-5（线在边缘）、航向仍是 45°，track_pid 只有位置误差、
+    //     没有航向状态，于是满舵硬掰 → 0.33 s 内横扫 12 格到 P=+7 → 丢线，
+    //     纸上轨迹就是"快到线时又向外摆一下"。
+    //   改法：先要求线进入近中心区（AVOID_LINE_POS_MAX），再进入"摆平"子状态
+    //   （目标航向切成 0°），等累计航向 |arc_turn| 收到 AVOID_HANDOFF_HDG 以内
+    //   才交回。这样交回时的横向速度接近 0，track_pid 只需处理毫米级残差。
+    //   注意与 v1.22 那次「REJOIN 目标设 0」失败的区别：那次是一进 REJOIN 就
+    //   摆平（车平行前进、永远压不到线）；这里是**压到线之后**才摆平。
+    parameter integer AVOID_LINE_POS_MAX = 3,   // 判「压到线」的 |pos| 上限（≈16 mm）
+    parameter integer AVOID_HANDOFF_HDG  = 400, // 交回前允许的 |累计航向|（计数，≈12°）
+    // 【2026-11-25 第三轮试过又回退】曾试过"摆平后再用 5° 小角朝线收敛，
+    //   并要求 |pos|≤2 连续 3 ms 才交回"，实车效果不理想，已回退到
+    //   「摆平到 0° 后按航向交回」这一版。回退要点留档，避免下次重复踩：
+    //     · 收敛阶段会多走 50~80 mm，赛道空间紧张时反而更容易出界；
+    //     · 11 mm 量化的探头阵列上 |pos|≤2 只在少数时刻成立，容易拖到
+    //       AVOID_REJOIN_MS 超时 → S_SEARCH，比"带着 27 mm 偏差交回"更糟。
     parameter integer AVOID_BLOCK_MS = 250,// 前方受阻先停，再等超声更新
     // ---- 拐角兜底（没有 K230 / 没识别到转向牌时怎么走）----
     // 1 = 判到"直角/菱形拐角"而没有任何转向牌事件时，**方位未知**才向左转；
@@ -208,7 +264,8 @@ module car_fsm #(
     // 转向指示（串口 S= / OLED 左转右转格）保持多久。
     // 不保持的话，一次转弯只有 1~2 ms 的脉冲，OLED 每 100 ms 才采一次样，
     // 基本抓不到；但一直保持又会让直道上也显示"正在左转"，反而看不懂。
-    // 1500 ms 覆盖整个 S_SEARCH（SEARCH_MS=1500），之后自动熄灭。
+    // 1500 ms 覆盖 S_SEARCH 的大部分（降速后 SEARCH_MS=1875，最后 ~375 ms 指示
+    // 会先熄灭，纯 UI 表现，不影响动作），之后自动熄灭。
     parameter integer TURN_DIR_HOLD_MS = 1500,
     parameter integer AVOID_TURN_IN_MS = AVOID_TURN_MS // 绕过障碍后朝黑线原地转的时长
 ) (
@@ -309,6 +366,11 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     // ---------------- 避障 ----------------
     reg [3:0]  avoid_tries;         // 本次障碍已尝试几轮
     reg        avoid_left;          // 1 = 这次往左绕（按最后看到线的方位反着走）
+    reg        avoid_done;          // 1 = 本次上电/K1 已经执行过一次避障
+    // 外层入口（S_RUN / S_LOST / S_SEARCH）是否还允许进入避障。
+    // 只门控外层入口，不拦老三段内部的重试（S_AVOID_PROBE → S_AVOID_BACK），
+    // 否则 AVOID_TRIES 的语义会被破坏。
+    wire       avoid_armed = (AVOID_ONCE == 0) || !avoid_done;
     wire       avoid_start_left = !last_pos_neg && (AVOID_ROUTE_EN == 0 || AVOID_FIXED_RIGHT == 0);
 
     localparam [2:0] BY_OUT = 3'd0, BY_ALIGN = 3'd1, BY_PASS = 3'd2,
@@ -317,6 +379,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
     reg bypass_left_line;
     reg [15:0] bypass_line_cnt, bypass_block_cnt;
     reg [15:0] bypass_turn_in_cnt;   // TURN_IN 期间连续看到线的毫秒数
+    reg bypass_flatten;              // 1 = 已压到线，正在把航向摆平（BY_REJOIN 子状态）
 
     // ---------------- 弧线里程闭环计数器 ----------------
     // 为什么数里程而不是数毫秒：同一段毫秒数在不同车速下转过的角度完全不同。
@@ -388,8 +451,22 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
         (bypass_step == BY_OUT)     ? (hdg_out_left ?  arc_tgt_s  : -arc_tgt_s)  :
         (bypass_step == BY_ALIGN)   ?  24'sd0 :   // 反打摆正，回到平行
         (bypass_step == BY_PASS)    ?  24'sd0 :   // 保持平行，直行超越障碍
-        (bypass_step == BY_REJOIN)  ? (hdg_out_left ? -rejoin_tgt_s : rejoin_tgt_s) :
+        // BY_REJOIN：压到线之前保持浅角斜切；压到线之后（bypass_flatten）目标切成 0°
+        (bypass_step == BY_REJOIN)  ? (bypass_flatten ? 24'sd0 :
+                                       (hdg_out_left ? -rejoin_tgt_s : rejoin_tgt_s)) :
         /* TURN_IN */                 (hdg_out_left ? -turn_tgt_s :  turn_tgt_s);
+
+    // 【2026-11-25】「压到线」的判据：线必须在近中心区，而不是随便一路探头看到。
+    //   |pos| ≤ AVOID_LINE_POS_MAX ≈ 16 mm；wide（宽黑/影子）不算。
+    // 注意这里直接写 on_line/!lost/!wide，而不是引用 bypass_has_line：
+    // 后者声明在本文件更靠后的位置，先引用会生成隐式 net 与后面的声明冲突。
+    wire line_near = on_line && !lost && !wide &&
+                     (pos <= AVOID_LINE_POS_MAX) && (pos >= -AVOID_LINE_POS_MAX);
+    // 「航向已摆平」的判据：用**累计绝对航向** arc_turn，而不是 hdg_err。
+    //   hdg_err = 参考角 − 实测角，是"跟踪误差"，车跟着参考走时它一直很小；
+    //   真正要判的是"车头相对绕障起点是否已经回正"，那就是 arc_turn 本身。
+    wire rejoin_flat_ok = (arc_turn <  AVOID_HANDOFF_HDG) &&
+                          (arc_turn > -AVOID_HANDOFF_HDG);
     // 【v1.23 REJOIN 不能再摆平】v1.22 把 REJOIN 的目标设成 0，等于 TURN_IN 刚把车头
     //   从 −70° 斜切到 +70°（朝原线），一进 REJOIN 又被拧回平行 → 车平行前进、永远
     //   压不到原线，AVOID_REJOIN_MS 用尽后去 S_SEARCH 漫天找线（用户 m08026「直接飞
@@ -630,11 +707,13 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
             turn_request_left <= 16'd0;
             avoid_tries <= 4'd0;
             avoid_left  <= 1'b0;
+            avoid_done  <= 1'b0;   // K1/复位后重新允许避障
             bypass_step <= BY_OUT;
             bypass_left_line <= 1'b0;
             bypass_line_cnt <= 16'd0;
             bypass_block_cnt <= 16'd0;
             bypass_turn_in_cnt <= 16'd0;
+            bypass_flatten <= 1'b0;
             corner_cnt   <= 16'd0;
             turn_dir     <= 2'd0;
             turn_dir_cnt <= 16'd0;
@@ -704,6 +783,7 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                     bypass_left_line <= 1'b0;
                     bypass_line_cnt <= 16'd0;
                     bypass_block_cnt <= 16'd0;
+                    bypass_flatten <= 1'b0;   // 退出绕障即清，下一次从"未摆平"开始
                 end
                 if ((TURN_WAIT_FOR_CORNER != 0) && turn_req && dir_evt == 3'd0) begin
                     if (turn_request_left != 0) turn_request_left <= turn_request_left - 16'd1;
@@ -792,11 +872,12 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             ms_cnt  <= 16'd0;
                             corner_cnt <= 16'd0;
                         end
-                        if (obstacle) begin
+                        if (obstacle && avoid_armed) begin   // AVOID_ONCE 已用掉就继续转
                             turning <= 1'b0;        // 撞上障碍就放弃这次转向
                             ms_cnt  <= 16'd0;
                             avoid_tries <= 4'd0;
                             avoid_left  <= avoid_start_left;
+                            avoid_done  <= 1'b1;
                             state   <= avoid_entry_state;
                         end
                     end else begin
@@ -817,10 +898,11 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                             turn_dir <= turn_left ? 2'd1 : 2'd2;
                             turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
                             corner_cnt <= 16'd0;
-                        end else if (obstacle) begin
+                        end else if (obstacle && avoid_armed) begin
                             ms_cnt <= 16'd0;
                             avoid_tries <= 4'd0;
                             avoid_left  <= avoid_start_left;
+                            avoid_done  <= 1'b1;
                             state  <= avoid_entry_state;
                         end else if (lost) begin
                             ms_cnt <= 16'd0;
@@ -836,14 +918,15 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                     if (!lost && on_line) begin
                         ms_cnt <= 16'd0;
                         state  <= S_RUN;
-                    end else if (obstacle) begin
+                    end else if (obstacle && avoid_armed) begin
                         // 【盲区补漏】obstacle 原来只在 S_RUN 与 S_AVOID_PROBE 里检查。
-                        // S_LOST 会按上一刻占空比继续前进 LOST_HOLD_MS(300 ms)，
-                        // 按 0.4 m/s 约 10 cm —— 在 25 cm 阈值下完全来得及撞上去。
+                        // S_LOST 会按上一刻占空比继续前进 LOST_HOLD_MS(375 ms)，
+                        // 按 0.3 m/s 约 11 cm —— 在 35 cm 阈值下完全来得及撞上去。
                         // 这里补上，与 S_RUN 走同一套避障入口。
                         ms_cnt <= 16'd0;
                         avoid_tries <= 4'd0;
                         avoid_left  <= avoid_start_left;
+                        avoid_done  <= 1'b1;
                         state  <= (AVOID_EN != 0) ? S_AVOID_BACK : S_STOP;
                     end else if (ms_cnt >= LOST_HOLD_MS - 1 &&
                                  ((TURN_WAIT_FOR_CORNER == 0) || dir_evt == 3'd0)) begin
@@ -906,13 +989,14 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                     if (!lost && on_line) begin
                         ms_cnt <= 16'd0;
                         state  <= S_RUN;
-                    end else if (obstacle) begin
+                    end else if (obstacle && avoid_armed) begin
                         // 【盲区补漏】原地图旋转找线期间完全不看障碍，而这段时间
-                        // 车身一侧在反转、最长持续 SEARCH_MS(1.5 s)，贴着障碍转
+                        // 车身一侧在反转、最长持续 SEARCH_MS(1.9 s)，贴着障碍转
                         // 很容易蹭上（细则 4.3.2 明确不得触碰）。同样转避障。
                         ms_cnt <= 16'd0;
                         avoid_tries <= 4'd0;
                         avoid_left  <= avoid_start_left;
+                        avoid_done  <= 1'b1;
                         state  <= (AVOID_EN != 0) ? S_AVOID_BACK : S_STOP;
                     end else if (ms_cnt >= SEARCH_MS - 1) begin
                         ms_cnt <= 16'd0;
@@ -1041,7 +1125,20 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                                     end
                                 end
                                 BY_REJOIN: begin
-                                    if (bypass_has_line && bypass_line_cnt >= AVOID_LINE_MS - 1) begin
+                                    // 【2026-11-25】两阶段：先"压到线"（线进近中心区），
+                                    // 再"摆平"（目标航向切 0°，等 |arc_turn| 收敛）。
+                                    // 压线计数只在未进入摆平阶段时累加；置位后不再清零，
+                                    // 因为摆平过程中车会从近中心区轻微漂出去，属正常。
+                                    if (!bypass_flatten) begin
+                                        bypass_line_cnt <= line_near ? (bypass_line_cnt + 16'd1)
+                                                                     : 16'd0;
+                                        if (bypass_line_cnt >= AVOID_LINE_MS - 1)
+                                            bypass_flatten <= 1'b1;
+                                    end
+
+                                    if (bypass_flatten && rejoin_flat_ok) begin
+                                        // 线已在中心附近且航向已回正 → 这时交回 track_pid
+                                        // 才只需要处理毫米级残差（旧逻辑在 45°/边缘就交回）。
                                         ms_cnt <= 16'd0;
                                         state <= S_RUN;
                                     end else if (ms_cnt >= AVOID_REJOIN_MS - 1) begin
@@ -1058,9 +1155,8 @@ input  wire [2:0]        dir_evt,        // 交通牌：0=无 1=左 2=右 3=直�
                                         turn_dir  <= last_pos_neg ? 2'd1 : 2'd2;
                                         turn_dir_cnt <= TURN_DIR_HOLD_MS[15:0];
                                         state <= S_SEARCH;
-                                    end else begin
-                                        bypass_line_cnt <= bypass_has_line ? (bypass_line_cnt + 16'd1) : 16'd0;
                                     end
+                                    // 压线计数已在段首统一累加，这里不再重复计数
                                 end
                                 default: begin
                                     final_stop <= 1'b1;

@@ -142,6 +142,10 @@ module car_fsm_tb;
         .AVOID_PROBE_MS  (AVOID_TEST_MOVE_MS),
         .AVOID_PROBE_DUTY(350),
         .AVOID_PROBE_SETTLE_MS (2),             // 静默窗 2 ms，用例 10/11 才能看到试探段
+        // 本实例专门验证「老三段可以反复触发」的 retry 语义（用例 10/11），
+        // 而 AVOID_ONCE=1 的默认值会拦掉第二次入口，所以这里显式关掉。
+        // AVOID_ONCE=1 的行为由 bypass_rejoin_tb 的 once_dut 用例负责。
+        .AVOID_ONCE   (0),
         .AVOID_TRIES  (2)
     ) u_dut4 (
         .clk (clk), .rst_n (rst_n),
@@ -218,6 +222,10 @@ module car_fsm_tb;
         .AVOID_PROBE_MS  (20),                 // 试探段拉长到 20 ms，便于观察静默窗
         .AVOID_PROBE_DUTY(350),
         .AVOID_PROBE_SETTLE_MS (5),            // 前 5 ms 不判障碍
+        // 本实例用同一个 rst_n 连跑多个避障用例（S_LOST→BACK、PROBE 静默窗等），
+        // 需要在"已避障过一次"之后仍能再次进入，故显式关掉 AVOID_ONCE。
+        // AVOID_ONCE=1 的行为由 bypass_rejoin_tb 的 once_dut 用例覆盖。
+        .AVOID_ONCE   (0),
         .AVOID_TRIES  (3),
         .DEFAULT_TURN_LEFT (0)                 // 本实例不测拐角兜底
     ) u_dut6 (

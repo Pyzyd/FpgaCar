@@ -54,6 +54,24 @@ module bypass_rejoin_tb;
         .duty_l(fixed_duty_l), .duty_r(fixed_duty_r), .state(fixed_state), .turn_dir()
     );
 
+    // ---- 第三个实例：AVOID_ONCE=1，验证"第二次障碍不得再触发绕障" ----
+    wire [2:0] once_state;
+    wire once_en;
+    car_fsm #(
+        .CLK_FREQ(1000), .START_MS(1), .LOST_HOLD_MS(2), .DIR_DEAD_MS(1),
+        .AVOID_ONCE(1), .AVOID_ROUTE_EN(1),
+        .AVOID_BACK_MS(4), .AVOID_TURN_MS(6), .AVOID_PROBE_MS(6),
+        .AVOID_TURN_IN_MS(TURN_IN_TICKS),
+        .AVOID_OUT_MS(OUT_TICKS), .AVOID_ALIGN_MS(OUT_TICKS),
+        .AVOID_PASS_MS(14), .AVOID_REJOIN_MS(20), .AVOID_LINE_MS(3), .AVOID_BLOCK_MS(5)
+    ) once_dut (
+        .clk(clk), .rst_n(rst_n), .on_line(on_line), .lost(lost), .obstacle(obstacle),
+        .wide(wide), .pos(pos), .dir_evt(3'd0), .pid_l(11'd450), .pid_r(11'd450),
+        .enc_l_step(1'b0), .enc_r_step(1'b0),
+        .en(once_en), .dir_l(), .dir_r(), .duty_l(), .duty_r(),
+        .state(once_state), .turn_dir()
+    );
+
     wire fixed_align   = fixed_state == BYPASS && fixed_right.bypass_step == ALIGN;
     wire fixed_turn_in = fixed_state == BYPASS && fixed_right.bypass_step == TURN_IN;
     wire fixed_out     = fixed_state == BYPASS && fixed_right.bypass_step == OUT;
@@ -69,7 +87,10 @@ module bypass_rejoin_tb;
     //     改回对称标称值，航向环自己维持直线；v1.20 那套固定 ±PASS_TRIM 偏置
     //     已取消，因为它和航向环打架：偏置在推着转，航向环在往回拉）。
     //     本 tb 的编码器不产生脉冲，arc_turn 恒 0，航向环输出 0，所以两轮同值。
-    localparam [10:0] PASS_DUTY = 11'd620;    // AVOID_PASS_DUTY 默认值
+    // 直接引用 DUT 的参数：2026-11-25 全域降速把 AVOID_PASS_DUTY 620→496 时，
+    // 写死字面量的断言就假红了。层次化引用让这条断言永远跟着 DUT 的默认值走。
+    // （iverilog 不允许层次化引用出现在 constant expression 里，所以用 wire 不用 localparam。）
+    wire [10:0] PASS_DUTY = fixed_right.AVOID_PASS_DUTY[10:0];
     reg fixed_straight_error = 0;
     always @(negedge clk) begin
         if (!rst_n) begin
@@ -183,7 +204,7 @@ module bypass_rejoin_tb;
 
         wait_drive(REJOIN);
         check(!fixed_arc_error, "every bypass step drives both wheels forward with unequal duty");
-        check(!fixed_straight_error, "straight pass runs symmetric AVOID_PASS_DUTY (620/620)");
+        check(!fixed_straight_error, "straight pass runs symmetric AVOID_PASS_DUTY on both wheels");
         check(align_ticks == OUT_TICKS, "alignment arc lasts the full powered duration");
         check(return_ticks == TURN_IN_TICKS, "return arc uses its own powered duration");
         on_line = 1; lost = 0; wide = 1;
@@ -195,8 +216,21 @@ module bypass_rejoin_tb;
         on_line = 0; lost = 1;
         repeat (2) @(negedge clk);
         on_line = 1; lost = 0;
-        repeat (4) @(negedge clk);
+        // "压线 → 摆平 → 交回"：累计 3 拍压线置 flatten，航向判据在 tb 里恒成立
+        // （无编码器脉冲，arc_turn 恒 0），所以约 5 拍就能回 RUN，给 8 拍余量。
+        repeat (8) @(negedge clk);
         check(state == RUN, "stable return line resumes normal tracking");
+
+        // ---- 新增：线只在阵列边缘（|pos| = 7）不得算作"回线成功" ----
+        // 现场问题：旧逻辑只要任意一路探头看到线就交回，交回瞬间 P=-5、航向 45°，
+        // track_pid 只能满舵硬掰 → 越线外摆。现在要求 |pos| ≤ 3 才进入摆平阶段。
+        begin_bypass(5'sd7);
+        obstacle = 0;
+        wait_drive(REJOIN);
+        on_line = 1; lost = 0;                       // 看到线，但位置在最外侧
+        repeat (12) @(negedge clk);
+        check(state == BYPASS, "edge-only line does not count as rejoined");
+        on_line = 0; lost = 1;
 
         begin_bypass(0);
         wait (state == BYPASS && dut.bypass_step == OUT);
@@ -289,6 +323,34 @@ module bypass_rejoin_tb;
         check(state == SEARCH, "missing return line hands control to line search, not a dead stop");
         check(!fixed_right.final_stop, "rejoin timeout no longer latches a permanent stop");
         check(en, "line search still drives the motors");
+
+        // ---- M3：AVOID_ONCE=1 —— 第一次绕障后，第二次障碍不得再进绕障 ----
+        // 现场依据：第一次绕障虽然回线抖，但最终把线找回来了并稳定跑了 2.3 s；
+        // 导致 STOP 的是车跑到弯道附近、墙进入 31 cm 范围后的**第二次**触发。
+        rst_n = 0; on_line = 1; lost = 0; obstacle = 0; wide = 0; pos = 0;
+        repeat (3) @(negedge clk);
+        rst_n = 1;
+        wait (once_state == RUN);
+        @(negedge clk); obstacle = 1;
+        wait (once_state == BYPASS);                 // 第一次：允许
+        check(once_dut.avoid_done, "first obstacle sets the once-only flag");
+        // 让它自己走完（全程不给线，必然离开绕障）
+        begin : once_leave
+            integer guard;
+            guard = 0;
+            while (once_state == BYPASS && guard < 3000) begin
+                @(negedge clk);
+                guard = guard + 1;
+            end
+        end
+        check(once_state != BYPASS, "bypass ends by itself on timeout");
+        @(negedge clk); obstacle = 0;
+        repeat (3) @(negedge clk);
+        obstacle = 1;                                // 第二次：必须被拦
+        repeat (40) @(negedge clk);
+        check(once_state != BYPASS, "AVOID_ONCE=1 rejects the second detour");
+        obstacle = 0;
+
         finish_summary;
     end
 
