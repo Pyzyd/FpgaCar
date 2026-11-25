@@ -169,11 +169,11 @@ module FpgaCar #(
     localparam [10:0] BENCH_DUTY     = 11'd300;     // 300/1200 = 25%
 
     // 【手动调参区】在 Efinity 打开本文件，搜索「手动调参区」。
-    localparam integer TRACK_P_GAIN              = 80;  // 循迹 P：按当前探头位置误差修正
-    localparam integer TRACK_D_GAIN              = 30;  // 循迹 D：按位置误差变化修正
-    localparam [6:0]   TRACK_SPEED_PERCENT        = 70;  // 普通循迹、出库恢复：原循迹输出 × 70%
-    localparam [6:0]   PARK_AFTER_P_PERCENT       = 80;  // 收到 P：调速后的循迹输出 × 80%
-    localparam [6:0]   PARK_AFTER_CORNER_PERCENT  = 60;  // 检出第一个库角：调速后的循迹输出 × 60%
+    localparam integer TRACK_P_GAIN              = 45;  // 循迹 P：按当前探头位置误差修正
+    localparam integer TRACK_D_GAIN              = 5;  // 循迹 D：按位置误差变化修正
+    localparam [6:0]   TRACK_SPEED_PERCENT        = 80;  // 普通循迹、出库恢复占原循迹输出的百分比
+    localparam [6:0]   PARK_AFTER_P_PERCENT       = 85;  // 收到 P 后占调速后循迹输出的百分比
+    localparam [6:0]   PARK_AFTER_CORNER_PERCENT  = 50;  // 检出首个库角后占调速后循迹输出的百分比
 
     localparam [10:0] TRACK_BASE_DUTY = 11'd480;     // 比例缩放前的 PID 基准 PWM
 
@@ -599,7 +599,7 @@ module FpgaCar #(
         .D_GAIN    (TRACK_D_GAIN),
         .I_SHIFT   (5),
         .I_LIMIT   (640),
-        .TRIM      (-140)
+        .TRIM      (0)
     ) u_pid (
         .clk     (clk),
         .rst_n   (motion_rst_n),

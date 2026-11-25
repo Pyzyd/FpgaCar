@@ -21,6 +21,12 @@ module parking_handoff_tb;
         .ml_in1(in_a[1]), .ml_in2(in_a[0]), .mr_in1(in_b[1]), .mr_in2(in_b[0])
     );
 
+    localparam [10:0] RAW_DUTY_L = 11'd340, RAW_DUTY_R = 11'd620;
+    wire [10:0] expected_track_l = RAW_DUTY_L * dut.TRACK_SPEED_PERCENT / 100;
+    wire [10:0] expected_track_r = RAW_DUTY_R * dut.TRACK_SPEED_PERCENT / 100;
+    wire [10:0] expected_after_p_l = expected_track_l * dut.PARK_AFTER_P_PERCENT / 100;
+    wire [10:0] expected_after_p_r = expected_track_r * dut.PARK_AFTER_P_PERCENT / 100;
+
     task clocks(input integer count);
         repeat (count) @(negedge clk);
     endtask
@@ -90,11 +96,11 @@ module parking_handoff_tb;
 
         clocks(30);
         check(!stand_by && !hc_trig, "power-on waits for K1 and leaves sonar off");
-        force dut.raw_track_duty_l = 11'd340;
-        force dut.raw_track_duty_r = 11'd620;
+        force dut.raw_track_duty_l = RAW_DUTY_L;
+        force dut.raw_track_duty_r = RAW_DUTY_R;
         press_start();
-        check(dut.final_duty_l == 190 && dut.final_duty_r == 347,
-              "P applies 80 percent to each 70-percent tracking command");
+        check(dut.final_duty_l == expected_after_p_l && dut.final_duty_r == expected_after_p_r,
+              "P applies the approach scale to each adjusted tracking command");
         start_parking();
 
         // 物理左轮后转时原始计数上升，动作模块入口使用前进为正。
@@ -129,8 +135,8 @@ module parking_handoff_tb;
         raw_l = raw_l - 3000;
         clocks(35);
         check(dut.parking_done && !dut.parking_owner && dut.car_state == 1 &&
-              dut.final_duty_l == 238 && dut.final_duty_r == 434,
-              "centered exit restores the 70-percent tracking commands");
+              dut.final_duty_l == expected_track_l && dut.final_duty_r == expected_track_r,
+              "centered exit restores the adjusted tracking commands");
         release dut.raw_track_duty_l;
         release dut.raw_track_duty_r;
         centered_frame();
