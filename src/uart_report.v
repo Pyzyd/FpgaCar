@@ -4,7 +4,7 @@
 // 每来一个 dist_valid 脉冲（hc_sr04 每 60 ms 一帧）打两行，格式固定：
 //
 //     D=123cm T=00011000 P=+02 O=0 M=01          (35 字节)
-//     L=00000123 R=00000123 VL=0005 VR=0005 ...  (79 字节，含 W= 与 S=)
+//     L=00000123 R=00000123 VL=0005 VR=0005 ...  (87 字节，含 W=/S=/CAM=)
 //
 //   D=xxxcm : 超声波距离；--- 表示无回波/超量程
 //   T=      : 8 路循迹探头，bit7..bit0 对应 track[7]..track[0]，1=压线
@@ -70,11 +70,18 @@ module uart_report #(
     input  wire [31:0] enc_r,      // 右编码器累计（二补码）
     input  wire signed [15:0] spd_l,  // 左速度（每窗口净步数）
     input  wire signed [15:0] spd_r,  // 右速度
+    // 相机/彩屏链路状态（CAM=，见文件头）：{SCCB 配置完成, 检测到 vsync, 采到有效帧}
+    //   bit2 = cam_cfg_done   OV5640 寄存器写完了
+    //   bit1 = cam_vs         出现过 vsync（传感器在出图）
+    //   bit0 = cam_frame      预览模块至少采到过一帧
+    //   典型组合：000 完全没有相机；100 传感器在出图但 SCCB 没配好；
+    //             111 正常；110 出图但帧没写进缓冲（PCLK/HREF 接线）。
+    input  wire [2:0]  cam_status,
     output wire        tx
 );
 
     localparam integer MSG_LEN  = 35;   // 第一行：D=/T=/P=/O=/M=
-    localparam integer MSG2_LEN = 79;   // 第二行：L=/R=/VL=/VR=/X=/C=/DL=/DR=/W=/S=
+    localparam integer MSG2_LEN = 87;   // 第二行：…/W=/S=/CAM=（2026-11-25 由 79 加 8 字节）
 
     // ------------------------------------------------------------------
     // 无符号除以 10（移位-减法，10 次迭代，纯组合）
@@ -401,8 +408,17 @@ module uart_report #(
         msg2[74] = 8'h53;                                  // 'S'
         msg2[75] = 8'h3D;
         msg2[76] = (td == 2'd0) ? 8'h30 : ((td == 2'd1) ? 8'h31 : 8'h32);
-        msg2[77] = 8'h0D;
-        msg2[78] = 8'h0A;
+        // CAM= 相机/彩屏链路状态（2026-11-25 加，用于排查"屏不亮"）
+        msg2[77] = 8'h20;
+        msg2[78] = 8'h43;                                  // 'C'
+        msg2[79] = 8'h41;                                  // 'A'
+        msg2[80] = 8'h4D;                                  // 'M'
+        msg2[81] = 8'h3D;
+        msg2[82] = cam_status[2] ? 8'h31 : 8'h30;          // SCCB 配置完成
+        msg2[83] = cam_status[1] ? 8'h31 : 8'h30;          // 检测到 vsync
+        msg2[84] = cam_status[0] ? 8'h31 : 8'h30;          // 采到有效帧
+        msg2[85] = 8'h0D;
+        msg2[86] = 8'h0A;
     end
 
 endmodule

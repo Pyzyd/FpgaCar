@@ -185,6 +185,8 @@ module FpgaCar #(
     wire [1:0]        panel_status;
     wire              run_enable, clear_result;
     wire              parking_camera_ready, parking_frame_done, parking_corner, parking_pair;
+    // {SCCB 配置完成, 见过 vsync, 采到过有效帧} —— 只给串口 CAM= 用，排查"屏不亮"
+    wire [2:0]        cam_status;
     wire              parking_slow, parking_pair_seen, parking_brake, parking_stopped, parking_video_ready;
     wire              parking_owner, parking_done, parking_fault;
     wire              parking_motion_stopped, parking_forward_l, parking_forward_r;
@@ -966,6 +968,12 @@ module FpgaCar #(
                                      + {7'b0, pv_x[8:1]};
         wire        lcd_capture_ready = sys_rst_n && lcd_cfg_done;
         assign parking_camera_ready = lcd_capture_ready;
+        // CAM= 遥测：cfg_done / vs_act（每 100 ms 窗口内见过 vsync）/ 曾采到过帧
+        reg cam_frame_seen;
+        always @(posedge clk or negedge sys_rst_n)
+            if (!sys_rst_n) cam_frame_seen <= 1'b0;
+            else if (pv_frame_valid) cam_frame_seen <= 1'b1;
+        assign cam_status = {lcd_cfg_done, lcd_vs_act, cam_frame_seen};
         wire park_guide = PARKING_DEBUG && (pv_x == 154 || pv_x == 166);
         wire [15:0] park_status_color = (reported_state == 3'd4 ||
                                            (parking_owner && parking_status == 3'd1)) ? 16'hF800 :
@@ -1056,6 +1064,7 @@ module FpgaCar #(
         assign uart_tx       = rep_tx;
     end else if (USE_CAMERA) begin : g_cam
         assign parking_camera_ready = 0;
+        assign cam_status = 3'b000;   // 本分支没有取景链路
         wire        cam_ready;
         wire [7:0]  cam_vs_cnt;
         wire        cam_vs_act;
@@ -1157,6 +1166,7 @@ module FpgaCar #(
         assign uart_tx = snap_busy ? snap_tx : rep_tx;
     end else begin : g_no_cam
         assign parking_camera_ready = 0;
+        assign cam_status = 3'b000;   // 本分支没有取景链路
         // 摄像头不吃数据：颜色结果恒为"中性、无事件"
         assign cam_color     = 3'd0;
         assign cam_color_evt = 1'b0;
@@ -1332,6 +1342,7 @@ module FpgaCar #(
         .enc_r      (enc_r_pos),
         .spd_l      (spd_l),
         .spd_r      (spd_r),
+        .cam_status (cam_status),
         .tx         (rep_tx)
     );
 

@@ -24,7 +24,7 @@ module uart_report_tb;
 
     localparam real    BIT_NS   = 1.0e9 / 115200.0;
     localparam integer MSG_LEN  = 35;
-    localparam integer MSG2_LEN = 79;
+    localparam integer MSG2_LEN = 87;   // 2026-11-25 加 CAM= 后 79→87
 
     reg         clk = 1'b0;
     reg         rst_n = 1'b0;
@@ -46,6 +46,7 @@ module uart_report_tb;
     reg  [31:0] enc_r = 32'd0;
     reg  signed [15:0] spd_l = 16'sd0;
     reg  signed [15:0] spd_r = 16'sd0;
+    reg  [2:0]  cam_status = 3'b101;   // {cfg_done, vs_seen, frame_seen}
     wire        tx;
 
     uart_report #(.CLK_FREQ(24_000_000), .BAUD(115_200), .REPORT_EN(1)) u_dut (
@@ -58,6 +59,7 @@ module uart_report_tb;
         .obstacle(obstacle),
         .state(state), .enc_l(enc_l), .enc_r(enc_r),
         .spd_l(spd_l), .spd_r(spd_r),
+        .cam_status(cam_status),
         .tx(tx)
     );
 
@@ -125,7 +127,7 @@ module uart_report_tb;
         fire;
         set_exp(MSG_LEN-2, "D=123cm T=00011000 P=+02 O=0 M=01");
         check_line(MSG_LEN, "L1 ");
-        set_exp(MSG2_LEN-2, "L=0000007B R=FFFFFFF0 VL=0005 VR=FFF0 X=00011000 C=+036 DL=27C DR=234 W=0 S=0");
+        set_exp(MSG2_LEN-2, "L=0000007B R=FFFFFFF0 VL=0005 VR=FFF0 X=00011000 C=+036 DL=27C DR=234 W=0 S=0 CAM=101");
         check_line(MSG2_LEN, "L2 ");
         #5000;
 
@@ -138,7 +140,7 @@ module uart_report_tb;
         fire;
         set_exp(MSG_LEN-2, "D=---cm T=10000001 P=-07 O=1 M=04");
         check_line(MSG_LEN, "L1b");
-        set_exp(MSG2_LEN-2, "L=00000000 R=00000000 VL=0000 VR=0000 X=01111110 C=-600 DL=000 DR=000 W=0 S=0");
+        set_exp(MSG2_LEN-2, "L=00000000 R=00000000 VL=0000 VR=0000 X=01111110 C=-600 DL=000 DR=000 W=0 S=0 CAM=101");
         check_line(MSG2_LEN, "L2b");
         #5000;
 
@@ -151,7 +153,7 @@ module uart_report_tb;
         fire;
         set_exp(MSG_LEN-2, "D=007cm T=00000000 P=+00 O=0 M=00");
         check_line(MSG_LEN, "L1c");
-        set_exp(MSG2_LEN-2, "L=0000ABCD R=FFFFFFFF VL=04B0 VR=FFFF X=11111111 C=+000 DL=4B0 DR=4B0 W=0 S=0");
+        set_exp(MSG2_LEN-2, "L=0000ABCD R=FFFFFFFF VL=04B0 VR=FFFF X=11111111 C=+000 DL=4B0 DR=4B0 W=0 S=0 CAM=101");
         check_line(MSG2_LEN, "L2c");
         #5000;
 
@@ -167,7 +169,7 @@ module uart_report_tb;
         fire;
         set_exp(MSG_LEN-2, "D=999cm T=11111111 P=+15 O=0 M=03");
         check_line(MSG_LEN, "L1d");
-        set_exp(MSG2_LEN-2, "L=7FFFFFFF R=80000000 VL=7FFF VR=8000 X=00000000 C=+600 DL=4B0 DR=000 W=1 S=2");
+        set_exp(MSG2_LEN-2, "L=7FFFFFFF R=80000000 VL=7FFF VR=8000 X=00000000 C=+600 DL=4B0 DR=000 W=1 S=2 CAM=101");
         check_line(MSG2_LEN, "L2d");
         #5000;
 
@@ -182,7 +184,7 @@ module uart_report_tb;
         fire;
         set_exp(MSG_LEN-2, "D=050cm T=00000001 P=-16 O=0 M=02");
         check_line(MSG_LEN, "L1e");
-        set_exp(MSG2_LEN-2, "L=00000000 R=00000000 VL=0000 VR=0000 X=11111110 C=-016 DL=248 DR=268 W=0 S=1");
+        set_exp(MSG2_LEN-2, "L=00000000 R=00000000 VL=0000 VR=0000 X=11111110 C=-016 DL=248 DR=268 W=0 S=1 CAM=101");
         check_line(MSG2_LEN, "L2e");
 
         if (fails == 0) $display("INFO: uart_report_tb ALL PASS");
