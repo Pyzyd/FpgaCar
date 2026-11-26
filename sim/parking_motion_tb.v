@@ -8,17 +8,17 @@ module parking_motion_tb;
     reg line_seen = 0, line_valid = 0, line_centered = 0;
     wire active, following, stopped, fault, forward_l, forward_r;
     wire [2:0] status;
-    wire [1:0] reverse_fault;
+    wire [1:0] reverse_fault, entry_fault;
     wire [10:0] duty_l, duty_r;
 
     // 每个模拟时钟推进一毫秒，里程和持续时间阈值与实机一致。
-    parking_motion #(.CLK_FREQ(1000)) dut (
+    parking_motion #(.CLK_FREQ(1000), .ENTRY_SECOND_BOOST_STEP(11'd60)) dut (
         .clk(clk), .rst_n(rst_n), .run_enable(run_enable),
         .position_l(pos_l), .position_r(pos_r), .line_seen(line_seen),
         .line_valid(line_valid), .line_centered(line_centered),
         .follow_duty_l(11'd400), .follow_duty_r(11'd210),
         .active(active), .following(following), .stopped(stopped),
-        .fault(fault), .reverse_fault(reverse_fault), .status(status),
+        .fault(fault), .reverse_fault(reverse_fault), .entry_fault(entry_fault), .status(status),
         .forward_l(forward_l), .forward_r(forward_r),
         .duty_l(duty_l), .duty_r(duty_r)
     );
@@ -142,12 +142,12 @@ module parking_motion_tb;
         check(status == 2 && !fault, "fresh K1 clears prior fault");
         pos_r = 181;
         step_ms(2);
-        check(fault && !active, "stop if the braked right wheel drifts");
+        check(fault && !active && entry_fault == 3, "stop and mark right wheel drift");
 
         begin_turn();
         pos_l = 37;
         step_ms(2);
-        check(fault && !active, "stop if left encoder reports the wrong direction");
+        check(fault && !active && entry_fault == 1, "stop and mark wrong left encoder direction");
 
         begin_turn();
         step_ms(179);
@@ -173,10 +173,14 @@ module parking_motion_tb;
         check(status == 2 && duty_l == 0 && duty_r == 0, "target angle overrides an active boost");
 
         begin_turn();
-        step_ms(799);
-        check(!fault && duty_l == 360, "allow torque recovery before the entry stall timeout");
+        step_ms(399);
+        check(!fault && duty_l == 360, "use the first boost just before 400 ms");
+        step_ms(1);
+        check(status == 2 && duty_l == 420 && duty_r == 0, "raise only left PWM after 400 ms without progress");
+        step_ms(399);
+        check(!fault && duty_l == 420, "allow torque recovery before the entry stall timeout");
         step_ms(2);
-        check(fault && !active && duty_l == 0 && duty_r == 0,
+        check(fault && !active && duty_l == 0 && duty_r == 0 && entry_fault == 2,
               "stop if the wheel never moves even with boost");
 
         begin_reverse();

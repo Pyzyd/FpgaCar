@@ -174,13 +174,18 @@ module FpgaCar #(
     localparam integer TRACK_TRIM               = 34;  // 正数增加左轮、降低右轮 PWM
     localparam [10:0]   TRACK_BASE_DUTY          = 384; // 正中时左右轮平均 PWM，32%
     localparam [6:0]    TRACK_SPEED_PERCENT      = 100; // 常规循迹倍率，384 已是 main 的降速值
-    localparam [6:0]    PARK_AFTER_P_PERCENT     = 85;  // 相对调速后的常规循迹
-    localparam [6:0]    PARK_AFTER_CORNER_PERCENT= 50;  // 相对调速后的常规循迹
+    localparam [6:0]    PARK_AFTER_P_PERCENT     = 70;  // 相对调速后的常规循迹
+    localparam [6:0]    PARK_AFTER_CORNER_PERCENT= 45;  // 相对调速后的常规循迹
     localparam [6:0]    POST_PARK_PERCENT        = 70;  // 出库后的循迹及终点直行倍率
     localparam integer START_BOX_MM             = 400; // 从 K1 起计，起步区内横边视为直行
     localparam [3:0]    FINISH_MIN_SENSORS       = 6;   // 终点横边至少压黑的探头数
     localparam integer FINISH_CONFIRM_MS        = 8;   // 横边连续确认时间
     localparam integer FINISH_MM                = 300; // 检出横边起再行驶的距离
+    localparam integer TURN_SIGN_WAIT_MS        = 4500; // 箭头请求等待路口的有效期
+    localparam integer TURN_SIGN_ON_LOSS        = 1;    // 漏检宽黑且持续丢线时，按有效箭头找线
+    localparam [6:0]    TURN_APPROACH_PERCENT    = 80;   // 收到左/右转牌后，等路口期间的循迹比例
+    localparam [3:0]    TURN_JUNCTION_SENSORS    = 3;    // 等候箭头转弯时，至少三路压线就进入支路
+    localparam [10:0]   PARK_ENTRY_EXTRA_PWM    = 60;   // 入库左轮 400 ms 无进度时，在第一档补力上再加 5%
 
     localparam integer FINISH_DRIVE_DUTY =
         TRACK_BASE_DUTY * TRACK_SPEED_PERCENT * POST_PARK_PERCENT / 10000;
@@ -200,9 +205,10 @@ module FpgaCar #(
     // {SCCB 配置完成, 见过 vsync, 采到过有效帧} —— 只给串口 CAM= 用，排查"屏不亮"
     wire [2:0]        cam_status;
     wire              parking_slow, parking_pair_seen, parking_brake, parking_stopped, parking_video_ready;
+    wire              parking_armed;
     wire              parking_owner, parking_done, parking_fault;
     wire              parking_motion_stopped, parking_forward_l, parking_forward_r;
-    wire [1:0]        parking_reverse_fault;
+    wire [1:0]        parking_reverse_fault, parking_entry_fault;
     wire [2:0]        parking_status;
     wire              start_zone, start_box_override;
     wire              finish_driving, finish_braking, finish_stopped;
@@ -758,8 +764,11 @@ module FpgaCar #(
         // 一旦锁存了一枚过期箭头，它会在整整 12 s 内压制拐角兜底，
         // 车遇到没有牌的真拐角也不会按 DEFAULT_TURN_LEFT 转（直接冲出去）。
         // 现场按 3 m 场地估：原 3 s 是按 ~0.4 m/s，降速后 3.75 s。
-        .TURN_REQUEST_MS  (3750),
+        .TURN_REQUEST_MS  (TURN_SIGN_WAIT_MS),
         .TURN_WAIT_FOR_CORNER (USE_K230),
+        .TURN_SIGN_ON_LOSS (TURN_SIGN_ON_LOSS),
+        .TURN_APPROACH_PERCENT (TURN_APPROACH_PERCENT),
+        .TURN_JUNCTION_SENSORS (TURN_JUNCTION_SENSORS),
         .TURN_DUTY    (560),         // 700→×0.8
         // 现场初值：先让车驶到障碍侧边，再摆正超越，最后低速斜切回线。
         .AVOID_EN         (1),
@@ -889,6 +898,7 @@ module FpgaCar #(
         .lost     (steering_lost),
         .obstacle (route_obstacle),
         .wide     (line_wide && !start_box_override),
+        .line_count ((start_zone || parking_done) ? 4'd0 : line_cnt),
         .turn_dir (turn_dir),
         .pos      (steering_pos),
         .dir_evt  (dir_evt_mux),    // 交通牌方向：K230 提供，停用时恒 0
@@ -972,7 +982,7 @@ module FpgaCar #(
             .center_x_sum(center_x_sum), .track_duty_l(track_duty_l), .track_duty_r(track_duty_r),
             .duty_l(approach_duty_l), .duty_r(approach_duty_r),
             .slow(parking_slow), .pair_seen(parking_pair_seen),
-            .brake(parking_brake), .stopped(parking_stopped)
+            .brake(parking_brake), .stopped(parking_stopped), .armed(parking_armed)
         );
 
         // 归线后恢复原循迹，直到下一次 K1 才重新启用视觉停车。
@@ -984,23 +994,24 @@ module FpgaCar #(
         wire line_valid_for_parking = line_on && !line_lost && !line_wide;
         wire line_centered_for_parking =
             line_valid_for_parking && line_pos >= -5'sd1 && line_pos <= 5'sd1;
-        parking_motion action (
+        parking_motion #(.ENTRY_SECOND_BOOST_STEP(PARK_ENTRY_EXTRA_PWM)) action (
             .clk(clk), .rst_n(sys_rst_n && (!run_enable || parking_stopped)),
             .run_enable(run_enable && parking_owner),
             .position_l(park_pos_l), .position_r(park_pos_r), .line_seen(line_on),
             .line_valid(line_valid_for_parking), .line_centered(line_centered_for_parking),
             .follow_duty_l(11'd0), .follow_duty_r(11'd0),
             .active(), .following(action_following), .stopped(parking_motion_stopped),
-            .fault(parking_fault), .reverse_fault(parking_reverse_fault), .status(parking_status),
+            .fault(parking_fault), .reverse_fault(parking_reverse_fault),
+            .entry_fault(parking_entry_fault), .status(parking_status),
             .forward_l(parking_forward_l), .forward_r(parking_forward_r),
             .duty_l(parking_duty_l), .duty_r(parking_duty_r)
         );
     end else begin : g_no_parking
         assign {parking_frame_done, parking_corner, parking_pair, parking_video_ready,
-                parking_slow, parking_pair_seen, parking_brake, parking_stopped} = 8'd0;
+                parking_slow, parking_pair_seen, parking_brake, parking_stopped, parking_armed} = 9'd0;
         assign {parking_owner, parking_done, parking_fault, parking_motion_stopped} = 4'd0;
         assign {parking_forward_l, parking_forward_r} = 2'b11;
-        assign {parking_reverse_fault, parking_status} = 5'd0;
+        assign {parking_reverse_fault, parking_entry_fault, parking_status} = 7'd0;
         assign {parking_duty_l, parking_duty_r} = 22'd0;
         assign approach_duty_l = track_duty_l;
         assign approach_duty_r = track_duty_r;
@@ -1043,8 +1054,14 @@ module FpgaCar #(
                                         parking_owner ? 16'h001F : approach_brake ? 16'hF800 :
                                         parking_done ? 16'h07E0 :
                                         parking_pair_seen ? 16'h07FF :
-                                        parking_slow ? 16'hFFE0 : 16'h0000;
-        wire [15:0] pv_pixel = !pv_image_row ? park_status_color : park_guide ?
+                                        parking_slow ? 16'hFFE0 :
+                                        parking_armed ? 16'hF81F : 16'h0000;
+        // 上条红表示停车。入库左转故障时，下条用紫/橙/青区分原因。
+        wire [15:0] entry_fault_color = parking_entry_fault == 2'd1 ? 16'hF81F :
+                                       parking_entry_fault == 2'd2 ? 16'hFD20 : 16'h07FF;
+        wire [15:0] status_bar_pixel = parking_fault && parking_entry_fault != 0 && pv_y >= 9'd210 ?
+                                       entry_fault_color : park_status_color;
+        wire [15:0] pv_pixel = !pv_image_row ? status_bar_pixel : park_guide ?
                                16'h07E0 : {pv_gray[7:3], pv_gray[7:2], pv_gray[7:3]};
 
         cam_probe #(
@@ -1398,7 +1415,7 @@ module FpgaCar #(
         .duty_l     (final_duty_l),
         .duty_r     (final_duty_r),
         .wide       (line_wide),
-        .turn_dir   (parking_fault ? parking_reverse_fault : turn_dir),
+        .turn_dir   (parking_fault ? (parking_entry_fault != 0 ? parking_entry_fault : parking_reverse_fault) : turn_dir),
         .obstacle   (parking_fault || (!parking_owner && !finish_owner && obstacle)),
         .state      (reported_state),
         .enc_l      (enc_l_pos),

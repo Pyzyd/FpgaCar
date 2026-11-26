@@ -135,12 +135,14 @@ module parking_handoff_tb;
         force dut.raw_track_duty_r = RAW_DUTY_R;
         clocks(2);
         check(dut.final_duty_l == normal_l * dut.PARK_AFTER_P_PERCENT / 100 &&
-              dut.final_duty_r == normal_r * dut.PARK_AFTER_P_PERCENT / 100,
-              "confirmed parking packet scales both tracking duties");
+              dut.final_duty_r == normal_r * dut.PARK_AFTER_P_PERCENT / 100 &&
+              dut.parking_armed && dut.g_lcd.park_status_color == 16'hF81F,
+              "confirmed parking packet scales both tracking duties and turns the status purple");
         force dut.parking_pair = 1'b0;
         centered_frame();
         check(dut.parking_slow && dut.final_duty_l == normal_l * dut.PARK_AFTER_CORNER_PERCENT / 100 &&
-              dut.final_duty_r == normal_r * dut.PARK_AFTER_CORNER_PERCENT / 100,
+              dut.final_duty_r == normal_r * dut.PARK_AFTER_CORNER_PERCENT / 100 &&
+              dut.g_lcd.park_status_color == 16'hFFE0,
               "a detected corner selects the corner speed ratio");
         release dut.raw_track_duty_l;
         release dut.raw_track_duty_r;
@@ -221,6 +223,9 @@ module parking_handoff_tb;
         clocks(180);
         check(dut.mr_duty == 360 && dut.ml_duty == 0 && in_a == 2'b11,
               "entry stall boosts only physical left wheel and holds the right brake");
+        clocks(220);
+        check(dut.mr_duty == 360 + dut.PARK_ENTRY_EXTRA_PWM && dut.ml_duty == 0 && in_a == 2'b11,
+              "second entry boost raises only the physical left wheel");
         k2 = 0;
         clocks(4);
         check({stand_by, pwm_a, pwm_b, in_a, in_b} == 0 && dut.panel_status == 2,
@@ -233,7 +238,8 @@ module parking_handoff_tb;
         start_parking();
         raw_l = raw_l - 50;
         clocks(4);
-        check(dut.parking_fault && dut.panel_status == 2 && !stand_by,
+        check(dut.parking_fault && dut.parking_entry_fault == 1 && dut.panel_status == 2 && !stand_by &&
+              dut.g_lcd.park_status_color == 16'hF800 && dut.g_lcd.entry_fault_color == 16'hF81F,
               "wrong encoder direction locks stop and preserves the fault");
         clocks(20);
         check(dut.parking_fault && !stand_by, "fault remains visible after the motor outputs are disabled");

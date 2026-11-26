@@ -216,13 +216,22 @@ class MultiTracker:
                     ready.append(t)
         # A pending, earlier crossing must resolve before a later one can emit.
         pending=sorted([t for t in self.tracks if t['cross_at'] is not None and not t['counted'] and not t['blocked']],key=lambda t:t['cross_at'])
+        # Close crossings still count separately when every track has the same color.
+        # Only a group with different colors has an ambiguous order.
+        start = 0
+        while start < len(pending):
+            end = start + 1
+            while end < len(pending) and pending[end]['cross_at'] - pending[end-1]['cross_at'] < 40:
+                end += 1
+            group = pending[start:end]
+            if any(t['color'] != group[0]['color'] for t in group):
+                for t in group:
+                    t['blocked'] = True
+                self.sequence_uncertain = True
+                self.notes.append({'kind':'order_ambiguous','tracks':[t['id'] for t in group]})
+            start = end
         events=[]
-        for i,t in enumerate(pending):
-            if i+1<len(pending) and pending[i+1]['cross_at']-t['cross_at']<40:
-                for item in (t,pending[i+1]): item['blocked']=True
-                self.sequence_uncertain=True
-                self.notes.append({'kind':'order_ambiguous','tracks':[t['id'],pending[i+1]['id']]})
-                continue
+        for t in pending:
             if t['blocked']:
                 continue
             if t not in ready:

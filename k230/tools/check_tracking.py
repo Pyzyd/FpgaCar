@@ -104,6 +104,23 @@ class Checks(unittest.TestCase):
             events+=tracker.update([d],i*252)['events']
         self.assertEqual([e['label'] for e in events],['green'])
 
+    def test_field_same_color_blocks_cross_together(self):
+        tracker = MultiTracker(arm=.94,commit=.98,min_travel=40,hold_ms=100,edge_pass=True)
+        events = []
+        for i, x in enumerate(range(510, 805, 12)):
+            detections = []
+            for cx, color, y in ((x,'red',180),(x,'red',295),(x-72,'green',220),(x-144,'yellow',250)):
+                hit = detection(cx,color,y,clipped=cx+20 >= 640)
+                left, top, width, height = hit['box']
+                width = min(width,640-left)
+                if width >= 16:
+                    hit['box'] = (left,top,width,height)
+                    detections.append(hit)
+            events.extend(tracker.update(detections,i*100)['events'])
+        self.assertEqual(tracker.sequence,['red','red','green','yellow'])
+        self.assertEqual(len({event['track'] for event in events}),4)
+        self.assertFalse(tracker.sequence_uncertain)
+
     def test_recovered_edge_needs_observed_motion_to_count(self):
         for moving in (False, True):
             with self.subTest(moving=moving):

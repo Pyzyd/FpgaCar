@@ -13,6 +13,8 @@ module bypass_rejoin_tb;
     always #5 clk = !clk;
     reg rst_n = 0, on_line = 1, lost = 0, obstacle = 0, wide = 0;
     reg signed [4:0] pos = 0;
+    reg [2:0] dir_evt = 0;
+    reg [3:0] line_count = 2;
     wire [2:0] state;
     wire en, dir_l, dir_r;
     wire [2:0] fixed_state;
@@ -30,13 +32,15 @@ module bypass_rejoin_tb;
 
     car_fsm #(
         .CLK_FREQ(1000), .START_MS(1), .LOST_HOLD_MS(2), .DIR_DEAD_MS(1),
+        .TURN_WAIT_FOR_CORNER(1), .TURN_APPROACH_PERCENT(80), .TURN_JUNCTION_SENSORS(3),
         .AVOID_ROUTE_EN(1), .AVOID_BACK_MS(4), .AVOID_TURN_MS(6), .AVOID_PROBE_MS(6),
         .AVOID_TURN_IN_MS(TURN_IN_TICKS),
         .AVOID_OUT_MS(OUT_TICKS), .AVOID_ALIGN_MS(OUT_TICKS),
         .AVOID_PASS_MS(14), .AVOID_REJOIN_MS(20), .AVOID_LINE_MS(3), .AVOID_BLOCK_MS(5)
     ) dut (
         .clk(clk), .rst_n(rst_n), .on_line(on_line), .lost(lost), .obstacle(obstacle),
-        .wide(wide), .pos(pos), .dir_evt(3'd0), .pid_l(11'd450), .pid_r(11'd450), .enc_l_step(1'b0), .enc_r_step(1'b0),
+        .wide(wide), .line_count(line_count), .pos(pos), .dir_evt(dir_evt),
+        .pid_l(11'd450), .pid_r(11'd450), .enc_l_step(1'b0), .enc_r_step(1'b0),
         .en(en), .dir_l(dir_l), .dir_r(dir_r), .duty_l(), .duty_r(), .state(state), .turn_dir()
     );
 
@@ -49,7 +53,8 @@ module bypass_rejoin_tb;
         .AVOID_PASS_MS(14), .AVOID_REJOIN_MS(20), .AVOID_LINE_MS(3), .AVOID_BLOCK_MS(5)
     ) fixed_right (
         .clk(clk), .rst_n(rst_n), .on_line(on_line), .lost(lost), .obstacle(obstacle),
-        .wide(wide), .pos(pos), .dir_evt(3'd0), .pid_l(11'd450), .pid_r(11'd450), .enc_l_step(1'b0), .enc_r_step(1'b0),
+        .wide(wide), .line_count(4'd0), .pos(pos), .dir_evt(3'd0),
+        .pid_l(11'd450), .pid_r(11'd450), .enc_l_step(1'b0), .enc_r_step(1'b0),
         .en(fixed_en), .dir_l(fixed_dir_l), .dir_r(fixed_dir_r),
         .duty_l(fixed_duty_l), .duty_r(fixed_duty_r), .state(fixed_state), .turn_dir()
     );
@@ -66,7 +71,7 @@ module bypass_rejoin_tb;
         .AVOID_PASS_MS(14), .AVOID_REJOIN_MS(20), .AVOID_LINE_MS(3), .AVOID_BLOCK_MS(5)
     ) once_dut (
         .clk(clk), .rst_n(rst_n), .on_line(on_line), .lost(lost), .obstacle(obstacle),
-        .wide(wide), .pos(pos), .dir_evt(3'd0), .pid_l(11'd450), .pid_r(11'd450),
+        .wide(wide), .line_count(4'd0), .pos(pos), .dir_evt(3'd0), .pid_l(11'd450), .pid_r(11'd450),
         .enc_l_step(1'b0), .enc_r_step(1'b0),
         .en(once_en), .dir_l(), .dir_r(), .duty_l(), .duty_r(),
         .state(once_state), .turn_dir()
@@ -203,6 +208,18 @@ module bypass_rejoin_tb;
         on_line = 0; lost = 1;
 
         wait_drive(REJOIN);
+        begin : arrow_during_rejoin
+            reg [10:0] rejoin_pwm_l, rejoin_pwm_r;
+            line_count = 3;
+            dir_evt = 3'd1;
+            @(negedge clk); dir_evt = 3'd0;
+            rejoin_pwm_l = dut.avoid_duty_l;
+            rejoin_pwm_r = dut.avoid_duty_r;
+            @(negedge clk);
+            check(dut.turn_req && state == BYPASS && dut.bypass_step == REJOIN &&
+                  dut.duty_l == rejoin_pwm_l && dut.duty_r == rejoin_pwm_r,
+                  "arrow received during rejoin cannot scale its closed-loop PWM");
+        end
         check(!fixed_arc_error, "every bypass step drives both wheels forward with unequal duty");
         check(!fixed_straight_error, "straight pass runs symmetric AVOID_PASS_DUTY on both wheels");
         check(align_ticks == OUT_TICKS, "alignment arc lasts the full powered duration");
@@ -220,6 +237,14 @@ module bypass_rejoin_tb;
         // （无编码器脉冲，arc_turn 恒 0），所以约 5 拍就能回 RUN，给 8 拍余量。
         repeat (8) @(negedge clk);
         check(state == RUN, "stable return line resumes normal tracking");
+        check(dut.duty_l == 360 && dut.duty_r == 360 && dut.turn_req && !dut.turning,
+              "the retained arrow slows tracking without mistaking the rejoin line for a junction");
+        line_count = 2;
+        repeat (2) @(negedge clk);
+        line_count = 3;
+        repeat (4) @(negedge clk);
+        check(dut.turning && dut.turn_dir == 1, "a new three-probe junction consumes the retained arrow");
+        line_count = 2;
 
         // ---- 新增：线只在阵列边缘（|pos| = 7）不得算作"回线成功" ----
         // 现场问题：旧逻辑只要任意一路探头看到线就交回，交回瞬间 P=-5、航向 45°，

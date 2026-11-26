@@ -9,6 +9,7 @@ module parking_motion #(
     parameter integer REVERSE_MM = 300,
     parameter integer EXIT_LIMIT_MM = 450,
     parameter [10:0] PIVOT_DUTY = 11'd300,
+    parameter [10:0] ENTRY_SECOND_BOOST_STEP = 11'd0,
     parameter [10:0] STRAIGHT_DUTY = 11'd300,
     parameter [10:0] FOLLOW_MAX_DUTY = 11'd300
 ) (
@@ -27,6 +28,7 @@ module parking_motion #(
     output wire               stopped,
     output reg                fault,
     output reg  [1:0]         reverse_fault,
+    output reg  [1:0]         entry_fault,
     output reg  [2:0]         status,
     output reg                forward_l,
     output reg                forward_r,
@@ -58,17 +60,20 @@ module parking_motion #(
     localparam integer RETURN_MAX = TURN_COUNTS * 7 / 6;
     localparam integer WRONG_WAY_COUNTS = 36, START_COUNTS = 24;
     localparam integer PIVOT_DRIFT = 180, STRAIGHT_DRIFT = 300;
-    localparam integer ENTRY_BOOST_MS = 180, ENTRY_STALL_MS = 800;
+    localparam integer ENTRY_BOOST_MS = 180, ENTRY_BOOST_HIGH_MS = 400, ENTRY_STALL_MS = 800;
     localparam integer ENTRY_BOOST_RELEASE_COUNTS = 24;
     localparam [11:0] ENTRY_BOOSTED_DUTY = {1'b0, PIVOT_DUTY} + 12'd60;
     localparam [10:0] ENTRY_BOOST_DUTY = ENTRY_BOOSTED_DUTY > 1200 ?
                                         11'd1200 : ENTRY_BOOSTED_DUTY[10:0];
+    localparam [11:0] ENTRY_HIGH_TOTAL = {1'b0, ENTRY_BOOST_DUTY} + {1'b0, ENTRY_SECOND_BOOST_STEP};
+    localparam [10:0] ENTRY_HIGH_DUTY = ENTRY_HIGH_TOTAL > 1200 ? 11'd1200 : ENTRY_HIGH_TOTAL[10:0];
     localparam signed [31:0] TRIM_LIMIT = 36;
     localparam signed [31:0] REVERSE_TRIM_LIMIT = 60, CATCH_GAP = 144, RESUME_GAP = 72;
     localparam [10:0] CATCH_DUTY = STRAIGHT_DUTY + REVERSE_TRIM_LIMIT;
     localparam integer REVERSE_DRIFT_LIMIT = 600, REVERSE_STALL_MS = 800, PROGRESS_COUNTS = 8;
     localparam [1:0] REVERSE_OK = 0, REVERSE_WRONG_WAY = 1,
                      REVERSE_STALLED = 2, REVERSE_LIMIT = 3;
+    localparam [1:0] ENTRY_OK = 0, ENTRY_WRONG_WAY = 1, ENTRY_NO_PROGRESS = 2, ENTRY_RIGHT_DRIFT = 3;
 
     reg [3:0] state, next_state;
     reg [TICK_W-1:0] tick_count;
@@ -101,10 +106,11 @@ module parking_motion #(
     wire signed [31:0] pivot_yaw = (state == ENTRY_TURN) ? delta_r - delta_l : delta_l - delta_r;
     wire entry_driving = state == ENTRY_TURN && PIVOT_DUTY != 0;
     wire entry_boost = entry_driving && idle_l_ms >= ENTRY_BOOST_MS;
+    wire entry_high_boost = entry_boost && idle_l_ms >= ENTRY_BOOST_HIGH_MS;
     wire entry_stalled = entry_driving && idle_l_ms >= ENTRY_STALL_MS;
-    wire pivot_failed = (elapsed_ms >= PIVOT_LIMIT_MS) ||
-                        (pivot_left < -WRONG_WAY_COUNTS) ||
-                        (delta_r > PIVOT_DRIFT) || (delta_r < -PIVOT_DRIFT) ||
+    wire pivot_wrong_way = pivot_left < -WRONG_WAY_COUNTS;
+    wire pivot_right_drift = delta_r > PIVOT_DRIFT || delta_r < -PIVOT_DRIFT;
+    wire pivot_failed = (elapsed_ms >= PIVOT_LIMIT_MS) || pivot_wrong_way || pivot_right_drift ||
                         (elapsed_ms >= CHECK_ENCODER_MS && pivot_left < START_COUNTS);
     wire straight_failed = (along_l < -WRONG_WAY_COUNTS) || (along_r < -WRONG_WAY_COUNTS) ||
                            (straight_error > STRAIGHT_DRIFT) ||
@@ -182,6 +188,7 @@ module parking_motion #(
             start_r <= 0;
             fault <= 1'b0;
             reverse_fault <= REVERSE_OK;
+            entry_fault <= ENTRY_OK;
         end else if (state != next_state) begin
             state <= next_state;
             tick_count <= 0;
@@ -196,10 +203,15 @@ module parking_motion #(
                     if (reverse_wrong_way) reverse_fault <= REVERSE_WRONG_WAY;
                     else if (reverse_stalled) reverse_fault <= REVERSE_STALLED;
                     else reverse_fault <= REVERSE_LIMIT;
+                end else if (state == ENTRY_TURN) begin
+                    if (pivot_wrong_way) entry_fault <= ENTRY_WRONG_WAY;
+                    else if (pivot_right_drift) entry_fault <= ENTRY_RIGHT_DRIFT;
+                    else entry_fault <= ENTRY_NO_PROGRESS;
                 end
             end else if (next_state == DELAY) begin
                 fault <= 1'b0;
                 reverse_fault <= REVERSE_OK;
+                entry_fault <= ENTRY_OK;
             end
         end else begin
             tick_count <= ms_tick ? 0 : tick_count + 1'b1;
@@ -276,7 +288,8 @@ module parking_motion #(
                 ENTRY_TURN: begin
                     status = 3'd2;
                     forward_l = 1'b0;
-                    duty_l = entry_boost ? ENTRY_BOOST_DUTY : PIVOT_DUTY;
+                    duty_l = entry_high_boost ? ENTRY_HIGH_DUTY :
+                             entry_boost ? ENTRY_BOOST_DUTY : PIVOT_DUTY;
                 end
                 ENTRY_BRAKE: status = 3'd2;
                 REVERSE: begin

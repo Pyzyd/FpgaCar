@@ -9,7 +9,8 @@ from turn_detector import blue_regions, select as select_turn
 from turn_shape import StableEvent
 
 
-VERSION = 'FpgaCar-field-integration-v1'
+VERSION = 'FpgaCar-field-integration-v6'
+PARK_RETRY_MS = 400
 EVENT_CODES = {'left':1, 'right':2, 'red':3, 'green':4, 'blue':5, 'yellow':6, 'P':7}
 LABELS = {'left':'左转', 'right':'右转', 'red':'红', 'green':'绿', 'blue':'蓝', 'yellow':'黄'}
 BOX_COLORS = {'red':(255,76,76), 'yellow':(255,217,60),
@@ -96,6 +97,20 @@ def draw_labeled_box(panel, box, text, color, width):
     panel.draw_string_advanced(tx+3,ty+1,20,text,color=color)
 
 
+def publish_event(link, event, send_gpio):
+    if link is None:
+        event['gpio'] = 'fault' if send_gpio else 'preview_only'
+        return
+    try:
+        event['gpio'] = 'sent_no_ack' if link.send(EVENT_CODES[event['label']]) else 'fault'
+        if event['gpio'] == 'fault':
+            event['gpio_error'] = link.error
+    except Exception as exc:
+        # 旧版 gpio_link 不接受 P 的事件码。保留取景，并在事件日志里报出具体原因。
+        event['gpio'] = 'fault'
+        event['gpio_error'] = str(exc)
+
+
 def main(send_gpio=False):
     import gc
     import image
@@ -148,12 +163,16 @@ def main(send_gpio=False):
         fps = 0.
         warmed_at = rate_at = last_draw = time.ticks_ms()
         reset_at, redraw, boxes_visible = None, False, False
+        gpio_send_failed = False
+        parking_sent, parking_sent_at = False, 0
 
         def poll_restart(now):
-            nonlocal reset_at, redraw
+            nonlocal reset_at, redraw, gpio_send_failed, parking_sent
             if restart_key is None or not restart_key.update(key.value(), now):
                 return
             vision.reset()
+            gpio_send_failed = False
+            parking_sent = False
             reset_at, redraw = now, True
             print('[FIELD] recognition restarted')
             if recorder:
@@ -179,9 +198,22 @@ def main(send_gpio=False):
                 result = vision.update(frame,now)
                 events = result['events']
                 for event in events:
-                    ok = link.send(EVENT_CODES[event['label']]) if link else False
-                    event['gpio'] = 'sent_no_ack' if ok else 'fault' if send_gpio else 'preview_only'
+                    publish_event(link,event,send_gpio)
+                    if link and event['gpio'] == 'fault':
+                        gpio_send_failed = True
+                    if event['kind'] == 'parking':
+                        parking_sent = event['gpio'] == 'sent_no_ack'
+                        parking_sent_at = now
                     print('[FIELD EVENT]',event)
+                # P 的 GPIO 链路没有回执。牌仍稳定可见时补发，不重复记录识别事件。
+                if parking_sent and vision.parking_gate.stable == 'P' and time.ticks_diff(now,parking_sent_at) >= PARK_RETRY_MS:
+                    retry = {'kind':'parking_retry','label':'P'}
+                    publish_event(link,retry,send_gpio)
+                    parking_sent = retry['gpio'] == 'sent_no_ack'
+                    parking_sent_at = now
+                    if not parking_sent:
+                        gpio_send_failed = True
+                    print('[P RETRY]',retry)
                 if recorder:
                     saved = recorder.image(frame,frame_id,bool(events))
                     recorder.write({'kind':'frame','ticks_ms':now,'frame':frame_id,'mode':'field',
@@ -209,23 +241,28 @@ def main(send_gpio=False):
                 if parking_box:
                     draw_labeled_box(panel,parking_box,'P',(90,230,255),width)
                 panel.draw_rectangle(0,height,C.WIDTH,C.HEIGHT-height,color=(13,26,41),fill=True)
+                status_x = C.WIDTH // 2 + 8
                 arrow = LABELS.get(vision.last_turn,'--')
-                sequence = '  '.join(LABELS[c] for c in vision.tracker.sequence) or '--'
+                sequence = ''.join(LABELS[c] for c in vision.tracker.sequence) or '--'
                 tx = 'GPIO已启用' if link and not link.error else 'GPIO未输出'
-                panel.draw_string_advanced(12,height+8,30,'转向 '+arrow+'    色序 '+sequence,color=(241,246,251))
+                panel.draw_string_advanced(status_x,height+8,24,'转向 '+arrow+'  色序 '+sequence,color=(241,246,251))
                 status = '预热中' if result is None else '顺序待复核' if vision.tracker.sequence_uncertain else tx
                 if recorder and recorder.error:
                     status = 'SD记录停止'
+                if gpio_send_failed:
+                    status = 'GPIO发送失败'
                 if reset_at is not None:
                     if time.ticks_diff(now,reset_at)<1000:
                         status = '识别已重开'
                     else:
                         reset_at = None
                 labels = {item['label'] for item in candidates}
-                visible = '  '.join(LABELS[c] for c in COLORS if c in labels) or '--'
-                parking_status = '    停车牌 P 已确认' if vision.parking_seen else ''
-                panel.draw_string_advanced(12,height+48,22,'当前色块 '+visible+parking_status,color=(241,246,251))
-                panel.draw_string_advanced(12,height+83,22,'%s    %.1f FPS' % (status,fps),color=(180,217,242))
+                visible = ''.join(LABELS[c] for c in COLORS if c in labels) or '--'
+                panel.draw_string_advanced(status_x,height+48,22,'色块 '+visible,color=(241,246,251))
+                if vision.parking_seen:
+                    parking_text = 'P 已发送' if parking_sent else 'P 已识别'
+                    panel.draw_string_advanced(C.WIDTH-124,height+48,24,parking_text,color=(90,230,255))
+                panel.draw_string_advanced(status_x,height+83,22,'%s  %.1f FPS' % (status,fps),color=(180,217,242))
                 Display.show_image(panel,layer=Display.LAYER_OSD0)
                 index = (index+1)%len(panels)
                 last_draw, redraw, boxes_visible = now, False, bool(candidates or parking_box)

@@ -12,11 +12,10 @@ module parking_approach #(
     input  wire [9:0] center_x_sum,
     input  wire [10:0] track_duty_l, track_duty_r,
     output wire [10:0] duty_l, duty_r,
-    output reg  slow, pair_seen, brake, stopped
+    output reg  slow, pair_seen, brake, stopped, armed
 );
     localparam integer BRAKE_CLOCKS = CLK_FREQ / 1000 * BRAKE_MS;
     localparam integer TIMER_BITS = $clog2(BRAKE_CLOCKS + 1);
-    reg armed;
     reg previous_centered;
     reg [TIMER_BITS-1:0] brake_timer;
 
