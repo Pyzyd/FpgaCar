@@ -76,15 +76,20 @@ class DesktopFrame:
         return blobs
 
 
-def replay(folder):
-    vision = FieldVision()
+def timestamp(photo):
+    return int(photo.stem.split('_')[-1].removesuffix('ms'))
+
+
+def replay(folder, vision=None, offset_ms=0):
+    if vision is None:
+        vision = FieldVision()
     paths = sorted(folder.glob('*.jpg'))
     if not paths:
         return None
     seen = Counter()
     events = []
     for photo in paths:
-        now = int(photo.stem.split('_')[-1].removesuffix('ms'))
+        now = offset_ms + timestamp(photo)
         state = vision.update(DesktopFrame(photo), now)
         seen[state['turn']['label']] += 1
         if state['parking']['label'] == 'P':
@@ -100,8 +105,9 @@ def main():
     parser.add_argument('dataset', type=Path)
     parser.add_argument('--check-nov19', action='store_true', help='assert expected events for the eight site runs')
     args = parser.parse_args()
+    runs = sorted({p.parent for p in args.dataset.rglob('*.jpg')})
     results = {}
-    for run in sorted({p.parent for p in args.dataset.rglob('*.jpg')}):
+    for run in runs:
         events = replay(run)
         results[run.name] = [(kind, label) for _,kind,label in events]
     if not results:
@@ -109,12 +115,20 @@ def main():
     if args.check_nov19:
         ordered_colors = [('color', c) for c in ('green','blue','red','yellow')]
         parking = [('parking','P')]
-        expected = {'run_0008':[], 'run_0010':ordered_colors, 'run_0011':parking,
+        expected = {'run_0008':[], 'run_0010':[], 'run_0011':parking,
                     'run_0012':[('turn','left')], 'run_0013':[('turn','right')],
-                    'run_0014':ordered_colors, 'run_0015':parking, 'run_0016':[('turn','left')]}
+                    'run_0014':[], 'run_0015':parking, 'run_0016':[('turn','left')]}
         if results != expected:
             raise SystemExit(f'Field replay differs: {results!r}')
-        print('PASS: two complete color sequences, three turn encounters, two parking encounters and one negative run')
+        paths = {run.name: run for run in runs}
+        for turn_run, color_run in (('run_0012','run_0010'), ('run_0013','run_0014')):
+            vision = FieldVision()
+            replay(paths[turn_run], vision)
+            offset = max(timestamp(p) for p in paths[turn_run].glob('*.jpg')) + 1000
+            events = replay(paths[color_run], vision, offset)
+            if [(kind,label) for _,kind,label in events] != ordered_colors:
+                raise SystemExit(f'Wrong color sequence after {turn_run}: {events!r}')
+        print('PASS: color-only runs stay gated, both turn signs unlock four colors, and two P runs work before any turn')
 
 
 if __name__ == '__main__':

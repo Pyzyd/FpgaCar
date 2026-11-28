@@ -9,7 +9,7 @@ from turn_detector import blue_regions, select as select_turn
 from turn_shape import StableEvent
 
 
-VERSION = 'FpgaCar-field-integration-v11'
+VERSION = 'FpgaCar-field-integration-v12'
 PARK_RETRY_MS = 400
 EVENT_CODES = {'left':1, 'right':2, 'red':3, 'green':4, 'blue':5, 'yellow':6, 'P':7}
 LABELS = {'left':'左转', 'right':'右转', 'red':'红', 'green':'绿', 'blue':'蓝', 'yellow':'黄'}
@@ -68,14 +68,17 @@ class FieldVision:
             self.parking_seen = True
             events.append({'kind':'parking','label':'P'})
 
-        sign_box = turn['box'] if turn['present'] else None
-        colors = detect_multi_colors(img, field=True, sign_box=sign_box, parking_box=parking['box'])
-        tracking = self.tracker.update(colors['candidates'], now)
-        for passage in tracking['events']:
-            if passage['included']:
-                events.append({'kind':'color','label':passage['label'],'track':passage['track']})
+        # The confirmed turn stays latched for this run until the user restarts recognition.
+        colors = tracking = None
+        if self.last_turn is not None:
+            sign_box = turn['box'] if turn['present'] else None
+            colors = detect_multi_colors(img, field=True, sign_box=sign_box, parking_box=parking['box'])
+            tracking = self.tracker.update(colors['candidates'], now)
+            for passage in tracking['events']:
+                if passage['included']:
+                    events.append({'kind':'color','label':passage['label'],'track':passage['track']})
         return {'turn':turn, 'last_turn':self.last_turn, 'parking':parking, 'colors':colors,
-                'tracking':tracking, 'sequence':tracking['sequence'], 'events':events}
+                'tracking':tracking, 'sequence':tracking['sequence'] if tracking else [], 'events':events}
 
 
 def open_recorder():
@@ -242,7 +245,7 @@ def main(send_gpio=False):
                 recorder.write(record,bool(events))
             del frame
             recorded_at = time.ticks_ms()
-            candidates = result['colors']['candidates'] if result else ()
+            candidates = result['colors']['candidates'] if result and result['colors'] else ()
             parking_box = result['parking']['box'] if result else None
             boxes = tuple((item['label'],tuple(item['box'])) for item in candidates)
             if parking_box:
@@ -274,7 +277,8 @@ def main(send_gpio=False):
                         status = '识别已重开'
                     else:
                         reset_at = None
-                visible = ''.join(LABELS[item['label']] for item in candidates[:4]) or '--'
+                visible = ('等待转向牌' if vision.last_turn is None else
+                           ''.join(LABELS[item['label']] for item in candidates[:4]) or '--')
                 panel.draw_string_advanced(status_x,48,22,'色块 '+visible,color=(241,246,251))
                 if vision.parking_seen:
                     parking_text = 'P 已发送' if parking_sent else 'P 已识别'
