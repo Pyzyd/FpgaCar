@@ -93,7 +93,7 @@ module parking_handoff_tb;
                   "visual brake keeps panel running and transfers to parking delay");
             clocks(2001);
             check(dut.parking_status == 2 && in_a == 2'b11 && in_b == 2'b10 &&
-                  dut.ml_duty == 0 && dut.mr_duty == 300,
+                  dut.ml_duty == 0 && dut.mr_duty == dut.g_parking.action.PIVOT_DUTY,
                   "entry pivot commands only physical left wheel backward");
         end
     endtask
@@ -164,7 +164,7 @@ module parking_handoff_tb;
               "both 30 cm thresholds short-brake in the bay");
         seen_line = 0;
         lost_line = 1;
-        clocks(5000);
+        clocks(7000);
         check(dut.parking_status == 4 && dut.ml_duty == 0 && dut.mr_duty == 0,
               "stopped through the full parking time");
         clocks(151);
@@ -178,8 +178,11 @@ module parking_handoff_tb;
         clocks(165);
         check(dut.parking_status == 6 && in_a == 2'b11 && in_b == 2'b01,
               "exit line starts the single-left-wheel right pivot");
-        raw_l = raw_l - 3000;
-        clocks(35);
+        raw_l = raw_l - 2200;
+        clocks(6);
+        check(dut.parking_status == 6 && in_a == 2'b11 && in_b == 2'b11,
+              "an oblique exit brakes both wheels on a centered line before 75 degrees");
+        clocks(29);
         force dut.raw_track_duty_l = RAW_DUTY_L;
         force dut.raw_track_duty_r = RAW_DUTY_R;
         clocks(2);
@@ -221,10 +224,11 @@ module parking_handoff_tb;
         press_start();
         start_parking();
         clocks(180);
-        check(dut.mr_duty == 360 && dut.ml_duty == 0 && in_a == 2'b11,
+        check(dut.mr_duty == dut.g_parking.action.PIVOT_DUTY+60 && dut.ml_duty == 0 && in_a == 2'b11,
               "entry stall boosts only physical left wheel and holds the right brake");
         clocks(220);
-        check(dut.mr_duty == 360 + dut.PARK_ENTRY_EXTRA_PWM && dut.ml_duty == 0 && in_a == 2'b11,
+        check(dut.mr_duty == dut.g_parking.action.PIVOT_DUTY+60+dut.PARK_ENTRY_EXTRA_PWM &&
+              dut.ml_duty == 0 && in_a == 2'b11,
               "second entry boost raises only the physical left wheel");
         k2 = 0;
         clocks(4);

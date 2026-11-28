@@ -121,6 +121,51 @@ class Checks(unittest.TestCase):
         self.assertEqual(len({event['track'] for event in events}),4)
         self.assertFalse(tracker.sequence_uncertain)
 
+    def test_field_consecutive_same_color_second_block_leaves_after_one_edge_frame(self):
+        tracker = MultiTracker(arm=.94,commit=.98,min_travel=40,hold_ms=100,edge_pass=True)
+        events = []
+        for i, x in enumerate(range(440,740,20)):
+            detections = []
+            for cx in (x,x-54):
+                hit = detection(cx,'red',210)
+                left, top, width, height = hit['box']
+                visible = min(width,640-left)
+                if visible >= 16:
+                    hit['box'] = (left,top,visible,height)
+                    hit['clipped'] = visible < width
+                    detections.append(hit)
+            events.extend(tracker.update(detections,i*100)['events'])
+        self.assertEqual(tracker.sequence,['red','red'])
+        self.assertNotEqual(events[0]['track'],events[1]['track'])
+
+    def test_field_missing_before_touching_image_edge_does_not_count(self):
+        tracker = MultiTracker(arm=.94,commit=.98,min_travel=40,hold_ms=100,edge_pass=True)
+        for i, x in enumerate(range(430,611,20)):
+            tracker.update([detection(x)],i*100)
+        for i in range(10,20):
+            tracker.update([],i*100)
+        self.assertEqual(tracker.sequence,[])
+
+    def test_field_four_fast_blocks_with_consecutive_same_color(self):
+        expected = ['blue','red','red','green']
+        for speed, gap in ((24,50),(32,44),(32,50),(40,54)):
+            with self.subTest(speed=speed,gap=gap):
+                tracker = MultiTracker(arm=.94,commit=.98,min_travel=40,hold_ms=100,edge_pass=True)
+                events = []
+                for i in range(26):
+                    detections = []
+                    for label, offset in zip(expected,(0,78,78+gap,240)):
+                        hit = detection(440+i*speed-offset,label,210)
+                        x,y,w,h = hit['box']
+                        visible = min(w,640-x)
+                        if visible >= 16:
+                            hit['box'] = (x,y,visible,h)
+                            hit['clipped'] = visible < w
+                            detections.append(hit)
+                    events.extend(tracker.update(detections,i*100)['events'])
+                self.assertEqual(tracker.sequence,expected)
+                self.assertEqual(len({event['track'] for event in events}),4)
+
     def test_recovered_edge_needs_observed_motion_to_count(self):
         for moving in (False, True):
             with self.subTest(moving=moving):

@@ -70,7 +70,8 @@ class MultiTracker:
         t={'id':self.next_id,'box':list(d['box']),'x':x,'y':y,'vx':0.,'vy':0.,
            'seen':now,'born':now,'hits':1,'votes':[],'color':'unknown',
            'armed':False,'arm_x':None,'counted':False,'blocked':False,
-           'cross_at':None,'beyond_hits':0,'state':'tentative','observed':True}
+           'cross_at':None,'beyond_hits':0,'leaving_right':False,
+           'state':'tentative','observed':True}
         self.next_id+=1
         self._vote(t,d['label'])
         self.tracks.append(t)
@@ -82,6 +83,7 @@ class MultiTracker:
         x, _, w, _ = t['box']
         old_x, _, old_w, _ = old_box
         edge, old_edge = x+w, old_x+old_w
+        t['leaving_right'] = False
         confirmed=t['hits']>=self.confirm_hits and now-t['born']>=self.confirm_ms and t['color']!='unknown'
         if confirmed and not suspended and not d.get('clipped') and edge<=self.arm:
             if not t['armed']:
@@ -109,6 +111,8 @@ class MultiTracker:
             self.notes.append({'kind':'crossing','track':t['id']})
         if edge>=self.commit-self.jitter:
             t['beyond_hits']+=1
+            # Record a real crossing close to the image edge with outward motion.
+            t['leaving_right'] = edge >= self.width-self.jitter and x > old_x+2
             if now-t['cross_at']>=self.hold_ms and t['beyond_hits']>=self.hold_hits:
                 ready.append(t)
 
@@ -127,19 +131,22 @@ class MultiTracker:
                 alive.append(t)
         self.tracks=alive
         detections=[d for d in detections if d.get('label') in COLORS][:24]
+        geometry = [(center(d['box']), d['box'][2]*d['box'][3]) for d in detections]
+        match_limit_sq = self.match_distance*self.match_distance
         # Predict in pixel/ms; do not use color as a hard identity constraint.
         pairs=[]
         possible={}
         for ti,t in enumerate(self.tracks):
             dt=min(now-t['seen'],200)
             px,py=t['x']+t['vx']*dt,t['y']+t['vy']*dt
+            track_area = t['box'][2]*t['box'][3]
             for di,d in enumerate(detections):
-                x,y=center(d['box'])
-                distance=((x-px)**2+(y-py)**2)**.5
-                ratio=(d['box'][2]*d['box'][3])/(t['box'][2]*t['box'][3])
-                if distance<=self.match_distance and .35<=ratio<=2.85:
+                (x,y), area = geometry[di]
+                dx,dy = x-px,y-py
+                distance_sq = dx*dx + dy*dy
+                if distance_sq<=match_limit_sq and .35<=area/track_area<=2.85:
                     penalty=12 if t['color'] not in ('unknown',d['label']) else 0
-                    score=distance+penalty
+                    score=distance_sq**.5+penalty
                     pairs.append((score,ti,di))
                     possible.setdefault(di,[]).append((score,ti))
         ambiguous=set()
@@ -147,22 +154,65 @@ class MultiTracker:
             choices.sort()
             if len(choices)>1 and choices[1][0]-choices[0][0]<10:
                 ambiguous.add(di)
-        if ambiguous:
-            self.notes.append({'kind':'association_ambiguous','detections':sorted(ambiguous)})
         used_t,used_d=set(),set()
-        motions=[]
-        matched=[]
-        for score,ti,di in sorted(pairs):
+        assignments=[]
+        if self.edge_pass:
+            # Two independently observed same-color blocks keep their left/right
+            # order while passing. Their centers may have moved past old centers.
+            for label in COLORS:
+                indices = [ti for ti,t in enumerate(self.tracks)
+                           if t['votes'][-1]==label and now-t['seen']<=300]
+                hits = [di for di,d in enumerate(detections) if d['label']==label]
+                if len(indices)!=2 or len(hits)!=2:
+                    continue
+                indices.sort(key=lambda ti: self.tracks[ti]['x'])
+                hits.sort(key=lambda di: geometry[di][0][0])
+                first,second = hits
+                x1,_,w1,_ = detections[first]['box']
+                dx = [geometry[di][0][0]-self.tracks[ti]['x'] for ti,di in zip(indices,hits)]
+                if (x1+w1 <= detections[second]['box'][0] and abs(dx[0]-dx[1])<=24
+                        and all(any(candidate==ti for _,candidate in possible.get(di,()))
+                                for ti,di in zip(indices,hits))):
+                    assignments.extend(zip(indices,hits))
+                    used_t.update(indices)
+                    used_d.update(hits)
+                    ambiguous.difference_update(hits)
+            # Match detections with only one plausible track before those with
+            # alternatives. The follower can move close to the leader's old box.
+            pairs.sort(key=lambda pair: (len(possible[pair[2]]),pair[0]))
+        else:
+            pairs.sort()
+        for score,ti,di in pairs:
             if ti in used_t or di in used_d or di in ambiguous:
                 continue
             used_t.add(ti); used_d.add(di)
+            assignments.append((ti,di))
+        if self.edge_pass:
+            # A leading block already matched elsewhere cannot also own its follower.
+            for di in sorted(ambiguous):
+                remaining = [(score,ti) for score,ti in possible[di] if ti not in used_t]
+                if remaining and (len(remaining)==1 or remaining[1][0]-remaining[0][0]>=10):
+                    ti = remaining[0][1]
+                    used_t.add(ti); used_d.add(di)
+                    assignments.append((ti,di))
+                    ambiguous.remove(di)
+        if ambiguous:
+            self.notes.append({'kind':'association_ambiguous','detections':sorted(ambiguous)})
+        motions=[]
+        unexplained=[]
+        matched=[]
+        for ti,di in assignments:
             t,d=self.tracks[ti],detections[di]
-            x,y=center(d['box'])
+            x,y=geometry[di][0]
             dt=max(1,now-t['seen'])
             old_x,old_y=t['x'],t['y']
             old_box=t['box']
             if self.edge_pass and dt<=400:
-                motions.append(((x-old_x)*100/dt,(y-old_y)*100/dt))
+                dx,dy = (x-old_x)*100/dt,(y-old_y)*100/dt
+                motions.append((dx,dy))
+                if t['hits'] >= 2:
+                    # Steady motion of neighboring blocks is expected while driving.
+                    unexplained.append((dx-t['vx']*100,dy-t['vy']*100))
             elif not self.edge_pass and dt<=250:
                 motions.append((x-old_x,y-old_y))
             t['vx']=.5*t['vx']+.5*(x-old_x)/dt
@@ -176,17 +226,22 @@ class MultiTracker:
         common=[0.,0.]
         if len(motions)>=2:
             common=[median([m[0] for m in motions]),median([m[1] for m in motions])]
-            agreement=sum(1 for dx,dy in motions if abs(dx-common[0])<12 and abs(dy-common[1])<12)
-            if agreement>=2 and max(abs(common[0]),abs(common[1]))>=self.common_jump:
+        jumps = unexplained if self.edge_pass else motions
+        if len(jumps)>=2:
+            jump_x,jump_y = [median([m[axis] for m in jumps]) for axis in (0,1)] if self.edge_pass else common
+            agreement=sum(1 for dx,dy in jumps if abs(dx-jump_x)<12 and abs(dy-jump_y)<12)
+            if agreement>=2 and max(abs(jump_x),abs(jump_y))>=self.common_jump:
                 shake=True
                 self.hold_until=now+self.shake_hold_ms
-                self.notes.append({'kind':'common_jump','dx':common[0],'dy':common[1]})
+                self.notes.append({'kind':'common_jump','dx':jump_x,'dy':jump_y})
         suspended=now<self.hold_until or bool(ambiguous)
         ready=[]
         for t,d,old_x,old_box,dt in matched:
             if t['counted'] or t['blocked']:
                 continue
             if self.edge_pass:
+                if shake:
+                    t['cross_at'],t['beyond_hits'],t['leaving_right'] = None,0,False
                 self._edge_step(t,d,old_box,dt,now,suspended,ready)
                 continue
             confirmed=t['hits']>=self.confirm_hits and now-t['born']>=self.confirm_ms and t['color']!='unknown'
@@ -234,7 +289,13 @@ class MultiTracker:
         for t in pending:
             if t['blocked']:
                 continue
-            if t not in ready:
+            unseen_ms = now-t['seen']
+            x, _, w, _ = t['box']
+            # Color blobs narrower than 16 pixels are filtered by the detector.
+            past_edge = x+w >= self.width-1 or x+t['vx']*unseen_ms >= self.width-16
+            exited = (self.edge_pass and not suspended and not t['observed'] and t['leaving_right']
+                      and past_edge and unseen_ms<=400 and now-t['cross_at']>=self.hold_ms)
+            if t not in ready and not exited:
                 break
             t['counted']=True
             included=len(self.sequence)<4
@@ -246,8 +307,8 @@ class MultiTracker:
             if di in used_d or di in ambiguous:
                 continue
             # Don't spawn a duplicate near an unmatched/ambiguous existing track.
-            x,y=center(d['box'])
-            near=any(not t['observed'] and ((x-t['x'])**2+(y-t['y'])**2)**.5<self.match_distance for t in self.tracks)
+            x,y=geometry[di][0]
+            near=any(not t['observed'] and (x-t['x'])**2+(y-t['y'])**2<match_limit_sq for t in self.tracks)
             if not near and not d.get('clipped') and len(self.tracks)<self.max_tracks:
                 self._new(d,now)
         for t in self.tracks:

@@ -12,7 +12,8 @@ module parking_motion_tb;
     wire [10:0] duty_l, duty_r;
 
     // 每个模拟时钟推进一毫秒，里程和持续时间阈值与实机一致。
-    parking_motion #(.CLK_FREQ(1000), .ENTRY_SECOND_BOOST_STEP(11'd60)) dut (
+    localparam [10:0] PIVOT_DUTY = 500;
+    parking_motion #(.CLK_FREQ(1000), .PIVOT_DUTY(PIVOT_DUTY), .ENTRY_SECOND_BOOST_STEP(11'd60)) dut (
         .clk(clk), .rst_n(rst_n), .run_enable(run_enable),
         .position_l(pos_l), .position_r(pos_r), .line_seen(line_seen),
         .line_valid(line_valid), .line_centered(line_centered),
@@ -70,11 +71,11 @@ module parking_motion_tb;
         step_ms(2000);
         check(status == 1 && duty_l == 0 && duty_r == 0, "full 2 second start delay");
         step_ms(2);
-        check(status == 2 && !forward_l && duty_l == 300 && duty_r == 0,
+        check(status == 2 && !forward_l && duty_l == PIVOT_DUTY && duty_r == 0,
               "entry pivots left wheel backward with right brake");
         pos_l = -2939;
         step_ms(2);
-        check(duty_l == 300 && duty_r == 0, "keep left pivot until entry brake threshold");
+        check(duty_l == PIVOT_DUTY && duty_r == 0, "keep left pivot until entry brake threshold");
         pos_l = -2940;
         step_ms(2);
         check(status == 2 && duty_l == 0 && duty_r == 0, "brake at 2940 counts for 4 degree lead");
@@ -103,8 +104,8 @@ module parking_motion_tb;
         pos_r = -3583;
         step_ms(1);
         check(status == 4 && duty_l == 0 && duty_r == 0, "park at 300 mm");
-        step_ms(5149);
-        check(status == 4, "five full seconds after brake settles");
+        step_ms(7149);
+        check(status == 4, "seven full seconds after brake settles");
         step_ms(2);
         check(status == 5 && forward_l && forward_r && duty_l == 300 && duty_r == 300,
               "drive both wheels forward to exit");
@@ -120,7 +121,7 @@ module parking_motion_tb;
         step_ms(3);
         check(status == 5 && duty_l == 0 && duty_r == 0, "brake once front probes see line");
         step_ms(151);
-        check(status == 6 && forward_l && duty_l == 300 && duty_r == 0,
+        check(status == 6 && forward_l && duty_l == PIVOT_DUTY && duty_r == 0,
               "pivot right with left wheel forward");
 
         pos_l = pos_l + 1400;
@@ -128,10 +129,22 @@ module parking_motion_tb;
         line_centered = 1;
         step_ms(30);
         check(status == 6, "center hit before minimum turn angle is ignored");
-        pos_l = pos_l + 1650;
-        step_ms(24);
-        check(status == 6, "center must hold before handing over");
-        step_ms(3);
+        pos_l = pos_l + 200;
+        step_ms(2);
+        check(duty_l == 420 && duty_r == 0, "slow the exit pivot before the expected line");
+        step_ms(180);
+        check(duty_l == PIVOT_DUTY, "restore exit pivot torque if slowing stalled the wheel");
+        pos_l = pos_l + 600;
+        step_ms(8);
+        check(status == 6 && duty_l == 0 && duty_r == 0,
+              "above 60 degrees, brake on a centered line before handoff");
+        line_centered = 0;
+        step_ms(2);
+        check(status == 6 && duty_l != 0, "resume searching after a transient center hit");
+        line_centered = 1;
+        step_ms(14);
+        check(status == 6 && duty_l == 0, "require a fresh 15 ms stable center");
+        step_ms(2);
         check(following && status == 7 && duty_l == 300 && duty_r == 210,
               "right turn hands over to speed-limited tracking");
         line_valid = 0;
@@ -140,7 +153,15 @@ module parking_motion_tb;
 
         begin_turn();
         check(status == 2 && !fault, "fresh K1 clears prior fault");
-        pos_r = 181;
+        pos_l = -2740;
+        pos_r = 200;
+        step_ms(2);
+        check(!fault && status == 2 && duty_l == 0, "allow limited right drift at the target yaw");
+        step_ms(151);
+        check(status == 3 && !fault, "transition to reverse after limited drift");
+
+        begin_turn();
+        pos_r = 241;
         step_ms(2);
         check(fault && !active && entry_fault == 3, "stop and mark right wheel drift");
 
@@ -151,42 +172,52 @@ module parking_motion_tb;
 
         begin_turn();
         step_ms(179);
-        check(status == 2 && duty_l == 300 && duty_r == 0,
+        check(status == 2 && duty_l == PIVOT_DUTY && duty_r == 0,
               "start the entry pivot at the original duty");
         step_ms(1);
-        check(status == 2 && duty_l == 360 && duty_r == 0 && !forward_l,
+        check(status == 2 && duty_l == PIVOT_DUTY+60 && duty_r == 0 && !forward_l,
               "boost only the left wheel after 180 ms without progress");
         pos_l = -23;
         step_ms(2);
-        check(duty_l == 360, "keep boost through small encoder changes");
+        check(duty_l == PIVOT_DUTY+60, "keep boost through small encoder changes");
         pos_l = -24;
         step_ms(2);
-        check(duty_l == 300 && duty_r == 0, "restore original duty after 24 net counts");
+        check(duty_l == PIVOT_DUTY && duty_r == 0, "restore original duty after 24 net counts");
         pos_l = -500;
         step_ms(1);
         step_ms(179);
-        check(duty_l == 300, "watch renewed left wheel progress after it starts");
+        check(duty_l == PIVOT_DUTY, "watch renewed left wheel progress after it starts");
         step_ms(1);
-        check(duty_l == 360 && duty_r == 0, "boost again if the wheel stalls partway through entry");
+        check(duty_l == PIVOT_DUTY+60 && duty_r == 0, "boost again if the wheel stalls partway through entry");
         pos_l = -2940;
         step_ms(2);
         check(status == 2 && duty_l == 0 && duty_r == 0, "target angle overrides an active boost");
 
         begin_turn();
         step_ms(399);
-        check(!fault && duty_l == 360, "use the first boost just before 400 ms");
+        check(!fault && duty_l == PIVOT_DUTY+60, "use the first boost just before 400 ms");
         step_ms(1);
-        check(status == 2 && duty_l == 420 && duty_r == 0, "raise only left PWM after 400 ms without progress");
+        check(status == 2 && duty_l == PIVOT_DUTY+120 && duty_r == 0, "raise only left PWM after 400 ms without progress");
         step_ms(399);
-        check(!fault && duty_l == 420, "allow torque recovery before the entry stall timeout");
+        check(!fault && duty_l == PIVOT_DUTY+120, "allow torque recovery before the entry stall timeout");
         step_ms(2);
         check(fault && !active && duty_l == 0 && duty_r == 0 && entry_fault == 2,
               "stop if the wheel never moves even with boost");
 
         begin_reverse();
         pos_l = -2940 - 160;
-        step_ms(802);
+        step_ms(251);
+        check(!fault && duty_l == 0 && duty_r == 420, "boost the stalled reverse wheel only");
+        step_ms(551);
         check(fault && !active && reverse_fault == 2, "report reverse stall on commanded wheel");
+
+        begin_reverse();
+        step_ms(251);
+        check(!fault && duty_l == 420 && duty_r == 420, "help both wheels break away in reverse");
+        pos_l = -2940 - 30;
+        pos_r = -30;
+        step_ms(2);
+        check(!fault && duty_l == 300 && duty_r == 300, "restore straight duty once reverse motion begins");
 
         begin_reverse();
         pos_r = 37;
@@ -197,6 +228,25 @@ module parking_motion_tb;
         pos_r = -601;
         step_ms(2);
         check(fault && !active && reverse_fault == 3, "report extreme reverse mismatch");
+
+        begin_reverse();
+        line_seen = 0;
+        line_valid = 0;
+        line_centered = 0;
+        pos_l = pos_l - 3583;
+        pos_r = pos_r - 3583;
+        step_ms(7187);
+        pos_l = pos_l + 500;
+        pos_r = pos_r + 500;
+        line_seen = 1;
+        step_ms(167);
+        check(status == 6 && !fault, "start exit pivot after the line is seen");
+        pos_l = pos_l + 3800;
+        step_ms(2);
+        check(status == 6 && !fault, "continue searching beyond the old 105 degree limit");
+        pos_l = pos_l + 150;
+        step_ms(2);
+        check(fault && !active, "stop at the widened turn limit without a centered line");
 
         begin_turn();
         run_enable = 0;

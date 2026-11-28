@@ -64,7 +64,22 @@ module garage_corner_scan_tb;
                 for (y = 92; y <= 113; y = y + 1) frame[y*320+x] = 100;
             scan();
             if (pair_valid) $fatal(1, "two unconnected corners cannot form a parking pair");
-            $display("PASS: flat background, single corner, connected pair and disconnected tape");
+
+            // A slightly smaller U and a negative slope, as seen with a different camera pose.
+            for (k = 0; k < 57600; k = k + 1) frame[k] = 100;
+            for (x = 52; x <= 266; x = x + 1) begin
+                y = 91 - (x-52)/12;
+                for (j = -1; j <= 1; j = j + 1) frame[(y+j)*320+x] = 25;
+            end
+            for (j = 0; j <= 20; j = j + 1)
+                for (k = -3; k <= 3; k = k + 1) begin
+                    frame[(91+j)*320+52-j+k] = 25;
+                    frame[(74+j)*320+266+j+k] = 25;
+                end
+            scan();
+            if (!corner || !pair_valid || center < 307 || center > 331)
+                $fatal(1, "narrower tilted U should pass (xsum=%0d)", center);
+            $display("PASS: flat background, single corner, connected pair, disconnected tape and narrower tilted U");
         end
         $finish;
     end

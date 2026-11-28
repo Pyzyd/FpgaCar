@@ -8,7 +8,7 @@ module parking_motion #(
     parameter integer ENTRY_BRAKE_LEAD_DEG = 4,
     parameter integer REVERSE_MM = 300,
     parameter integer EXIT_LIMIT_MM = 450,
-    parameter [10:0] PIVOT_DUTY = 11'd300,
+    parameter [10:0] PIVOT_DUTY = 11'd500,
     parameter [10:0] ENTRY_SECOND_BOOST_STEP = 11'd0,
     parameter [10:0] STRAIGHT_DUTY = 11'd300,
     parameter [10:0] FOLLOW_MAX_DUTY = 11'd300
@@ -41,10 +41,10 @@ module parking_motion #(
 
     localparam integer MS_CYCLES = CLK_FREQ / 1000;
     localparam integer TICK_W = (MS_CYCLES <= 1) ? 1 : $clog2(MS_CYCLES);
-    localparam integer START_MS = 2000, BRAKE_MS = 150, PARK_MS = 5000;
+    localparam integer START_MS = 2000, BRAKE_MS = 150, PARK_MS = 7000;
     localparam integer PIVOT_LIMIT_MS = 5000, REVERSE_LIMIT_MS = 8000,
                        EXIT_LIMIT_MS = 10000, CHECK_ENCODER_MS = 900;
-    localparam integer CLEAR_MS = 30, LINE_MS = 12, CENTER_MS = 25, LOST_MS = 180;
+    localparam integer CLEAR_MS = 30, LINE_MS = 12, CENTER_MS = 15, LOST_MS = 180;
 
     // 单轮绕另一轮转 90° 的弧长为 π × 轮距 / 2。乘积用 64 位防止常量溢出。
     localparam integer TURN_COUNTS =
@@ -56,10 +56,13 @@ module parking_motion #(
     localparam integer REVERSE_COUNTS =
         (REVERSE_MM * COUNTS_PER_REV + WHEEL_CIRC_MM / 2) / WHEEL_CIRC_MM;
     localparam integer EXIT_COUNTS = EXIT_LIMIT_MM * COUNTS_PER_REV / WHEEL_CIRC_MM;
-    localparam integer RETURN_MIN = TURN_COUNTS * 5 / 6;
-    localparam integer RETURN_MAX = TURN_COUNTS * 7 / 6;
+    // 斜着出库时，探头可能较早对准主线。后半段低速找线，并在居中时先短刹。
+    localparam integer RETURN_SLOW = TURN_COUNTS / 2;
+    localparam integer RETURN_MIN = TURN_COUNTS * 2 / 3;
+    localparam integer RETURN_MAX = TURN_COUNTS * 23 / 18;
+    localparam [10:0] RETURN_SLOW_DUTY = PIVOT_DUTY > 420 ? 11'd420 : PIVOT_DUTY;
     localparam integer WRONG_WAY_COUNTS = 36, START_COUNTS = 24;
-    localparam integer PIVOT_DRIFT = 180, STRAIGHT_DRIFT = 300;
+    localparam integer PIVOT_DRIFT = 240, STRAIGHT_DRIFT = 300;
     localparam integer ENTRY_BOOST_MS = 180, ENTRY_BOOST_HIGH_MS = 400, ENTRY_STALL_MS = 800;
     localparam integer ENTRY_BOOST_RELEASE_COUNTS = 24;
     localparam [11:0] ENTRY_BOOSTED_DUTY = {1'b0, PIVOT_DUTY} + 12'd60;
@@ -67,10 +70,14 @@ module parking_motion #(
                                         11'd1200 : ENTRY_BOOSTED_DUTY[10:0];
     localparam [11:0] ENTRY_HIGH_TOTAL = {1'b0, ENTRY_BOOST_DUTY} + {1'b0, ENTRY_SECOND_BOOST_STEP};
     localparam [10:0] ENTRY_HIGH_DUTY = ENTRY_HIGH_TOTAL > 1200 ? 11'd1200 : ENTRY_HIGH_TOTAL[10:0];
-    localparam signed [31:0] TRIM_LIMIT = 36;
+    localparam signed [31:0] EXIT_TRIM_LIMIT = 60;
     localparam signed [31:0] REVERSE_TRIM_LIMIT = 60, CATCH_GAP = 144, RESUME_GAP = 72;
     localparam [10:0] CATCH_DUTY = STRAIGHT_DUTY + REVERSE_TRIM_LIMIT;
-    localparam integer REVERSE_DRIFT_LIMIT = 600, REVERSE_STALL_MS = 800, PROGRESS_COUNTS = 8;
+    localparam [11:0] REVERSE_BOOST_TOTAL = {1'b0, STRAIGHT_DUTY} + 12'd120;
+    localparam [10:0] REVERSE_BOOST_DUTY = REVERSE_BOOST_TOTAL > 1200 ?
+                                          11'd1200 : REVERSE_BOOST_TOTAL[10:0];
+    localparam integer REVERSE_DRIFT_LIMIT = 600, REVERSE_BOOST_MS = 250,
+                       REVERSE_STALL_MS = 800, PROGRESS_COUNTS = 8;
     localparam [1:0] REVERSE_OK = 0, REVERSE_WRONG_WAY = 1,
                      REVERSE_STALLED = 2, REVERSE_LIMIT = 3;
     localparam [1:0] ENTRY_OK = 0, ENTRY_WRONG_WAY = 1, ENTRY_NO_PROGRESS = 2, ENTRY_RIGHT_DRIFT = 3;
@@ -96,7 +103,7 @@ module parking_motion #(
                                  + $signed({along_r[31], along_r});
     wire signed [31:0] straight_error = along_l - along_r;
     wire signed [31:0] trim_raw = straight_error / 4;
-    wire signed [31:0] trim_limit = (state == REVERSE) ? REVERSE_TRIM_LIMIT : TRIM_LIMIT;
+    wire signed [31:0] trim_limit = (state == REVERSE) ? REVERSE_TRIM_LIMIT : EXIT_TRIM_LIMIT;
     wire signed [31:0] trim = (trim_raw > trim_limit) ? trim_limit :
                               (trim_raw < -trim_limit) ? -trim_limit : trim_raw;
     wire signed [11:0] straight_l = $signed({1'b0, STRAIGHT_DUTY}) - $signed(trim[11:0]);
@@ -123,7 +130,12 @@ module parking_motion #(
     wire brake_r = reverse_done_r || pause_r;
     wire watch_reverse = state == REVERSE && next_state == REVERSE;
     wire watch_entry = entry_driving && next_state == ENTRY_TURN;
-    wire signed [31:0] left_mileage = watch_entry ? pivot_left : along_l;
+    wire watch_return = state == EXIT_TURN && next_state == EXIT_TURN;
+    wire return_centered = pivot_yaw >= RETURN_MIN && line_valid && line_centered;
+    wire return_slow = pivot_yaw >= RETURN_SLOW && idle_l_ms < ENTRY_BOOST_MS;
+    wire reverse_boost_l = idle_l_ms >= REVERSE_BOOST_MS;
+    wire reverse_boost_r = idle_r_ms >= REVERSE_BOOST_MS;
+    wire signed [31:0] left_mileage = (watch_entry || watch_return) ? pivot_left : along_l;
     wire signed [31:0] left_progress_required =
         entry_boost ? ENTRY_BOOST_RELEASE_COUNTS : PROGRESS_COUNTS;
     wire reverse_wrong_way = (along_l < -WRONG_WAY_COUNTS) || (along_r < -WRONG_WAY_COUNTS);
@@ -132,7 +144,7 @@ module parking_motion #(
                               (straight_error < -REVERSE_DRIFT_LIMIT) ||
                               (elapsed_ms >= REVERSE_LIMIT_MS);
     wire qualifying = ((state == EXIT_STRAIGHT) && (exit_armed ? line_seen : !line_seen)) ||
-                      ((state == EXIT_TURN) && (pivot_yaw >= RETURN_MIN) && line_centered) ||
+                      ((state == EXIT_TURN) && return_centered) ||
                       ((state == FOLLOW) && !line_valid);
 
     assign active = run_enable && (state != IDLE) && (state != FAULT);
@@ -167,8 +179,8 @@ module parking_motion #(
                 EXIT_BRAKE: if (elapsed_ms >= BRAKE_MS) next_state = EXIT_TURN;
                 EXIT_TURN: begin
                     if (pivot_failed) next_state = FAULT;
-                    else if (line_centered && hold_ms >= CENTER_MS) next_state = FOLLOW;
-                    else if (pivot_yaw >= RETURN_MAX) next_state = FAULT;
+                    else if (return_centered && hold_ms >= CENTER_MS) next_state = FOLLOW;
+                    else if (!return_centered && pivot_yaw >= RETURN_MAX) next_state = FAULT;
                 end
                 FOLLOW: if (!line_valid && hold_ms >= LOST_MS) next_state = FAULT;
                 FAULT: next_state = FAULT;
@@ -231,16 +243,16 @@ module parking_motion #(
         end
     end
 
-    // 入库转向与直倒共用左轮的净进度计时。转向补力后等到 24 个净计数再降回基础 PWM。
+    // 左轮净进度计时。入库转向补力后等到 24 个净计数再降回基础 PWM。
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             idle_l_ms <= 0;
             last_progress_l <= 0;
-        end else if (!watch_entry && !watch_reverse) begin
+        end else if (!watch_entry && !watch_reverse && !watch_return) begin
             idle_l_ms <= 0;
             last_progress_l <= 0;
         end else if (ms_tick) begin
-            if ((watch_reverse && brake_l) ||
+            if ((watch_reverse && brake_l) || (watch_return && return_centered) ||
                 left_mileage - last_progress_l >= left_progress_required) begin
                 idle_l_ms <= 0;
                 last_progress_l <= left_mileage;
@@ -296,8 +308,10 @@ module parking_motion #(
                     status = 3'd3;
                     forward_l = 1'b0;
                     forward_r = 1'b0;
-                    duty_l = brake_l ? 11'd0 : (pause_r ? CATCH_DUTY : straight_l[10:0]);
-                    duty_r = brake_r ? 11'd0 : (pause_l ? CATCH_DUTY : straight_r[10:0]);
+                    duty_l = brake_l ? 11'd0 : reverse_boost_l ? REVERSE_BOOST_DUTY :
+                             pause_r ? CATCH_DUTY : straight_l[10:0];
+                    duty_r = brake_r ? 11'd0 : reverse_boost_r ? REVERSE_BOOST_DUTY :
+                             pause_l ? CATCH_DUTY : straight_r[10:0];
                 end
                 PARKED: status = 3'd4;
                 EXIT_STRAIGHT: begin
@@ -308,7 +322,7 @@ module parking_motion #(
                 EXIT_BRAKE: status = 3'd5;
                 EXIT_TURN: begin
                     status = 3'd6;
-                    duty_l = PIVOT_DUTY;
+                    duty_l = return_centered ? 11'd0 : return_slow ? RETURN_SLOW_DUTY : PIVOT_DUTY;
                 end
                 FOLLOW: begin
                     status = 3'd7;

@@ -174,16 +174,16 @@ module FpgaCar #(
     localparam integer TRACK_TRIM               = 34;  // 正数增加左轮、降低右轮 PWM
     localparam [10:0]   TRACK_BASE_DUTY          = 384; // 正中时左右轮平均 PWM，32%
     localparam [6:0]    TRACK_SPEED_PERCENT      = 100; // 常规循迹倍率，384 已是 main 的降速值
-    localparam [6:0]    PARK_AFTER_P_PERCENT     = 70;  // 相对调速后的常规循迹
-    localparam [6:0]    PARK_AFTER_CORNER_PERCENT= 45;  // 相对调速后的常规循迹
-    localparam [6:0]    POST_PARK_PERCENT        = 70;  // 出库后的循迹及终点直行倍率
+    localparam [6:0]    PARK_AFTER_P_PERCENT     = 89;  // 相对调速后的常规循迹
+    localparam [6:0]    PARK_AFTER_CORNER_PERCENT= 65;  // 相对调速后的常规循迹
+    localparam [6:0]    POST_PARK_PERCENT        = 80;  // 出库后的循迹及终点直行倍率
     localparam integer START_BOX_MM             = 400; // 从 K1 起计，起步区内横边视为直行
     localparam [3:0]    FINISH_MIN_SENSORS       = 6;   // 终点横边至少压黑的探头数
     localparam integer FINISH_CONFIRM_MS        = 8;   // 横边连续确认时间
     localparam integer FINISH_MM                = 300; // 检出横边起再行驶的距离
-    localparam integer TURN_SIGN_WAIT_MS        = 4500; // 箭头请求等待路口的有效期
+    localparam integer TURN_SIGN_WAIT_MS        = 12000; // 箭头请求等待路口的有效期
     localparam integer TURN_SIGN_ON_LOSS        = 1;    // 漏检宽黑且持续丢线时，按有效箭头找线
-    localparam [6:0]    TURN_APPROACH_PERCENT    = 80;   // 收到左/右转牌后，等路口期间的循迹比例
+    localparam [6:0]    TURN_APPROACH_PERCENT    = 90;   // 收到左/右转牌后，等路口期间的循迹比例
     localparam [3:0]    TURN_JUNCTION_SENSORS    = 3;    // 等候箭头转弯时，至少三路压线就进入支路
     localparam [10:0]   PARK_ENTRY_EXTRA_PWM    = 60;   // 入库左轮 400 ms 无进度时，在第一档补力上再加 5%
 
@@ -596,7 +596,7 @@ module FpgaCar #(
     // 要排查红外接线只能用串口或示波器；重装红外时记得先把 USE_IR 改回 1。
     wire ir_det   = ir_l_det | ir_r_det;
     wire obstacle = (USE_ULTRA ? hc_near : 1'b0) | (USE_IR & ir_det);
-
+    //wire obstacle = 0;
     // ------------------------------------------------------------------
     // 运动闭环：track_pid（位置 PID）+ car_fsm（状态机）
     // ------------------------------------------------------------------

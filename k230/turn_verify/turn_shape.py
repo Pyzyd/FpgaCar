@@ -43,14 +43,20 @@ def extract_mask(get_pixel, box, sample=40, white_min=85, spread=65):
     """Sample inner ellipse to suppress the white circular border."""
     bx, by, bw, bh = box
     mask = [bytearray(sample) for _ in range(sample)]
+    # Pixel centers are shared by a row/column. Use the squared radius in grid units.
+    columns = [(bx + (2*x+1)*bw//(2*sample), (2*x+1-sample)**2) for x in range(sample)]
+    radius_sq = (.78*sample)**2
     for y in range(sample):
-        for x in range(sample):
-            u, v = (x+.5)/sample, (y+.5)/sample
-            if (2*u-1)**2 + (2*v-1)**2 > .78**2:
-                continue
-            rgb = get_pixel(bx + min(bw-1, int(u*bw)), by + min(bh-1, int(v*bh)))
-            if rgb is not None and min(rgb) >= white_min and max(rgb)-min(rgb) <= spread:
-                mask[y][x] = 1
+        py = by + (2*y+1)*bh//(2*sample)
+        row = mask[y]
+        limit = radius_sq - (2*y+1-sample)**2
+        for x, (px, x_sq) in enumerate(columns):
+            if x_sq <= limit:
+                rgb = get_pixel(px, py)
+                if rgb is not None:
+                    lo = min(rgb)
+                    if lo >= white_min and max(rgb)-lo <= spread:
+                        row[x] = 1
     return largest_component(mask)
 
 

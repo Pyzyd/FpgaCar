@@ -1,7 +1,7 @@
 """K230 field vision: traffic arrows, color blocks and the parking sign."""
 
 import config as C
-from color_core import COLORS, elapsed
+from color_core import elapsed
 from color_detector import detect_multi_colors
 from multi_tracker import MultiTracker
 from parking_detector import select as select_parking
@@ -9,12 +9,14 @@ from turn_detector import blue_regions, select as select_turn
 from turn_shape import StableEvent
 
 
-VERSION = 'FpgaCar-field-integration-v6'
+VERSION = 'FpgaCar-field-integration-v11'
 PARK_RETRY_MS = 400
 EVENT_CODES = {'left':1, 'right':2, 'red':3, 'green':4, 'blue':5, 'yellow':6, 'P':7}
 LABELS = {'left':'左转', 'right':'右转', 'red':'红', 'green':'绿', 'blue':'蓝', 'yellow':'黄'}
 BOX_COLORS = {'red':(255,76,76), 'yellow':(255,217,60),
-              'green':(60,235,126), 'blue':(74,169,255)}
+              'green':(60,235,126), 'blue':(74,169,255), 'P':(90,230,255)}
+PANEL_BG = (13,26,41)
+TAG_WIDTH, TAG_HEIGHT = 28, 24
 SOURCES = ('field_vision.py','config.py','color_detector.py','color_core.py','arrow_core.py',
            'arrow_templates.py','multi_tracker.py','gpio_link.py','album.py','run_recorder.py',
            'parking_detector.py',
@@ -89,12 +91,10 @@ def open_recorder():
     return None
 
 
-def draw_labeled_box(panel, box, text, color, width):
+def draw_labeled_box(panel, box, tag, color, width):
     x,y,w,h = box
     panel.draw_rectangle(x,y,w,h,color=color,thickness=3)
-    tx,ty = min(x,width-28),max(0,y-24)
-    panel.draw_rectangle(tx,ty,28,24,color=(13,26,41),fill=True)
-    panel.draw_string_advanced(tx+3,ty+1,20,text,color=color)
+    panel.draw_image(tag,min(x,width-TAG_WIDTH),max(0,y-TAG_HEIGHT))
 
 
 def publish_event(link, event, send_gpio):
@@ -136,7 +136,7 @@ def main(send_gpio=False):
         sensor.set_hmirror(C.HMIRROR)
         sensor.set_vflip(C.VFLIP)
         Display.bind_layer(**sensor.bind_info(x=0,y=0,chn=CAM_CHN_ID_1),layer=Display.LAYER_VIDEO1)
-        Display.init(Display.ST7701,width=C.WIDTH,height=C.HEIGHT,to_ide=False,osd_num=1)
+        Display.init(Display.ST7701,width=C.WIDTH,height=C.HEIGHT,to_ide=False,osd_num=2)
         display_ready = True
         MediaManager.init()
         media_ready = True
@@ -158,13 +158,24 @@ def main(send_gpio=False):
         except Exception as exc:
             print('[FIELD] Restart key unavailable:', exc)
         restart_key = RestartKey(key.value(), time.ticks_ms()) if key is not None else None
-        panels = [image.Image(C.WIDTH,C.HEIGHT,image.ARGB8888) for _ in range(3)]
-        index = frame_id = rate_count = 0
+        # Keep the moving boxes on the preview and the text on the lower strip.
+        status_height = C.HEIGHT-height
+        box_panels = [image.Image(width,height,image.ARGB8888) for _ in range(3)]
+        status_panels = [image.Image(C.WIDTH,status_height,image.ARGB8888) for _ in range(3)]
+        tags = {}
+        for label,color in BOX_COLORS.items():
+            tag = image.Image(TAG_WIDTH,TAG_HEIGHT,image.ARGB8888)
+            tag.draw_rectangle(0,0,TAG_WIDTH,TAG_HEIGHT,color=PANEL_BG,fill=True)
+            tag.draw_string_advanced(3,1,20,LABELS.get(label,label),color=color)
+            tags[label] = tag
+        last_boxes = None
+        box_index = status_index = frame_id = rate_count = box_updates = 0
         fps = 0.
-        warmed_at = rate_at = last_draw = time.ticks_ms()
-        reset_at, redraw, boxes_visible = None, False, False
+        warmed_at = rate_at = last_status = time.ticks_ms()
+        reset_at, redraw = None, True
         gpio_send_failed = False
         parking_sent, parking_sent_at = False, 0
+        perf = [0, 0, 0, 0, 0]
 
         def poll_restart(now):
             nonlocal reset_at, redraw, gpio_send_failed, parking_sent
@@ -178,7 +189,8 @@ def main(send_gpio=False):
             if recorder:
                 recorder.write({'kind':'recognition_reset','ticks_ms':now,'frame':frame_id}, True)
 
-        print('[FIELD]', VERSION, 'GPIO:', bool(link), 'SD:', recorder.path if recorder else 'off')
+        print('[FIELD]', VERSION, 'GPIO:', bool(link), 'SD:', recorder.path if recorder else 'off',
+              'Record:', 'full' if C.FIELD_RECORD_FULL else 'events')
         while True:
             os.exitpoint()
             started = time.ticks_ms()
@@ -197,6 +209,8 @@ def main(send_gpio=False):
             if time.ticks_diff(now,warmed_at)>=1500:
                 result = vision.update(frame,now)
                 events = result['events']
+            detected_at = time.ticks_ms()
+            if result is not None:
                 for event in events:
                     publish_event(link,event,send_gpio)
                     if link and event['gpio'] == 'fault':
@@ -214,38 +228,42 @@ def main(send_gpio=False):
                     if not parking_sent:
                         gpio_send_failed = True
                     print('[P RETRY]',retry)
-                if recorder:
-                    saved = recorder.image(frame,frame_id,bool(events))
-                    recorder.write({'kind':'frame','ticks_ms':now,'frame':frame_id,'mode':'field',
-                                    'detection':{'turn':result['turn'],'parking':result['parking'],
-                                                 'colors':result['colors']},
-                                    'tracking':result['tracking'],'sequence':result['sequence'],
-                                    'events':events,'image':saved},bool(events))
             if link:
                 link.poll()
+            sent_at = time.ticks_ms()
+            if recorder and result is not None and (events or C.FIELD_RECORD_FULL):
+                record = {'kind':'frame','ticks_ms':now,'frame':frame_id,'mode':'field',
+                          'sequence':result['sequence'],'events':events}
+                if C.FIELD_RECORD_FULL:
+                    record['detection'] = {'turn':result['turn'],'parking':result['parking'],
+                                           'colors':result['colors']}
+                    record['tracking'] = result['tracking']
+                    record['image'] = recorder.image(frame,frame_id,bool(events))
+                recorder.write(record,bool(events))
             del frame
-            rate_count += 1
-            elapsed = time.ticks_diff(now,rate_at)
-            if elapsed>=1000:
-                fps = rate_count*1000/elapsed
-                rate_count,rate_at = 0,now
-                gc.collect()
+            recorded_at = time.ticks_ms()
             candidates = result['colors']['candidates'] if result else ()
             parking_box = result['parking']['box'] if result else None
-            if frame_id==0 or redraw or events or candidates or parking_box or boxes_visible or time.ticks_diff(now,last_draw)>=300:
-                panel = panels[index]
+            boxes = tuple((item['label'],tuple(item['box'])) for item in candidates)
+            if parking_box:
+                boxes += (('P',tuple(parking_box)),)
+            if boxes != last_boxes:
+                panel = box_panels[box_index]
                 panel.clear()
-                for item in candidates:
-                    label = item['label']
-                    draw_labeled_box(panel,item['box'],LABELS[label],BOX_COLORS[label],width)
-                if parking_box:
-                    draw_labeled_box(panel,parking_box,'P',(90,230,255),width)
-                panel.draw_rectangle(0,height,C.WIDTH,C.HEIGHT-height,color=(13,26,41),fill=True)
+                for label,box in boxes:
+                    draw_labeled_box(panel,box,tags[label],BOX_COLORS[label],width)
+                Display.show_image(panel,layer=Display.LAYER_OSD0)
+                box_index = (box_index+1)%len(box_panels)
+                last_boxes = boxes
+                box_updates += 1
+            if redraw or events or time.ticks_diff(recorded_at,last_status)>=C.FIELD_STATUS_MS:
+                panel = status_panels[status_index]
+                panel.draw_rectangle(0,0,C.WIDTH,status_height,color=PANEL_BG,fill=True)
                 status_x = C.WIDTH // 2 + 8
                 arrow = LABELS.get(vision.last_turn,'--')
                 sequence = ''.join(LABELS[c] for c in vision.tracker.sequence) or '--'
                 tx = 'GPIO已启用' if link and not link.error else 'GPIO未输出'
-                panel.draw_string_advanced(status_x,height+8,24,'转向 '+arrow+'  色序 '+sequence,color=(241,246,251))
+                panel.draw_string_advanced(status_x,8,24,'转向 '+arrow+'  色序 '+sequence,color=(241,246,251))
                 status = '预热中' if result is None else '顺序待复核' if vision.tracker.sequence_uncertain else tx
                 if recorder and recorder.error:
                     status = 'SD记录停止'
@@ -256,24 +274,36 @@ def main(send_gpio=False):
                         status = '识别已重开'
                     else:
                         reset_at = None
-                labels = {item['label'] for item in candidates}
-                visible = ''.join(LABELS[c] for c in COLORS if c in labels) or '--'
-                panel.draw_string_advanced(status_x,height+48,22,'色块 '+visible,color=(241,246,251))
+                visible = ''.join(LABELS[item['label']] for item in candidates[:4]) or '--'
+                panel.draw_string_advanced(status_x,48,22,'色块 '+visible,color=(241,246,251))
                 if vision.parking_seen:
                     parking_text = 'P 已发送' if parking_sent else 'P 已识别'
-                    panel.draw_string_advanced(C.WIDTH-124,height+48,24,parking_text,color=(90,230,255))
-                panel.draw_string_advanced(status_x,height+83,22,'%s  %.1f FPS' % (status,fps),color=(180,217,242))
-                Display.show_image(panel,layer=Display.LAYER_OSD0)
-                index = (index+1)%len(panels)
-                last_draw, redraw, boxes_visible = now, False, bool(candidates or parking_box)
+                    panel.draw_string_advanced(C.WIDTH-124,48,24,parking_text,color=BOX_COLORS['P'])
+                panel.draw_string_advanced(status_x,83,22,'%s  %.1f FPS' % (status,fps),color=(180,217,242))
+                Display.show_image(panel,y=height,layer=Display.LAYER_OSD1)
+                status_index = (status_index+1)%len(status_panels)
+                last_status, redraw = time.ticks_ms(), False
+            finished_at = time.ticks_ms()
+            if result is not None:
+                rate_count += 1
+                perf[0] += time.ticks_diff(now,started)
+                perf[1] += time.ticks_diff(detected_at,now)
+                perf[2] += time.ticks_diff(sent_at,detected_at)
+                perf[3] += time.ticks_diff(recorded_at,sent_at)
+                perf[4] += time.ticks_diff(finished_at,recorded_at)
+                period = time.ticks_diff(finished_at,rate_at)
+                if period >= 2000:
+                    fps = rate_count*1000/period
+                    averages = tuple(ms/rate_count for ms in perf)
+                    print('[FIELD PERF] %.1f FPS box_updates/s=%.1f ms/frame capture=%.1f vision=%.1f gpio=%.1f sd=%.1f osd=%.1f' %
+                          ((fps,box_updates*1000/period) + averages))
+                    rate_count,box_updates,rate_at = 0,0,finished_at
+                    perf = [0, 0, 0, 0, 0]
+                    gc.collect()
+            else:
+                rate_at = finished_at
+                box_updates = 0
             frame_id += 1
-            while True:
-                now = time.ticks_ms()
-                delay = C.FIELD_PERIOD_MS-time.ticks_diff(now,started)
-                if delay <= 0:
-                    break
-                time.sleep_ms(min(10, delay))
-                poll_restart(time.ticks_ms())
     except KeyboardInterrupt:
         print('[FIELD] stopped')
     finally:

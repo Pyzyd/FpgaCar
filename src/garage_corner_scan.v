@@ -12,6 +12,11 @@ module garage_corner_scan (
                      LEG_NEAR=5, LEG_FAR=6, SCORE=7, NEXT_PIXEL=8,
                      CHECK_PAIR=9, CHECK_TAPE=10, REPORT=11;
     localparam integer CORNER_SCORE = 100;
+    localparam integer SCAN_TOP = 62, SCAN_BOTTOM = 165;
+    localparam integer LEFT_X_MAX = 110, RIGHT_X_MIN = 209;
+    localparam integer PAIR_MIN_WIDTH = 205, PAIR_MAX_WIDTH = 300;
+    localparam integer PAIR_MIN_Y_SUM = 148, PAIR_MAX_Y_SUM = 320;
+    localparam signed [10:0] PAIR_MIN_DY = -11'sd24, PAIR_MAX_DY = 11'sd44;
     reg [3:0] state;
     // 保留符号位，防止边缘外的采样坐标绕回另一侧。
     reg signed [10:0] x, y;
@@ -34,10 +39,11 @@ module garage_corner_scan (
         {2'b0, left_x} + (tape_section == 0 ? (width >>> 2) :
                          tape_section == 1 ? (width >>> 1) :
                          width - (width >>> 2));
+    // Sign-extend the left ordinate so a rising tape uses signed right shifts.
     wire signed [10:0] tape_y =
-        {3'b0, left_y} + (tape_section == 0 ? (height_diff >>> 2) :
-                         tape_section == 1 ? (height_diff >>> 1) :
-                         height_diff - (height_diff >>> 2));
+        $signed({3'b0, left_y}) + (tape_section == 0 ? (height_diff >>> 2) :
+                                  tape_section == 1 ? (height_diff >>> 1) :
+                                  height_diff - (height_diff >>> 2));
 
     reg signed [10:0] test_x, test_y;
     reg vertical;
@@ -106,9 +112,9 @@ module garage_corner_scan (
     wire [9:0] score = (best_leg >= 12 && raw_score > {2'b0,outside_h}) ?
                         raw_score - {2'b0,outside_h} : 10'd0;
     wire plausible_pair = best_left >= CORNER_SCORE && best_right >= CORNER_SCORE &&
-                          width >= 245 && width <= 290 &&
-                          center_y_sum >= 177 && center_y_sum <= 302 &&
-                          height_diff >= -11'sd8 && height_diff <= 11'sd37;
+                          width >= PAIR_MIN_WIDTH && width <= PAIR_MAX_WIDTH &&
+                          center_y_sum >= PAIR_MIN_Y_SUM && center_y_sum <= PAIR_MAX_Y_SUM &&
+                          height_diff >= PAIR_MIN_DY && height_diff <= PAIR_MAX_DY;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -145,7 +151,7 @@ module garage_corner_scan (
             frame_done <= 0;
             case (state)
                 WAIT_FRAME: if (frame_valid && !frame_release) begin
-                    x <= 8; y <= 76;
+                    x <= 8; y <= SCAN_TOP;
                     best_left <= 0; best_right <= 0; best_any <= 0;
                     right_side <= 0; pair_ok <= 0;
                     state <= CENTER;
@@ -196,11 +202,11 @@ module garage_corner_scan (
                 end
                 SCORE: begin
                     if (score > best_any) best_any <= score;
-                    if (!right_side && x <= 80 && score > best_left) begin
+                    if (!right_side && x <= LEFT_X_MAX && score > best_left) begin
                         best_left <= score;
                         left_x <= x[8:0]; left_y <= y[7:0];
                     end
-                    if (right_side && x >= 239 && score > best_right) begin
+                    if (right_side && x >= RIGHT_X_MIN && score > best_right) begin
                         best_right <= score;
                         right_x <= x[8:0]; right_y <= y[7:0];
                     end
@@ -213,7 +219,7 @@ module garage_corner_scan (
                 end
                 NEXT_PIXEL: begin
                     right_side <= 0;
-                    if (x == 311 && y == 160) state <= CHECK_PAIR;
+                    if (x == 311 && y == SCAN_BOTTOM) state <= CHECK_PAIR;
                     else begin
                         if (x == 311) begin x <= 8; y <= y + 1'b1; end
                         else x <= x + 1'b1;
